@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./Download:/app/Download
+      - ./logs:/app/logs
+      - ./zip_settings:/app/zip_settings
+      - ./pyrogram_uploader.session:/app/pyrogram_uploader.session
+    restart: unless-stopped
+

@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-downloader-bot"
+version = "0.1.0"
+description = "Async Telegram downloader bot with torrent, yt-dlp, archive, and upload workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "TBD" }
+authors = [{ name = "Project Maintainers" }]
+dependencies = [
+  "python-telegram-bot>=20.0",
+  "pyrogram>=2.0",
+  "tgcrypto",
+  "yt-dlp",
+  "Pillow",
+  "pyzipper",
+  "py7zr",
+  "opencv-python",
+  "numpy",
+  "httpx>=0.24.0",
+  "python-dotenv>=1.0.0",
+  "beautifulsoup4>=4.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black>=24.0",
+  "isort>=5.13",
+  "mypy>=1.10",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+telegram-downloader-bot = "app.bot.telegram_bot:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = "app/bot/telegram_bot.py"
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip = ["app/bot/telegram_bot.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["app", "tests"]
+extend-exclude = ["app/bot/telegram_bot.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "C4", "SIM"]
+ignore = [
+  "E501",  # Black handles wrapping; legacy strings are intentionally long.
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["app/bot/telegram_bot.py"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

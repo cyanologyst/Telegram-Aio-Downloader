@@ -1,0 +1,13 @@
+python-telegram-bot>=20.0
+pyrogram>=2.0
+tgcrypto
+yt-dlp
+Pillow
+pyzipper
+py7zr
+opencv-python
+numpy
+httpx>=0.24.0
+python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
+
