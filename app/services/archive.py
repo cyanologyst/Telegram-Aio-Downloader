@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Zipping utilities module - integrates file archiving functionality for the downloader bot.
 Creates a single archive split into fixed-size volumes (WinRAR / 7-Zip style).
@@ -6,14 +5,15 @@ Creates a single archive split into fixed-size volumes (WinRAR / 7-Zip style).
 
 from __future__ import annotations
 
-import re
-import time
 import asyncio
-import zipfile
+import re
 import shutil
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Callable
+import time
+import zipfile
 from collections import defaultdict
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 try:
     import pyzipper
@@ -30,23 +30,46 @@ MAX_ZIP_PART_SIZE = 1 * 1024 * 1024 * 1024  # 1GB
 VOLUME_PART_RE = re.compile(r"\.(zip|7z)\.\d{3}$", re.IGNORECASE)
 
 WINDOWS_RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL",
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
 
 ALREADY_COMPRESSED_EXTS = {
-    ".zip", ".7z", ".rar", ".gz", ".bz2", ".xz",
-    ".jpg", ".jpeg", ".png", ".gif", ".webp",
-    ".mp4", ".mkv", ".avi", ".mov", ".mp3", ".ogg", ".wav", ".flac",
-    ".pdf", ".apk", ".iso", ".webm",
+    ".zip",
+    ".7z",
+    ".rar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".mp3",
+    ".ogg",
+    ".wav",
+    ".flac",
+    ".pdf",
+    ".apk",
+    ".iso",
+    ".webm",
 }
 
-ZIP_LOCKS: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+ZIP_LOCKS: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def sanitize_filename(name: str) -> str:
     import re as _re
+
     name = (name or "").strip().replace("\x00", "")
     name = _re.sub(r'[\\/:\*\?"<>\|]+', "_", name)
     name = _re.sub(r"\s+", " ", name)
@@ -74,7 +97,7 @@ def unique_path(directory: Path, filename: str) -> Path:
         i += 1
 
 
-def human_size(n: Optional[int]) -> str:
+def human_size(n: int | None) -> str:
     if n is None:
         return "?"
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -90,7 +113,7 @@ def is_volume_part(path: Path) -> bool:
     return bool(VOLUME_PART_RE.search(path.name.lower()))
 
 
-def filter_files_for_archiving(files: List[Path]) -> List[Path]:
+def filter_files_for_archiving(files: list[Path]) -> list[Path]:
     result = []
     for f in files:
         if is_volume_part(f):
@@ -99,7 +122,7 @@ def filter_files_for_archiving(files: List[Path]) -> List[Path]:
     return result
 
 
-def check_password_support(password: Optional[str], archive_format: str) -> Optional[str]:
+def check_password_support(password: str | None, archive_format: str) -> str | None:
     if not password:
         return None
     fmt = (archive_format or "zip").lower()
@@ -112,14 +135,14 @@ def check_password_support(password: Optional[str], archive_format: str) -> Opti
     return None
 
 
-def check_archive_format_support(archive_format: str) -> Optional[str]:
+def check_archive_format_support(archive_format: str) -> str | None:
     fmt = (archive_format or "zip").lower()
     if fmt == "7z" and py7zr is None:
         return "7z format requires py7zr. Install: pip install py7zr"
     return None
 
 
-def choose_compression(path: Path, compression_level: int = 5) -> Tuple[int, Optional[int]]:
+def choose_compression(path: Path, compression_level: int = 5) -> tuple[int, int | None]:
     ext = path.suffix.lower()
     if ext in ALREADY_COMPRESSED_EXTS:
         return zipfile.ZIP_STORED, None
@@ -140,9 +163,9 @@ def _unique_arcname(arcname: str, used_names: set) -> str:
 
 
 def get_oversized_file_warnings(
-    files_to_zip: List[Tuple[int, str, Path, int]],
+    files_to_zip: list[tuple[int, str, Path, int]],
     max_part_size: int,
-) -> List[str]:
+) -> list[str]:
     return []
 
 
@@ -160,7 +183,7 @@ class ZipProgress:
         self.error = None
         self.lock = asyncio.Lock()
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         return {
             "stage": self.stage,
             "current_file": self.current_file,
@@ -175,7 +198,7 @@ class ZipProgress:
         }
 
 
-def _collect_volume_paths(output_dir: Path, base_name: str, ext: str) -> List[Path]:
+def _collect_volume_paths(output_dir: Path, base_name: str, ext: str) -> list[Path]:
     """Collect split volumes (.ext.001, ...) or a single .ext file."""
     ext = ext.lower().lstrip(".")
     numbered = sorted(
@@ -196,15 +219,15 @@ def split_file_into_volumes(
     base_name: str,
     ext: str,
     volume_size: int,
-    progress: Optional[ZipProgress] = None,
-    on_volume_created: Optional[Callable[[Path, int, int], Tuple[bool, Optional[str]]]] = None,
-) -> List[Path]:
+    progress: ZipProgress | None = None,
+    on_volume_created: Callable[[Path, int, int], tuple[bool, str | None]] | None = None,
+) -> list[Path]:
     """
-  Split one archive file into fixed-size volumes (7-Zip / WinRAR style).
-  Example: archive.zip.001, archive.zip.002, ... (last part may be smaller).
-  
-  on_volume_created: callback(part_path, current_vol, total_vols) -> (should_delete, error_msg)
-    If callback returns (True, None), the part will be deleted after upload.
+    Split one archive file into fixed-size volumes (7-Zip / WinRAR style).
+    Example: archive.zip.001, archive.zip.002, ... (last part may be smaller).
+
+    on_volume_created: callback(part_path, current_vol, total_vols) -> (should_delete, error_msg)
+      If callback returns (True, None), the part will be deleted after upload.
     """
     volume_size = max(1, int(volume_size))
     ext = ext.lower().lstrip(".")
@@ -227,9 +250,9 @@ def split_file_into_volumes(
         progress.stage = "splitting"
         progress.total_parts = (total + volume_size - 1) // volume_size
 
-    parts: List[Path] = []
+    parts: list[Path] = []
     total_parts = (total + volume_size - 1) // volume_size
-    
+
     with open(source, "rb") as src:
         vol = 1
         while True:
@@ -242,7 +265,7 @@ def split_file_into_volumes(
                 part_path.unlink()
             with open(part_path, "wb") as out:
                 out.write(chunk)
-            
+
             # Call callback if provided (could upload and delete the part)
             should_delete = False
             if on_volume_created:
@@ -250,11 +273,11 @@ def split_file_into_volumes(
                     should_delete, _ = on_volume_created(part_path, vol, total_parts)
                 except Exception:
                     pass
-            
+
             # Only keep the part if it wasn't deleted by callback
             if not should_delete:
                 parts.append(part_path)
-            
+
             if progress:
                 progress.current_part = vol
             vol += 1
@@ -264,14 +287,14 @@ def split_file_into_volumes(
 
 
 def _write_single_zip(
-    files_to_zip: List[Tuple[int, str, Path, int]],
+    files_to_zip: list[tuple[int, str, Path, int]],
     target: Path,
-    password: Optional[str],
+    password: str | None,
     compression_level: int,
-    progress: Optional[ZipProgress],
+    progress: ZipProgress | None,
 ) -> None:
     zip_cls = zipfile.ZipFile
-    zip_kwargs: Dict[str, Any] = {}
+    zip_kwargs: dict[str, Any] = {}
     encrypted = bool(password and pyzipper is not None)
     if encrypted:
         zip_cls = pyzipper.AESZipFile
@@ -289,7 +312,7 @@ def _write_single_zip(
             compression, compresslevel = choose_compression(fp, compression_level)
             if progress:
                 progress.current_file = final_arcname
-            kwargs: Dict[str, Any] = {"arcname": final_arcname, "compress_type": compression}
+            kwargs: dict[str, Any] = {"arcname": final_arcname, "compress_type": compression}
             if compression == zipfile.ZIP_DEFLATED and compresslevel is not None:
                 kwargs["compresslevel"] = compresslevel
             zf.write(fp, **kwargs)
@@ -299,21 +322,26 @@ def _write_single_zip(
 
 
 def _create_multivolume_zip(
-    files_to_zip: List[Tuple[int, str, Path, int]],
+    files_to_zip: list[tuple[int, str, Path, int]],
     output_dir: Path,
     base_name: str,
-    password: Optional[str],
+    password: str | None,
     compression_level: int,
     volume_size: int,
-    progress: Optional[ZipProgress],
-    on_volume_created: Optional[Callable[[Path, int, int], Tuple[bool, Optional[str]]]] = None,
-) -> List[Path]:
+    progress: ZipProgress | None,
+    on_volume_created: Callable[[Path, int, int], tuple[bool, str | None]] | None = None,
+) -> list[Path]:
     temp_path = output_dir / f".__tmp_{base_name}_{int(time.time())}.zip"
     try:
         _write_single_zip(files_to_zip, temp_path, password, compression_level, progress)
         return split_file_into_volumes(
-            temp_path, output_dir, base_name, "zip", volume_size, progress,
-            on_volume_created=on_volume_created
+            temp_path,
+            output_dir,
+            base_name,
+            "zip",
+            volume_size,
+            progress,
+            on_volume_created=on_volume_created,
         )
     except Exception:
         if temp_path.exists():
@@ -322,15 +350,15 @@ def _create_multivolume_zip(
 
 
 def _create_multivolume_7z(
-    files_to_zip: List[Tuple[int, str, Path, int]],
+    files_to_zip: list[tuple[int, str, Path, int]],
     output_dir: Path,
     base_name: str,
-    password: Optional[str],
+    password: str | None,
     compression_level: int,
     volume_size: int,
-    progress: Optional[ZipProgress],
-    on_volume_created: Optional[Callable[[Path, int, int], Tuple[bool, Optional[str]]]] = None,
-) -> List[Path]:
+    progress: ZipProgress | None,
+    on_volume_created: Callable[[Path, int, int], tuple[bool, str | None]] | None = None,
+) -> list[Path]:
     if py7zr is None:
         raise RuntimeError("7z format requires py7zr. Install: pip install py7zr")
 
@@ -367,7 +395,7 @@ def _create_multivolume_7z(
     if progress:
         progress.total_parts = len(parts)
         progress.stage = "done"
-    
+
     # For 7z, call callback for each created volume (after all volumes are created)
     retained_parts = []
     if on_volume_created:
@@ -380,21 +408,21 @@ def _create_multivolume_7z(
                 retained_parts.append(part)
     else:
         retained_parts = parts
-    
+
     return retained_parts
 
 
 def make_archive_with_progress(
-    files_to_zip: List[Tuple[int, str, Path, int]],
+    files_to_zip: list[tuple[int, str, Path, int]],
     output_dir: Path,
-    zip_name: Optional[str] = None,
-    password: Optional[str] = None,
-    progress: Optional[ZipProgress] = None,
+    zip_name: str | None = None,
+    password: str | None = None,
+    progress: ZipProgress | None = None,
     max_part_size: int = MAX_ZIP_PART_SIZE,
     archive_format: str = "zip",
     compression_level: int = 5,
-    on_volume_created: Optional[Callable[[Path, int, int], Tuple[bool, Optional[str]]]] = None,
-) -> List[Path]:
+    on_volume_created: Callable[[Path, int, int], tuple[bool, str | None]] | None = None,
+) -> list[Path]:
     """
     Create one archive containing all files, split into fixed-size volumes.
 
@@ -402,7 +430,7 @@ def make_archive_with_progress(
     7z   -> name.7z.001, name.7z.002, ... (native py7zr volumes; open .001 in WinRAR)
 
     max_part_size is the volume size in bytes (from user settings).
-    
+
     on_volume_created: callback(part_path, current_vol, total_vols) -> (should_delete, error_msg)
         Called after each volume is created. If returns (True, None), volume is deleted from disk.
     """
@@ -461,16 +489,16 @@ def make_archive_with_progress(
 
 
 def make_zip_with_progress(
-    files_to_zip: List[Tuple[int, str, Path, int]],
+    files_to_zip: list[tuple[int, str, Path, int]],
     output_dir: Path,
-    zip_name: Optional[str] = None,
-    password: Optional[str] = None,
-    progress: Optional[ZipProgress] = None,
+    zip_name: str | None = None,
+    password: str | None = None,
+    progress: ZipProgress | None = None,
     max_part_size: int = MAX_ZIP_PART_SIZE,
     archive_format: str = "zip",
     compression_level: int = 5,
-    on_volume_created: Optional[Callable[[Path, int, int], Tuple[bool, Optional[str]]]] = None,
-) -> List[Path]:
+    on_volume_created: Callable[[Path, int, int], tuple[bool, str | None]] | None = None,
+) -> list[Path]:
     return make_archive_with_progress(
         files_to_zip,
         output_dir,
@@ -490,7 +518,7 @@ def render_progress_bar(percent: float, width: int = 12) -> str:
     return "\u2588" * filled + "\u2591" * (width - filled)
 
 
-def parse_indexes(tokens: List[str]) -> List[int]:
+def parse_indexes(tokens: list[str]) -> list[int]:
     result = []
     for token in tokens:
         if "-" in token:

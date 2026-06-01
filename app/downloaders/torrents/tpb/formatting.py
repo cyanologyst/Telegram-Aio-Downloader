@@ -1,12 +1,12 @@
 """Message formatting for TPB search results."""
 
-from typing import Callable, List, Dict
+from collections.abc import Callable
 
 from app.downloaders.torrents.tpb.crawler import TPBCrawler
 
 
 def format_tpb_single(
-    item: Dict,
+    item: dict,
     index: int,
     lang_func: Callable[[str], str],
 ) -> str:
@@ -16,13 +16,10 @@ def format_tpb_single(
     seeders = item.get("seeders", "?")
     leechers = item.get("leechers", "?")
 
-    return (
-        f"<b>{index}. {title}</b>\n"
-        f"💾 {size}  ·  🟢 {seeders}  ·  🔴 {leechers}"
-    )
+    return f"<b>{index}. {title}</b>\n💾 {size}  ·  🟢 {seeders}  ·  🔴 {leechers}"
 
 
-def format_tpb_detail(item: Dict, lang_func: Callable[[str], str]) -> str:
+def format_tpb_detail(item: dict, lang_func: Callable[[str], str]) -> str:
     """Format a single TPB torrent detail message."""
     title = item.get("name", "Unknown")
     size = TPBCrawler.human_size(item.get("size", "0"))

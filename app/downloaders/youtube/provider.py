@@ -30,4 +30,3 @@ class YoutubeDownloader(BaseDownloader):
             "yt-dlp execution currently lives in app.bot.telegram_bot and will be "
             "migrated behind this provider in the next extraction."
         )
-

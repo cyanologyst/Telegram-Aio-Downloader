@@ -2,7 +2,6 @@
 
 import logging
 import os
-from typing import List, Dict, Optional
 from urllib.parse import quote
 
 import httpx
@@ -41,11 +40,9 @@ class TPBCrawler:
         "other": "📦 Other",
     }
 
-    def __init__(self, api_url: Optional[str] = None):
-        self.api_url = (
-            api_url or os.getenv("TPB_API_URL", self.DEFAULT_API_URL)
-        ).rstrip("/")
-        self._client: Optional[httpx.AsyncClient] = None
+    def __init__(self, api_url: str | None = None):
+        self.api_url = (api_url or os.getenv("TPB_API_URL", self.DEFAULT_API_URL)).rstrip("/")
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -61,7 +58,7 @@ class TPBCrawler:
         query: str,
         category: str = "0",
         page: int = 0,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Search TPB. Returns a list of torrent dicts.
 
         Args:
@@ -91,7 +88,7 @@ class TPBCrawler:
             logger.error("TPB search error: %s", exc)
             return []
 
-    async def get_torrent_details(self, torrent_id: str) -> Optional[Dict]:
+    async def get_torrent_details(self, torrent_id: str) -> dict | None:
         """Fetch torrent details by TPB id."""
         try:
             resp = await self.client.get(
@@ -114,11 +111,7 @@ class TPBCrawler:
             "udp://tracker.leechers-paradise.org:6969/announce",
         ]
         tr_params = "".join(f"&tr={quote(t)}" for t in trackers)
-        return (
-            f"magnet:?xt=urn:btih:{info_hash}"
-            f"&dn={quote(name)}"
-            f"{tr_params}"
-        )
+        return f"magnet:?xt=urn:btih:{info_hash}&dn={quote(name)}{tr_params}"
 
     @staticmethod
     def human_size(size_bytes: str) -> str:

@@ -1,2 +1,1 @@
 """Telegram bot application wiring."""
-

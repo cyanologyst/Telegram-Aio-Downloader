@@ -26,22 +26,24 @@ def tpb_categories_keyboard(query: str) -> InlineKeyboardMarkup:
 
 def tpb_result_keyboard(torrent_id: str) -> InlineKeyboardMarkup:
     """Compact action buttons for a single TPB result."""
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                text="📥",
-                callback_data=f"tpb_dl_{torrent_id}",
-            ),
-            InlineKeyboardButton(
-                text="🧲",
-                callback_data=f"tpb_magnet_{torrent_id}",
-            ),
-            InlineKeyboardButton(
-                text="ℹ️",
-                callback_data=f"tpb_info_{torrent_id}",
-            ),
-        ],
-    ])
+            [
+                InlineKeyboardButton(
+                    text="📥",
+                    callback_data=f"tpb_dl_{torrent_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🧲",
+                    callback_data=f"tpb_magnet_{torrent_id}",
+                ),
+                InlineKeyboardButton(
+                    text="ℹ️",
+                    callback_data=f"tpb_info_{torrent_id}",
+                ),
+            ],
+        ]
+    )
 
 
 def tpb_header_keyboard(
@@ -81,15 +83,17 @@ def tpb_header_keyboard(
 
 def tpb_detail_keyboard(torrent_id: str) -> InlineKeyboardMarkup:
     """Keyboard shown below a TPB detail message."""
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                text="📥 Download",
-                callback_data=f"tpb_dl_{torrent_id}",
-            ),
-            InlineKeyboardButton(
-                text="🧲 Magnet",
-                callback_data=f"tpb_magnet_{torrent_id}",
-            ),
-        ],
-    ])
+            [
+                InlineKeyboardButton(
+                    text="📥 Download",
+                    callback_data=f"tpb_dl_{torrent_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🧲 Magnet",
+                    callback_data=f"tpb_magnet_{torrent_id}",
+                ),
+            ],
+        ]
+    )

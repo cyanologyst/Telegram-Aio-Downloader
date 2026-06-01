@@ -1,5 +1,4 @@
 import pytest
-
 from app.downloaders.base import DownloadRequest
 from app.downloaders.youtube.provider import YoutubeDownloader
 
@@ -17,4 +16,3 @@ async def test_youtube_provider_download_is_explicitly_not_migrated(tmp_path):
 
     with pytest.raises(NotImplementedError):
         await provider.download(DownloadRequest(url="https://youtu.be/abc", destination=tmp_path))
-

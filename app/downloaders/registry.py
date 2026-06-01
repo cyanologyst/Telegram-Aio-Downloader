@@ -29,4 +29,3 @@ class DownloaderRegistry:
             if await provider.can_handle(url):
                 return provider
         return None
-

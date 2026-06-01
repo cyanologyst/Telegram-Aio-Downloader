@@ -19,4 +19,3 @@ class Aria2TorrentDownloader(BaseDownloader):
             "aria2 process management currently lives in app.bot.telegram_bot and "
             "will be migrated behind this provider in the next extraction."
         )
-

@@ -14,9 +14,9 @@ Usage:
     python thumbnail_grid.py input_video.mp4 output.jpg
 """
 
-import cv2
-import math
 import sys
+
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -82,10 +82,7 @@ def draw_timestamp(img, timestamp):
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
 
-    overlay_draw.rectangle(
-        [(0, bar_y), (THUMB_WIDTH, THUMB_HEIGHT)],
-        fill=(0, 0, 0, 160)
-    )
+    overlay_draw.rectangle([(0, bar_y), (THUMB_WIDTH, THUMB_HEIGHT)], fill=(0, 0, 0, 160))
 
     img = Image.alpha_composite(img.convert("RGBA"), overlay)
 
@@ -122,28 +119,14 @@ def generate_contact_sheet(video_path, output_path):
     print(f"Video duration: {duration:.2f} seconds")
 
     # Canvas size
-    sheet_width = (
-        COLUMNS * THUMB_WIDTH +
-        (COLUMNS + 1) * PADDING
-    )
+    sheet_width = COLUMNS * THUMB_WIDTH + (COLUMNS + 1) * PADDING
 
-    sheet_height = (
-        ROWS * THUMB_HEIGHT +
-        (ROWS + 1) * PADDING
-    )
+    sheet_height = ROWS * THUMB_HEIGHT + (ROWS + 1) * PADDING
 
-    sheet = Image.new(
-        "RGB",
-        (sheet_width, sheet_height),
-        BACKGROUND_COLOR
-    )
+    sheet = Image.new("RGB", (sheet_width, sheet_height), BACKGROUND_COLOR)
 
     # Evenly spaced timestamps
-    timestamps = np.linspace(
-        0,
-        duration,
-        TOTAL_FRAMES + 2
-    )[1:-1]
+    timestamps = np.linspace(0, duration, TOTAL_FRAMES + 2)[1:-1]
 
     for idx, ts in enumerate(timestamps):
         print(f"Processing thumbnail {idx + 1}/{TOTAL_FRAMES}")

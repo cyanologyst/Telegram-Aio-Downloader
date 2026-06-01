@@ -1,2 +1,1 @@
 """Torrent downloader providers."""
-

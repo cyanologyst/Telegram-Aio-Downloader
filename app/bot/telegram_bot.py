@@ -27,6 +27,8 @@ except ImportError:
     def load_dotenv(*args, **kwargs):
         return False
 
+from app.bot.dashboard import start_dashboard_server, stop_dashboard_server
+
 load_dotenv()
 
 try:
@@ -200,6 +202,11 @@ ALLOWED_USER_IDS = {
 
 # Auto cleanup
 AUTO_CLEANUP_DAYS = int(os.getenv("AUTO_CLEANUP_DAYS", "7") or "7")
+
+# Web dashboard configuration
+WEB_DASHBOARD_ENABLE = os.getenv("WEB_DASHBOARD_ENABLE", "false").strip().lower() in {"1", "true", "yes", "on"}
+WEB_DASHBOARD_HOST = os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1").strip()
+WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080") or "8080")
 
 # =========================================================
 # Language Support
@@ -4948,6 +4955,7 @@ async def post_shutdown(app: Application):
         zip_executor.shutdown(wait=True)
         zip_executor = None
     
+    stop_dashboard_server(getattr(app, "dashboard_server", None))
     await stop_pyrogram_client()
 
 
@@ -4991,6 +4999,22 @@ def main():
         .post_shutdown(post_shutdown)
         .build()
     )
+
+    if WEB_DASHBOARD_ENABLE:
+        try:
+            app.dashboard_server = start_dashboard_server(
+                WEB_DASHBOARD_HOST,
+                WEB_DASHBOARD_PORT,
+                download_jobs,
+                upload_jobs,
+            )
+            logger.info(
+                "✅ Web dashboard started at http://%s:%s",
+                WEB_DASHBOARD_HOST,
+                WEB_DASHBOARD_PORT,
+            )
+        except Exception as exc:
+            logger.warning("Unable to start web dashboard: %s", exc)
 
     # Core commands
     app.add_handler(CommandHandler("start", start_cmd))

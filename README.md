@@ -49,6 +49,9 @@ Useful optional variables:
 - `FFMPEG_BIN`: path to `ffmpeg`.
 - `TPB_API_URL`: optional API Bay mirror.
 - `AUTO_CLEANUP_DAYS`: cleanup threshold for old temporary files.
+- `WEB_DASHBOARD_ENABLE`: `true` or `false` to enable the local web dashboard.
+- `WEB_DASHBOARD_HOST`: dashboard bind host (default `127.0.0.1`).
+- `WEB_DASHBOARD_PORT`: dashboard port (default `8080`).
 
 ## Development
 

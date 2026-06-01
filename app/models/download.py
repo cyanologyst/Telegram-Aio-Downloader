@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Mapping
 
 
 class DownloadStatus(StrEnum):
@@ -35,4 +35,3 @@ class DownloadResult:
     title: str
     artifacts: tuple[DownloadArtifact, ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
-

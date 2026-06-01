@@ -1,7 +1,7 @@
 """PTB handlers for The Pirate Bay crawler."""
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -67,14 +67,16 @@ class TPBHandlers:
         await message.reply_text(
             f"🏴‍☠️ <b>{self._lang(user_id, 'tpb_welcome')}</b>\n\n"
             f"{self._lang(user_id, 'tpb_send_query')}",
-            reply_markup=InlineKeyboardMarkup([
+            reply_markup=InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        text=self._lang(user_id, 'home_btn'),
-                        callback_data="menu_home",
-                    ),
-                ],
-            ]),
+                    [
+                        InlineKeyboardButton(
+                            text=self._lang(user_id, "home_btn"),
+                            callback_data="menu_home",
+                        ),
+                    ],
+                ]
+            ),
             disable_web_page_preview=True,
         )
 
@@ -164,14 +166,16 @@ class TPBHandlers:
         await query.edit_message_text(
             f"🏴‍☠️ <b>{self._lang(user_id, 'tpb_welcome')}</b>\n\n"
             f"{self._lang(user_id, 'tpb_send_query')}",
-            reply_markup=InlineKeyboardMarkup([
+            reply_markup=InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        text=self._lang(user_id, 'home_btn'),
-                        callback_data="menu_home",
-                    ),
-                ],
-            ]),
+                    [
+                        InlineKeyboardButton(
+                            text=self._lang(user_id, "home_btn"),
+                            callback_data="menu_home",
+                        ),
+                    ],
+                ]
+            ),
             disable_web_page_preview=True,
         )
 
@@ -235,9 +239,7 @@ class TPBHandlers:
 
         item = await self.crawler.get_torrent_details(torrent_id)
         if not item or not item.get("info_hash"):
-            await query.edit_message_text(
-                f"❌ {self._lang(user_id, 'no_magnet_stored')}"
-            )
+            await query.edit_message_text(f"❌ {self._lang(user_id, 'no_magnet_stored')}")
             return
 
         magnet = TPBCrawler.build_magnet(
@@ -261,13 +263,10 @@ class TPBHandlers:
                     )
             except Exception as exc:
                 logger.error("TPB download error: %s", exc)
-                await query.edit_message_text(
-                    f"❌ {self._lang(user_id, 'error_occurred')}: {exc}"
-                )
+                await query.edit_message_text(f"❌ {self._lang(user_id, 'error_occurred')}: {exc}")
         else:
             await query.edit_message_text(
-                f"🧲 <code>{magnet}</code>\n\n"
-                f"{self._lang(user_id, 'tpb_paste_to_download')}"
+                f"🧲 <code>{magnet}</code>\n\n{self._lang(user_id, 'tpb_paste_to_download')}"
             )
 
     # ------------------------------------------------------------------
@@ -290,12 +289,16 @@ class TPBHandlers:
         if not all_results:
             await header_message.edit_text(
                 f"❌ {self._lang(user_id, 'no_results')}",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        text="🔍",
-                        callback_data="tpb_newsearch",
-                    ),
-                ]]),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                text="🔍",
+                                callback_data="tpb_newsearch",
+                            ),
+                        ]
+                    ]
+                ),
             )
             return
 

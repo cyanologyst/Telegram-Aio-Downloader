@@ -49,7 +49,9 @@ def setup_pyrogram_forwarded_downloads(client, telegram_dir: str):
 
         settings = get_user_settings(user_id)
         if not settings.get("auto_download_forwarded_posts", False):
-            logger.info("Forwarded media ignored because auto-download is disabled for user %s", user_id)
+            logger.info(
+                "Forwarded media ignored because auto-download is disabled for user %s", user_id
+            )
             return
 
         kind = "file"

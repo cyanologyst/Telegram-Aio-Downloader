@@ -24,4 +24,3 @@ def test_load_settings_parses_user_ids(tmp_path, monkeypatch):
     assert settings.api_hash == "test-hash"
     assert settings.allowed_user_ids == frozenset({10, 20})
     assert settings.auto_cleanup_days == 14
-

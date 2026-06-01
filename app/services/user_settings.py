@@ -1,13 +1,11 @@
-# -*- coding: utf-8 -*-
 """
 Zip Settings Manager - Handles user preferences for zipping operations
 """
 
-import json
-import os
-from pathlib import Path
-from typing import Dict, Any, Optional
 import asyncio
+import json
+from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 SETTINGS_DIR = BASE_DIR / "zip_settings"
@@ -26,7 +24,7 @@ DEFAULT_SETTINGS = {
 }
 
 # Per-user locks to prevent concurrent settings updates
-SETTINGS_LOCKS: Dict[int, asyncio.Lock] = {}
+SETTINGS_LOCKS: dict[int, asyncio.Lock] = {}
 
 
 def get_settings_path(user_id: int) -> Path:
@@ -41,32 +39,32 @@ def get_lock(user_id: int) -> asyncio.Lock:
     return SETTINGS_LOCKS[user_id]
 
 
-def get_user_settings(user_id: int) -> Dict[str, Any]:
+def get_user_settings(user_id: int) -> dict[str, Any]:
     """Load user settings from disk."""
     settings_path = get_settings_path(user_id)
-    
+
     if settings_path.exists():
         try:
-            with open(settings_path, 'r', encoding='utf-8') as f:
+            with open(settings_path, encoding="utf-8") as f:
                 user_settings = json.load(f)
                 # Merge with defaults to ensure all keys exist
                 merged = DEFAULT_SETTINGS.copy()
                 merged.update(user_settings)
                 return merged
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             return DEFAULT_SETTINGS.copy()
-    
+
     return DEFAULT_SETTINGS.copy()
 
 
-def save_user_settings(user_id: int, settings: Dict[str, Any]) -> bool:
+def save_user_settings(user_id: int, settings: dict[str, Any]) -> bool:
     """Save user settings to disk."""
     try:
         settings_path = get_settings_path(user_id)
-        with open(settings_path, 'w', encoding='utf-8') as f:
+        with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
         return True
-    except IOError as e:
+    except OSError as e:
         print(f"Error saving settings for user {user_id}: {e}")
         return False
 
@@ -76,15 +74,15 @@ async def update_setting(user_id: int, key: str, value: Any) -> bool:
     lock = get_lock(user_id)
     async with lock:
         settings = get_user_settings(user_id)
-        
+
         if key not in DEFAULT_SETTINGS:
             return False
-        
+
         settings[key] = value
         return save_user_settings(user_id, settings)
 
 
-async def get_setting(user_id: int, key: str) -> Optional[Any]:
+async def get_setting(user_id: int, key: str) -> Any | None:
     """Get a single setting value."""
     settings = get_user_settings(user_id)
     return settings.get(key)
@@ -93,11 +91,11 @@ async def get_setting(user_id: int, key: str) -> Optional[Any]:
 def format_settings_text(user_id: int) -> str:
     """Format user settings for display."""
     settings = get_user_settings(user_id)
-    
+
     # Convert bytes to human readable
     part_size = settings.get("zip_part_size", DEFAULT_SETTINGS["zip_part_size"])
     part_size_mb = part_size // (1024 * 1024)
-    
+
     lines = [
         "⚙️ Zip Settings",
         "",
@@ -110,13 +108,13 @@ def format_settings_text(user_id: int) -> str:
         f"📥 Auto-download forwarded posts: {'✅' if settings.get('auto_download_forwarded_posts') else '❌'}",
         f"🔨 Compression level: {settings.get('compression_level', 3)}/9",
     ]
-    
+
     # Add performance note for 7z with high compression
-    method = settings.get('zip_method', 'zip').lower()
-    comp_level = settings.get('compression_level', 3)
-    if method == '7z' and comp_level >= 7:
+    method = settings.get("zip_method", "zip").lower()
+    comp_level = settings.get("compression_level", 3)
+    if method == "7z" and comp_level >= 7:
         lines.append("⚠️ Note: 7z level 7+ is CPU-intensive, bot may be slower")
-    
+
     return "\n".join(lines)
 
 

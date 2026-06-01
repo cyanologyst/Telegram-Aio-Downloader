@@ -19,4 +19,3 @@ async def test_registry_resolves_first_matching_provider():
 
     assert await registry.resolve("dummy:test") is provider
     assert await registry.resolve("https://example.com") is None
-

@@ -1,2 +1,1 @@
 """Configuration loading and validation."""
-
