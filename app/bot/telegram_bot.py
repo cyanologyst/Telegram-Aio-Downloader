@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
 
-import os
-import re
-import math
-import time
-import shutil
-import subprocess
 import asyncio
-import mimetypes
-import uuid
 import hashlib
 import logging
+import math
+import mimetypes
+import os
+import re
+import shutil
+import subprocess
+import sys
 import tempfile
+import time
+import uuid
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from datetime import datetime
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from datetime import datetime
 from urllib.parse import unquote
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-import sys
 
 # Load environment variables from .env file before any config is read.
 try:
@@ -37,64 +37,64 @@ try:
 except ImportError:
     HAS_PIL = False
 
+import yt_dlp
+from pyrogram import Client
+from pyrogram.errors import FloodWait, RPCError
 from telegram import (
-    Update,
-    InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
+    Update,
 )
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 from telegram.request import HTTPXRequest
-
-from pyrogram import Client
-from pyrogram.errors import RPCError, FloodWait
-import yt_dlp
-
-# Import thumbnail generation module
-from app.services.thumbnails import generate_contact_sheet
-
-# Import zipping utilities module
-from app.services.archive import (
-    ZipProgress,
-    make_archive_with_progress,
-    render_progress_bar,
-    ZIP_LOCKS,
-    MAX_ZIP_PART_SIZE,
-    filter_files_for_archiving,
-    get_oversized_file_warnings,
-    check_password_support,
-    check_archive_format_support,
-    human_size as zip_human_size,
-    sanitize_filename as zip_sanitize,
-)
-
-# Import zip settings module
-from app.services.user_settings import (
-    get_user_settings,
-    save_user_settings,
-    update_setting,
-    get_setting,
-    format_settings_text,
-    validate_password,
-    validate_part_size,
-    validate_compression_level,
-)
-
-# Import post downloader module for handling forwarded posts
-from app.handlers.forwarded_media import setup_pyrogram_forwarded_downloads
 
 # Import TPB crawler subsystem
 from app.downloaders.torrents.tpb import TPBCrawler, TPBHandlers
 from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
 
-from telegram.error import TimedOut, NetworkError, BadRequest
+# Import post downloader module for handling forwarded posts
+from app.handlers.forwarded_media import setup_pyrogram_forwarded_downloads
+
+# Import zipping utilities module
+from app.services.archive import (
+    MAX_ZIP_PART_SIZE,
+    ZIP_LOCKS,
+    ZipProgress,
+    check_archive_format_support,
+    check_password_support,
+    filter_files_for_archiving,
+    get_oversized_file_warnings,
+)
+from app.services.archive import human_size as zip_human_size
+from app.services.archive import (
+    make_archive_with_progress,
+    render_progress_bar,
+)
+from app.services.archive import sanitize_filename as zip_sanitize
+
+# Import thumbnail generation module
+from app.services.thumbnails import generate_contact_sheet
+
+# Import zip settings module
+from app.services.user_settings import (
+    format_settings_text,
+    get_setting,
+    get_user_settings,
+    save_user_settings,
+    update_setting,
+    validate_compression_level,
+    validate_part_size,
+    validate_password,
+)
 
 MAX_ZIP_FILES = float('inf')  # No limit on number of files to zip
 BOT_MAX_DOCUMENT_BYTES = 49 * 1024 * 1024  # Telegram Bot API document limit
