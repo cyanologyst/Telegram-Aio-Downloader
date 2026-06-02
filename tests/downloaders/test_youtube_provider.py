@@ -1,5 +1,4 @@
 import pytest
-
 from app.downloaders.base import DownloadRequest
 from app.downloaders.youtube.provider import YoutubeDownloader
 
