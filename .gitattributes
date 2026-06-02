@@ -1,0 +1,5 @@
+# Enforce LF line endings for python files to keep CI stable
+*.py text eol=lf
+*.pyi text eol=lf
+tests/** text eol=lf
+app/** text eol=lf
