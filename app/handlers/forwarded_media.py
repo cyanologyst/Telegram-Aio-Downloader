@@ -7,6 +7,7 @@ Uses Pyrogram's MTProto media download path:
 
 import logging
 import re
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -113,10 +114,8 @@ def setup_pyrogram_forwarded_downloads(client, telegram_dir: str):
         except Exception as exc:
             logger.error("Forwarded media download failed: %s", exc)
             if target_path.exists():
-                try:
+                with suppress(Exception):
                     target_path.unlink()
-                except Exception:
-                    pass
             await message.reply(f"❌ Failed to download forwarded media: {exc}")
 
     handler = MessageHandler(

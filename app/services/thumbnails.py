@@ -90,7 +90,7 @@ def draw_timestamp(img, timestamp):
 
     try:
         font = ImageFont.truetype("arial.ttf", 18)
-    except:
+    except Exception:
         font = ImageFont.load_default()
 
     text_bbox = draw.textbbox((0, 0), timestamp, font=font)

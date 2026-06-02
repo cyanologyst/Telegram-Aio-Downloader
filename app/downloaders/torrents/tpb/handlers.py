@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+from contextlib import suppress
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -44,10 +45,8 @@ class TPBHandlers:
         """Delete old result messages (keep header)."""
         msg_ids = context.user_data.pop("tpb_result_ids", [])
         for mid in msg_ids:
-            try:
+            with suppress(Exception):
                 await context.bot.delete_message(chat_id, mid)
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # Commands

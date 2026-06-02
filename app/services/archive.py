@@ -12,6 +12,7 @@ import time
 import zipfile
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -237,13 +238,11 @@ def split_file_into_volumes(
         final = unique_path(output_dir, f"{base_name}.{ext}")
         shutil.move(str(source), str(final))
         if on_volume_created:
-            try:
+            with suppress(Exception):
                 should_delete, _ = on_volume_created(final, 1, 1)
                 if should_delete:
                     final.unlink(missing_ok=True)
                     return []
-            except Exception:
-                pass
         return [final]
 
     if progress:
@@ -269,10 +268,8 @@ def split_file_into_volumes(
             # Call callback if provided (could upload and delete the part)
             should_delete = False
             if on_volume_created:
-                try:
+                with suppress(Exception):
                     should_delete, _ = on_volume_created(part_path, vol, total_parts)
-                except Exception:
-                    pass
 
             # Only keep the part if it wasn't deleted by callback
             if not should_delete:
@@ -528,8 +525,6 @@ def parse_indexes(tokens: list[str]) -> list[int]:
             except (ValueError, IndexError):
                 pass
         else:
-            try:
+            with suppress(ValueError):
                 result.append(int(token.strip()))
-            except ValueError:
-                pass
     return sorted(set(result))
