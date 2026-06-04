@@ -35,6 +35,25 @@ function apiHeaders(extra = {}) {
     };
 }
 
+function telegramUserId() {
+    return tg?.initDataUnsafe?.user?.id || null;
+}
+
+function identityPayload(extra = {}) {
+    const userId = telegramUserId();
+    return {
+        ...(userId ? { user_id: userId, chat_id: userId } : {}),
+        ...extra,
+    };
+}
+
+function withIdentityQuery(url) {
+    const userId = telegramUserId();
+    if (!userId) return url;
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}user_id=${encodeURIComponent(userId)}&chat_id=${encodeURIComponent(userId)}`;
+}
+
 function switchTab(tabId, element) {
     if (tabId === activeTab) return;
     const current = document.getElementById(`tab-${activeTab}`);
@@ -180,7 +199,7 @@ async function deleteFiles() {
         const response = await fetch("/api/files/delete", {
             method: "POST",
             headers: apiHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ paths }),
+            body: JSON.stringify(identityPayload({ paths })),
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Delete failed");
@@ -205,7 +224,7 @@ async function zipFiles() {
         const response = await fetch("/api/files/zip-upload", {
             method: "POST",
             headers: apiHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ paths, name }),
+            body: JSON.stringify(identityPayload({ paths, name })),
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "ZIP failed");
@@ -232,7 +251,7 @@ async function uploadSelectedFiles() {
         const response = await fetch("/api/files/upload-selected", {
             method: "POST",
             headers: apiHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ paths }),
+            body: JSON.stringify(identityPayload({ paths })),
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Upload failed");
@@ -271,7 +290,7 @@ async function loadSelectionSummary() {
         const response = await fetch("/api/files/selection-summary", {
             method: "POST",
             headers: apiHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ paths: Array.from(selectedPaths) }),
+            body: JSON.stringify(identityPayload({ paths: Array.from(selectedPaths) })),
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Summary failed");
@@ -311,7 +330,7 @@ async function startDownloads() {
         const response = await fetch("/api/downloads/start", {
             method: "POST",
             headers: apiHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ sources }),
+            body: JSON.stringify(identityPayload({ sources })),
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Could not start download");
@@ -476,7 +495,7 @@ async function loadSettings() {
     if (!list) return;
 
     try {
-        const response = await fetch("/api/settings", { headers: apiHeaders() });
+        const response = await fetch(withIdentityQuery("/api/settings"), { headers: apiHeaders() });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Settings unavailable");
         cachedSettings = data.settings || {};
@@ -578,7 +597,7 @@ async function saveSetting(key, value) {
         const response = await fetch("/api/settings", {
             method: "POST",
             headers: apiHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ key, value: normalized }),
+            body: JSON.stringify(identityPayload({ key, value: normalized })),
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Save failed");

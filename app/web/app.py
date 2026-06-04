@@ -225,12 +225,24 @@ def create_web_app(
     def request_user_id() -> int:
         data = request.get_json(silent=True) or {}
         user = get_request_user() or {}
-        return int(data.get("user_id") or user.get("id") or app.default_chat_id or 0)
+        return int(
+            data.get("user_id")
+            or request.args.get("user_id")
+            or user.get("id")
+            or app.default_chat_id
+            or 0
+        )
 
     def request_chat_id() -> int:
         data = request.get_json(silent=True) or {}
         user = get_request_user() or {}
-        return int(data.get("chat_id") or user.get("id") or app.default_chat_id or 0)
+        return int(
+            data.get("chat_id")
+            or request.args.get("chat_id")
+            or user.get("id")
+            or app.default_chat_id
+            or 0
+        )
 
     def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -604,9 +616,8 @@ def create_web_app(
         if not paths:
             return jsonify({"error": "No files selected"}), 400
 
-        user = get_request_user() or {}
-        chat_id = data.get("chat_id") or user.get("id") or app.default_chat_id
-        user_id = user.get("id") or chat_id or 0
+        chat_id = request_chat_id()
+        user_id = request_user_id()
         if not chat_id:
             return jsonify({"error": "Open the mini-app from your bot chat first"}), 400
 
@@ -656,9 +667,8 @@ def create_web_app(
         if not sources:
             return jsonify({"error": "No URL or magnet link provided"}), 400
 
-        user = get_request_user() or {}
-        chat_id = data.get("chat_id") or user.get("id") or app.default_chat_id
-        user_id = user.get("id") or chat_id or 0
+        chat_id = request_chat_id()
+        user_id = request_user_id()
         if not chat_id:
             return jsonify({"error": "Open the mini-app from your bot chat first"}), 400
 
@@ -699,8 +709,6 @@ def create_web_app(
     @require_telegram_auth
     def settings_route():
         user_id = request_user_id()
-        if not user_id:
-            return jsonify({"error": "Open the mini-app from your bot chat first"}), 400
 
         if request.method == "GET":
             return jsonify({"settings": public_settings(get_user_settings(user_id))})

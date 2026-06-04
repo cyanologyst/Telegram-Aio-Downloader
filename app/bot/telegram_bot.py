@@ -233,6 +233,7 @@ WEB_APP_ENABLE = os.getenv("WEB_APP_ENABLE", "true").strip().lower() in {"1", "t
 WEB_APP_HOST = os.getenv("WEB_APP_HOST", "127.0.0.1").strip()
 WEB_APP_PORT = int(os.getenv("WEB_APP_PORT", "5000") or "5000")
 WEB_APP_URL = os.getenv("WEB_APP_URL", f"http://{WEB_APP_HOST}:{WEB_APP_PORT}").strip()
+MINI_APP_DEFAULT_CHAT_ID = int(os.getenv("MINI_APP_DEFAULT_CHAT_ID", "0") or "0")
 
 # =========================================================
 # Language Support
@@ -5474,7 +5475,7 @@ def main():
     # Start Flask Web App mini-app server in a background thread
     if WEB_APP_ENABLE:
         try:
-            default_chat_id = next(iter(ALLOWED_USER_IDS), None)
+            default_chat_id = MINI_APP_DEFAULT_CHAT_ID or next(iter(ALLOWED_USER_IDS), None)
             flask_app = create_web_app(
                 str(DOWNLOAD_DIR),
                 BOT_TOKEN,

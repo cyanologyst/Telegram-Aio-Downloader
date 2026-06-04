@@ -75,6 +75,7 @@ Useful optional variables:
 - `WEB_DASHBOARD_PORT`: dashboard port (default `8080`).
 - `WEB_APP_ENABLE`: `true` or `false` to enable the Telegram mini-app.
 - `WEB_APP_HOST`, `WEB_APP_PORT`, `WEB_APP_URL`: mini-app bind settings and public URL.
+- `MINI_APP_DEFAULT_CHAT_ID`: optional private Telegram user ID fallback for mini-app settings, zip, and upload actions when Telegram does not send WebApp init data.
 
 ## Development
 

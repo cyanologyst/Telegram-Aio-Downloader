@@ -121,6 +121,7 @@ write_env() {
   api_id="$(ask "Telegram API_ID from my.telegram.org")"
   api_hash="$(ask_secret "Telegram API_HASH from my.telegram.org")"
   allowed_user_ids="$(ask "Allowed Telegram user IDs, comma-separated. Leave empty to allow all" "")"
+  local mini_app_default_chat_id="${allowed_user_ids%%,*}"
   pyro_session="$(ask "Pyrogram session name" "pyrogram_uploader")"
 
   log "Network and port settings"
@@ -189,6 +190,8 @@ WEB_APP_ENABLE=${web_app_enable}
 WEB_APP_HOST=${web_app_host}
 WEB_APP_PORT=${web_app_port}
 WEB_APP_URL=${web_app_url}
+# Optional fallback for mini-app upload/zip if Telegram WebApp initData is missing.
+MINI_APP_DEFAULT_CHAT_ID=${mini_app_default_chat_id}
 EOF
 
   chmod 600 "${ENV_FILE}"
