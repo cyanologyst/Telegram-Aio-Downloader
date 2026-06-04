@@ -19,7 +19,7 @@ from datetime import datetime
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote_plus
 
 # Load environment variables from .env file before any config is read.
 try:
@@ -173,6 +173,7 @@ DEFAULT_LANGUAGE = "en"
 
 # Status refresh tracking - one dashboard per chat
 status_messages = {}  # {chat_id: {"message_id": int, "last_update": float}}
+STATUS_AUTO_UPDATE_SECONDS = 5
 dashboard_messages = {}  # {chat_id: {"message_id": int, "last_update": float}}
 
 # Pinned live dashboard tracking
@@ -1114,9 +1115,16 @@ def extract_bt_name(magnet: str) -> str:
     if not m:
         return "Unknown torrent"
     try:
-        return unquote(m.group(1)).strip() or "Unknown torrent"
+        return clean_download_name(unquote_plus(m.group(1)))
     except Exception:
         return "Unknown torrent"
+
+
+def clean_download_name(name: str) -> str:
+    name = unquote_plus(str(name or "")).strip()
+    name = re.sub(r"^\[metadata\]\s*", "", name, flags=re.I)
+    name = re.sub(r"\s+", " ", name.replace("+", " ")).strip()
+    return name or "Unknown torrent"
 
 
 def now_ts():
@@ -1148,17 +1156,11 @@ async def update_status_message(app: Application, chat_id: int, user_id: int = N
                     chat_id=chat_id,
                     message_id=msg_data["message_id"],
                     text=build_status_text(u),
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(u, 'refresh'))}", 
-                                               callback_data="refresh_status"),
-                            InlineKeyboardButton(f"{ICON_HOME} {clean_emoji_prefix(get_lang(u, 'home_btn'))}", 
-                                               callback_data="menu_home")
-                        ]
-                    ]),
+                    reply_markup=build_status_controls_markup(),
                     disable_web_page_preview=True,
                 )
                 msg_data["last_update"] = time.time()
+                msg_data["user_id"] = u
                 return
             except Exception:
                 # Message not found or expired, remove it
@@ -1168,22 +1170,28 @@ async def update_status_message(app: Application, chat_id: int, user_id: int = N
         msg = await app.bot.send_message(
             chat_id=chat_id,
             text=build_status_text(u),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(u, 'refresh'))}", 
-                                       callback_data="refresh_status"),
-                    InlineKeyboardButton(f"{ICON_HOME} {clean_emoji_prefix(get_lang(u, 'home_btn'))}", 
-                                       callback_data="menu_home")
-                ]
-            ]),
+            reply_markup=build_status_controls_markup(),
             disable_web_page_preview=True,
         )
         status_messages[chat_id] = {
             "message_id": msg.message_id,
             "last_update": time.time(),
+            "user_id": u,
         }
     except Exception:
         pass
+
+
+async def maybe_auto_update_status_message(app: Application, job: dict, force: bool = False):
+    msg_data = status_messages.get(job["chat_id"])
+    if not msg_data:
+        return
+
+    now = time.time()
+    if not force and now - msg_data.get("last_update", 0) < STATUS_AUTO_UPDATE_SECONDS:
+        return
+
+    await update_status_message(app, job["chat_id"], job.get("user_id") or msg_data.get("user_id") or 0)
 
 
 async def update_live_dashboard(app: Application, chat_id: int, user_id: int = None):
@@ -1203,8 +1211,6 @@ async def update_live_dashboard(app: Application, chat_id: int, user_id: int = N
                         [
                             InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(u, 'refresh'))}", 
                                                callback_data="refresh_dashboard"),
-                            InlineKeyboardButton(f"{ICON_HOME} {clean_emoji_prefix(get_lang(u, 'home_btn'))}", 
-                                               callback_data="menu_home")
                         ]
                     ]),
                     disable_web_page_preview=True,
@@ -1222,8 +1228,6 @@ async def update_live_dashboard(app: Application, chat_id: int, user_id: int = N
                 [
                     InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(u, 'refresh'))}", 
                                        callback_data="refresh_dashboard"),
-                    InlineKeyboardButton(f"{ICON_HOME} {clean_emoji_prefix(get_lang(u, 'home_btn'))}", 
-                                       callback_data="menu_home")
                 ]
             ]),
             disable_web_page_preview=True,
@@ -1330,19 +1334,9 @@ def build_reply_menu(user_id: int = None):
     u = user_id or 0
     return ReplyKeyboardMarkup(
         [
-            # Primary Navigation
-            [get_lang(u, 'home'), get_lang(u, 'status')],
-            
-            # Download Management
-            [get_lang(u, 'queue'), f"{ICON_STOP} {clean_emoji_prefix(get_lang(u, 'cancel'))}"],
-            
-            # File Management
+            [get_lang(u, 'status')],
             [f"{ICON_FOLDER} File Browser", f"{ICON_BROOM} {clean_emoji_prefix(get_lang(u, 'clear'))}"],
-            
-            # Utilities
             [clean_emoji_prefix(get_lang(u, 'zip_menu')), get_lang(u, 'settings'), get_lang(u, 'help')],
-            
-            # Search & Settings
             [get_lang(u, 'tpb_search')],
             [get_lang(u, 'toggle_language')],
         ],
@@ -1371,9 +1365,7 @@ def build_help_text(user_id: int = None):
         f"{ICON_HELP} {clean_emoji_prefix(get_lang(u, 'help'))}\n\n"
         f"{ICON_MAGNET} {clean_emoji_prefix(get_lang(u, 'magnet_help'))}\n"
         f"{ICON_STATUS} {clean_emoji_prefix(get_lang(u, 'status_help'))}\n"
-        f"{ICON_QUEUE} {clean_emoji_prefix(get_lang(u, 'queue_help'))}\n"
-        f"{ICON_STOP} {clean_emoji_prefix(get_lang(u, 'cancel_help'))}\n"
-        f"- {get_lang(u, 'cancel_help2')}\n"
+        f"{ICON_STOP} Pause/resume/cancel active downloads from the status card.\n"
         f"{ICON_BROOM} {clean_emoji_prefix(get_lang(u, 'clear_help'))}\n"
         f"{ICON_FOLDER} {clean_emoji_prefix(get_lang(u, 'files_help'))}\n"
         f"{ICON_UPLOAD} {clean_emoji_prefix(get_lang(u, 'upload_help'))}\n"
@@ -1398,33 +1390,69 @@ def build_status_text(user_id: int = None):
 
     if not active:
         return (
-            f"{ICON_STATUS} {clean_emoji_prefix(get_lang(u, 'status'))}\n\n"
-            f"{get_lang(u, 'no_active')}\n\n"
-            f"{ICON_FOLDER} {clean_emoji_prefix(get_lang(u, 'folder'))}\n{DOWNLOAD_DIR}\n\n"
-            f"{ICON_UPLOAD} {clean_emoji_prefix(get_lang(u, 'target'))}\n{get_lang(u, 'target_val')}"
+            f"{ICON_STATUS} Downloads\n\n"
+            f"No active downloads.\n\n"
+            f"{ICON_FOLDER} Folder\n{DOWNLOAD_DIR}\n\n"
+            f"{ICON_UPLOAD} Upload target\n{get_lang(u, 'target_val')}"
         )
 
     lines = [
-        f"{ICON_STATUS} {clean_emoji_prefix(get_lang(u, 'status'))}",
+        f"{ICON_STATUS} Downloads",
         "",
-        f"{get_lang(u, 'active_jobs')} {len(active)}",
-        f"{ICON_UPLOAD} {clean_emoji_prefix(get_lang(u, 'target'))}: {get_lang(u, 'target_val')}",
+        f"Active: {len(active)}",
+        f"{ICON_UPLOAD} Upload target: {get_lang(u, 'target_val')}",
         ""
     ]
 
     for j in sorted(active, key=lambda x: x["id"]):
-        lines.extend([
-            f"{ICON_DOWNLOAD} {get_lang(u, 'job_number').format(j['id'])}",
-            f"{get_lang(u, 'name')} {j['name']}",
-            f"{get_lang(u, 'state')} {j['status']}",
-            f"{get_lang(u, 'progress')} {j.get('progress', 0.0):.1f}%",
-            f"{ICON_BOX} {human_size(j.get('completed_length', 0))} / {human_size(j.get('total_length', 0))}",
-            f"{ICON_SPEED} {human_speed(j.get('download_speed', 0))}",
-            f"{ICON_CLOCK} {get_lang(u, 'eta')}: {j.get('eta', 'Unknown')}",
-            ""
-        ])
+        lines.extend(format_download_status_lines(j))
 
     return "\n".join(lines).strip()
+
+
+def format_download_status_lines(job: dict) -> list[str]:
+    title = shorten(clean_download_name(job.get("name", "Unknown torrent")), 72)
+    progress = float(job.get("progress", 0.0) or 0.0)
+    total = int(job.get("total_length", 0) or 0)
+    done = int(job.get("completed_length", 0) or 0)
+    upload_done = int(job.get("upload_length", 0) or 0)
+    state = str(job.get("status", "unknown")).replace("_", " ").title()
+    bar = build_progress_bar(done, total, width=16)
+    speed = (
+        f"Down {human_speed(job.get('download_speed', 0))}  |  "
+        f"Up {human_speed(job.get('upload_speed', 0))}"
+    )
+
+    lines = [
+        f"{ICON_DOWNLOAD} #{job['id']}  {title}",
+        f"State: {state}  |  {progress:.1f}%",
+        bar,
+        f"{ICON_BOX} {human_size(done)} / {human_size(total)}",
+        f"{ICON_SPEED} {speed}",
+    ]
+    if upload_done:
+        lines.append(f"{ICON_UPLOAD} Uploaded: {human_size(upload_done)}")
+    lines.extend([
+        f"{ICON_CLOCK} ETA: {job.get('eta', 'Unknown')}",
+        "",
+    ])
+    return lines
+
+
+def build_status_controls_markup():
+    active = [j for j in sorted(download_jobs.values(), key=lambda x: x["id"]) if j["status"] in JOB_ACTIVE_STATES]
+    rows = []
+    for job in active:
+        jid = job["id"]
+        if job.get("status") == "paused":
+            toggle = InlineKeyboardButton(f"Resume #{jid}", callback_data=f"job_resume:{jid}")
+        else:
+            toggle = InlineKeyboardButton(f"Pause #{jid}", callback_data=f"job_pause:{jid}")
+        rows.append([
+            toggle,
+            InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
+        ])
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 def build_live_dashboard_text(user_id: int = None):
@@ -1610,7 +1638,6 @@ def build_files_markup(rel_path: str, page: int = 0):
     rows.append([
         InlineKeyboardButton("⬆ Up", callback_data=f"fb:list:0:{encode_path(rel_parent(rel_path))}") if rel_path else InlineKeyboardButton("📁 Root", callback_data="fb:list:0:"),
         InlineKeyboardButton("🔄 Refresh", callback_data=f"fb:list:{page}:{encode_path(rel_path)}"),
-        InlineKeyboardButton("🏠 Home", callback_data="menu_home"),
     ])
 
     rows.append([
@@ -1744,7 +1771,6 @@ def build_batch_select_markup(rel_path: str, user_id: int, page: int = 0):
     
     rows.append([
         InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data=f"fb:list:{page}:{encode_path(rel_path)}"),
-        InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home"),
     ])
     
     return InlineKeyboardMarkup(rows)
@@ -1795,7 +1821,6 @@ def build_file_details_markup(rel_path: str, page: int = 0):
         InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent}"),
         InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")
     ])
-    buttons.append([InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -1810,7 +1835,6 @@ def build_folder_details_markup(rel_path: str, page: int = 0):
             InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent}"),
             InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")
         ],
-        [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")]
     ])
 
 
@@ -1852,7 +1876,6 @@ def build_delete_confirm_markup(rel_path: str, page: int = 0):
             InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data=f"fb:list:{page}:{parent}"),
             InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")
         ],
-        [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")]
     ])
 
 
@@ -1964,15 +1987,16 @@ def build_upload_caption(rel_path: str) -> str:
 
 def build_progress_bar(current: int, total: int, width: int = 20) -> str:
     """Build a visual progress bar."""
-    if total == 0:
+    if total <= 0:
         pct = 0
         filled = 0
     else:
-        pct = int((current / total) * 100)
-        filled = int((current / total) * width)
-    
-    bar = "█" * filled + "░" * (width - filled)
-    return f"{bar} {pct}%"
+        ratio = max(0.0, min(1.0, current / total))
+        pct = int(ratio * 100)
+        filled = int(ratio * width)
+
+    bar = "#" * filled + "-" * (width - filled)
+    return f"[{bar}] {pct}%"
 
 
 def split_file_into_chunks(file_path: str, chunk_size: int = 2 * 1024 * 1024 * 1024) -> list:
@@ -2732,7 +2756,6 @@ async def send_single_file_via_pyrogram(
         ),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
-            [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")],
         ]),
     )
 
@@ -2863,7 +2886,6 @@ async def send_folder_files_via_pyrogram(
         text=text,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
-            [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")],
         ]),
     )
 
@@ -2899,24 +2921,28 @@ def _format_eta(total_length: int, completed_length: int, download_speed: int) -
 def _extract_rpc_name(status: dict, fallback: str) -> str:
     bt_name = (status.get("bittorrent") or {}).get("info", {}).get("name")
     if bt_name:
-        return bt_name
+        return clean_download_name(bt_name)
     for file_info in status.get("files") or []:
         path = file_info.get("path")
         if path:
-            return Path(path).name
-    return fallback
+            return clean_download_name(Path(path).name)
+    return clean_download_name(fallback)
 
 
 def _apply_aria2_status(job: dict, status: dict):
     total_length = _parse_int_field(status.get("totalLength"))
     completed_length = _parse_int_field(status.get("completedLength"))
     download_speed = _parse_int_field(status.get("downloadSpeed"))
+    upload_length = _parse_int_field(status.get("uploadLength"))
+    upload_speed = _parse_int_field(status.get("uploadSpeed"))
     rpc_status = status.get("status", "unknown")
 
     job["aria2_status"] = rpc_status
     job["total_length"] = total_length
     job["completed_length"] = completed_length
     job["download_speed"] = download_speed
+    job["upload_length"] = upload_length
+    job["upload_speed"] = upload_speed
     job["progress"] = (completed_length / total_length * 100) if total_length else 0.0
     job["eta"] = _format_eta(total_length, completed_length, download_speed)
     job["name"] = _extract_rpc_name(status, job["name"])
@@ -2957,6 +2983,36 @@ def _is_local_torrent_file(source: str) -> bool:
         return False
 
 
+def build_download_started_text(job: dict) -> str:
+    title = shorten(clean_download_name(job.get("name", "Unknown torrent")), 90)
+    return (
+        f"{ICON_MAGNET} Download started\n\n"
+        f"Job: #{job['id']}\n"
+        f"Title:\n{title}\n\n"
+        f"Engine: aria2 daemon\n"
+        f"GID: {job.get('gid', 'unknown')}\n"
+        f"Folder:\n{DOWNLOAD_DIR}"
+    )
+
+
+def build_download_completed_text(job: dict) -> str:
+    title = shorten(clean_download_name(job.get("name", "Unknown torrent")), 90)
+    total = int(job.get("total_length", 0) or job.get("completed_length", 0) or 0)
+    uploaded = int(job.get("upload_length", 0) or 0)
+    lines = [
+        f"{ICON_OK} Download completed",
+        "",
+        f"Job: #{job['id']}",
+        f"Title:\n{title}",
+    ]
+    if total:
+        lines.append(f"Size: {human_size(total)}")
+    if uploaded:
+        lines.append(f"Uploaded while active: {human_size(uploaded)}")
+    lines.append(f"Folder:\n{DOWNLOAD_DIR}")
+    return "\n".join(lines)
+
+
 async def monitor_aria2_job(app: Application, job_id: int):
     job = download_jobs[job_id]
 
@@ -2964,6 +3020,7 @@ async def monitor_aria2_job(app: Application, job_id: int):
         try:
             status = await aria2_client.tell_status(job["gid"])
             _apply_aria2_status(job, status)
+            await maybe_auto_update_status_message(app, job)
         except Aria2RpcError as exc:
             if "not found" in str(exc).lower() and job["status"] == "cancelled":
                 return
@@ -2978,6 +3035,7 @@ async def monitor_aria2_job(app: Application, job_id: int):
 
     if job["status"] == "cancelled":
         job["finished_at"] = now_ts()
+        await maybe_auto_update_status_message(app, job, force=True)
         return
 
     if job["status"] == "completed":
@@ -2985,11 +3043,12 @@ async def monitor_aria2_job(app: Application, job_id: int):
         logger.info(f"Download completed: {job['name']}")
         job["progress"] = 100.0
         job["finished_at"] = now_ts()
+        await maybe_auto_update_status_message(app, job, force=True)
 
         try:
             await app.bot.send_message(
                 chat_id=job["chat_id"],
-                text=f"{ICON_OK} Download completed.\n\nJob #{job['id']}\nName: {job['name']}",
+                text=build_download_completed_text(job),
                 reply_markup=build_reply_menu(),
             )
         except Exception:
@@ -2999,14 +3058,15 @@ async def monitor_aria2_job(app: Application, job_id: int):
         job["status"] = "failed"
         logger.error(f"Download failed: {job['name']}")
         job["finished_at"] = now_ts()
+        await maybe_auto_update_status_message(app, job, force=True)
 
         try:
             await app.bot.send_message(
                 chat_id=job["chat_id"],
                 text=(
                     f"{ICON_FAIL} Download failed.\n\n"
-                    f"Job #{job['id']}\n"
-                    f"Name: {job['name']}\n"
+                    f"Job: #{job['id']}\n"
+                    f"Title:\n{shorten(clean_download_name(job['name']), 90)}\n\n"
                     f"Reason: {job.get('last_line', 'Unknown error')}"
                 ),
                 reply_markup=build_reply_menu(),
@@ -3015,7 +3075,7 @@ async def monitor_aria2_job(app: Application, job_id: int):
             pass
 
 
-async def start_aria2_download(app: Application, chat_id: int, magnet: str):
+async def start_aria2_download(app: Application, chat_id: int, magnet: str, user_id: int = None):
     global job_counter, download_jobs
 
     async with jobs_lock:
@@ -3040,6 +3100,7 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str):
         "magnet": source,
         "gid": gid,
         "chat_id": chat_id,
+        "user_id": user_id or 0,
         "pid": aria2_client.pid,
         "process": None,
         "status": "starting",
@@ -3048,6 +3109,8 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str):
         "completed_length": 0,
         "total_length": 0,
         "download_speed": 0,
+        "upload_length": 0,
+        "upload_speed": 0,
         "eta": "Unknown",
         "started_at": now_ts(),
         "finished_at": None,
@@ -3079,6 +3142,40 @@ async def cancel_job(job_id: int):
     job["aria2_status"] = "removed"
     job["finished_at"] = now_ts()
     return True, f"Cancelled job #{job_id}: {job['name']}"
+
+
+async def pause_job(job_id: int):
+    job = download_jobs.get(job_id)
+    if not job:
+        return False, f"Job #{job_id} not found."
+    if job["status"] not in JOB_ACTIVE_STATES or job["status"] == "paused":
+        return False, f"Job #{job_id} cannot be paused from {job['status']}."
+
+    try:
+        await aria2_client.pause(job["gid"], force=True)
+    except Aria2RpcError as exc:
+        return False, f"Could not pause job #{job_id}: {exc}"
+
+    job["status"] = "paused"
+    job["aria2_status"] = "paused"
+    return True, f"Paused job #{job_id}."
+
+
+async def resume_job(job_id: int):
+    job = download_jobs.get(job_id)
+    if not job:
+        return False, f"Job #{job_id} not found."
+    if job["status"] != "paused":
+        return False, f"Job #{job_id} is not paused."
+
+    try:
+        await aria2_client.unpause(job["gid"])
+    except Aria2RpcError as exc:
+        return False, f"Could not resume job #{job_id}: {exc}"
+
+    job["status"] = "queued"
+    job["aria2_status"] = "waiting"
+    return True, f"Resumed job #{job_id}."
 
 
 def clear_finished_jobs():
@@ -3295,19 +3392,13 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     msg = await update.message.reply_text(
         build_status_text(user_id), 
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(user_id, 'refresh'))}", 
-                                   callback_data="refresh_status"),
-                InlineKeyboardButton(f"{ICON_HOME} {clean_emoji_prefix(get_lang(user_id, 'home_btn'))}", 
-                                   callback_data="menu_home")
-            ]
-        ]),
+        reply_markup=build_status_controls_markup(),
         disable_web_page_preview=True,
     )
     status_messages[chat_id] = {
         "message_id": msg.message_id,
         "last_update": time.time(),
+        "user_id": user_id,
     }
 
 
@@ -3340,9 +3431,6 @@ async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Open File Browser",
                 web_app={"url": WEB_APP_URL}
             )
-        ],
-        [
-            InlineKeyboardButton("Back to Menu", callback_data="menu_home")
         ]
     ])
     
@@ -3427,7 +3515,6 @@ def build_zip_menu_markup(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'select_files'))}", callback_data="zip_menu:select")],
         [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'zip_all'))}", callback_data="zip_menu:zip_all")],
         [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'zip_settings'))}", callback_data="zip_menu:settings")],
-        [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'home_btn'))}", callback_data="menu_home")],
     ])
 
 
@@ -3718,22 +3805,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=build_reply_menu(user_id)
             )
 
-        elif normalized in ("status", "وضعیت"):
+        elif normalized in ("status", "?????"):
             msg = await update.message.reply_text(
                 build_status_text(user_id),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(user_id, 'refresh'))}", 
-                                           callback_data="refresh_status"),
-                        InlineKeyboardButton(f"{ICON_HOME} {clean_emoji_prefix(get_lang(user_id, 'home_btn'))}", 
-                                           callback_data="menu_home")
-                    ]
-                ]),
+                reply_markup=build_status_controls_markup(),
                 disable_web_page_preview=True,
             )
             status_messages[chat_id] = {
                 "message_id": msg.message_id,
                 "last_update": time.time(),
+                "user_id": user_id,
             }
 
         elif normalized in ("queue", "صف"):
@@ -3791,7 +3872,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(f"{ICON_STOP} Yes, Cancel", callback_data=f"cancel_confirm:{jid}"),
-                        InlineKeyboardButton(f"{ICON_BACK} No", callback_data="menu_home")
                     ]
                 ]),
             )
@@ -3803,7 +3883,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(f"{ICON_BROOM} Yes, Clear", callback_data="clear_confirm"),
-                        InlineKeyboardButton(f"{ICON_BACK} No", callback_data="menu_home")
                     ]
                 ]),
             )
@@ -3826,8 +3905,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [
                     InlineKeyboardButton(get_lang_for_all("en", "en"), callback_data="set_lang:en"),
                     InlineKeyboardButton(get_lang_for_all("fa", "fa"), callback_data="set_lang:fa"),
-                ],
-                [InlineKeyboardButton(f"{ICON_HOME} {get_lang(user_id, 'home_btn')}", callback_data="menu_home")]
+                ]
             ])
             await update.message.reply_text(
                 f"{get_lang(user_id, 'language')}\n\n{get_lang(user_id, 'select_language')}",
@@ -3843,18 +3921,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            job = await start_aria2_download(context.application, chat_id, text)
+            job = await start_aria2_download(context.application, chat_id, text, user_id)
 
             await update.message.reply_text(
-                (
-                    f"{ICON_MAGNET} {get_lang(user_id, 'magnet_received')}\n\n"
-                    f"{get_lang(user_id, 'started')} {job['id']}\n"
-                    f"{get_lang(user_id, 'name')} {name}\n"
-                    f"{get_lang(user_id, 'pid')}: {job['pid']}"
-                ),
+                build_download_started_text(job),
                 reply_markup=build_reply_menu(user_id),
                 disable_web_page_preview=True,
             )
+            await update_status_message(context.application, chat_id, user_id)
 
         elif is_video_url(text):
             pending_ytdlp_requests[user_id] = {
@@ -3869,7 +3943,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("🎬 Video", callback_data="ytdlp_video"),
                         InlineKeyboardButton("🎵 MP3", callback_data="ytdlp_mp3"),
                     ],
-                    [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")]
                 ]),
             )
 
@@ -3887,7 +3960,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [
                         InlineKeyboardButton(
                             text=get_lang(user_id, 'home_btn'),
-                            callback_data="menu_home",
                         ),
                     ],
                 ]),
@@ -4072,17 +4144,33 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_message(
                     query.message,
                     f"{ICON_OK} {msg}",
-                    InlineKeyboardMarkup([[InlineKeyboardButton(f"{ICON_HOME} {get_lang(user_id, 'home_btn')}", callback_data="menu_home")]])
                 )
             else:
                 await query.answer(msg, show_alert=True)
+
+        elif data.startswith("job_cancel:"):
+            jid = int(data.split(":")[1])
+            ok, msg = await cancel_job(jid)
+            await update_status_message(context.application, chat_id, user_id)
+            await query.answer(msg, show_alert=not ok)
+
+        elif data.startswith("job_pause:"):
+            jid = int(data.split(":")[1])
+            ok, msg = await pause_job(jid)
+            await update_status_message(context.application, chat_id, user_id)
+            await query.answer(msg, show_alert=not ok)
+
+        elif data.startswith("job_resume:"):
+            jid = int(data.split(":")[1])
+            ok, msg = await resume_job(jid)
+            await update_status_message(context.application, chat_id, user_id)
+            await query.answer(msg, show_alert=not ok)
         
         elif data == "clear_confirm":
             removed = clear_finished_jobs()
             await safe_edit_message(
                 query.message,
                 f"{ICON_OK} {get_lang(user_id, 'cleared')}: {removed} {get_lang(user_id, 'job_id')}(s)",
-                InlineKeyboardMarkup([[InlineKeyboardButton(f"{ICON_HOME} {get_lang(user_id, 'home_btn')}", callback_data="menu_home")]])
             )
         
         # ===== Torrent Selection =====
@@ -4111,8 +4199,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start_aria2_download(
                 context.application,
                 chat_id,
-                session["torrent_path"] + f" --select-file={','.join(selected)}"
+                session["torrent_path"] + f" --select-file={','.join(selected)}",
+                user_id,
             )
+            await update_status_message(context.application, chat_id, user_id)
 
             await query.edit_message_text(f"{ICON_SPEED} {get_lang(user_id, 'preparing')}...")
 
@@ -4122,8 +4212,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start_aria2_download(
                 context.application,
                 chat_id,
-                session["torrent_path"]
+                session["torrent_path"],
+                user_id,
             )
+            await update_status_message(context.application, chat_id, user_id)
 
             await query.edit_message_text(f"{ICON_SPEED} {get_lang(user_id, 'preparing')}...")
 
@@ -4211,7 +4303,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent_encoded}"),
                             InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:"),
                         ],
-                        [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")],
                     ]),
                 )
 
@@ -4378,7 +4469,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{ICON_OK} Deleted: {rel_path}",
                     InlineKeyboardMarkup([
                         [InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent_encoded}")],
-                        [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")]
                     ])
                 )
 
@@ -4450,7 +4540,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ),
                             InlineKeyboardButton(
                                 get_lang(user_id, "home_btn"),
-                                callback_data="menu_home",
                             ),
                         ],
                     ]),
@@ -4484,7 +4573,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 callback_data="fb:list:0:",
                             ),
                         ],
-                        [InlineKeyboardButton(get_lang(user_id, "home_btn"), callback_data="menu_home")],
                     ]),
                 )
 
@@ -4619,7 +4707,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 callback_data="fb:list:0:",
                             ),
                         ],
-                        [InlineKeyboardButton(get_lang(user_id, "home_btn"), callback_data="menu_home")],
                     ]),
                 )
 
@@ -4978,7 +5065,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{ICON_FAIL} Error\n{type(e).__name__}: {e}",
             InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
-                [InlineKeyboardButton(f"{ICON_HOME} Home", callback_data="menu_home")],
             ]),
         )
 
@@ -5124,7 +5210,13 @@ def main():
                 text=f"⚠️ Duplicate detected: {name}",
             )
             return {"id": 0, "name": name, "status": "duplicate"}
-        job = await start_aria2_download(context.application, update.effective_chat.id, magnet)
+        job = await start_aria2_download(
+            context.application,
+            update.effective_chat.id,
+            magnet,
+            update.effective_user.id if update.effective_user else None,
+        )
+        await update_status_message(context.application, update.effective_chat.id, update.effective_user.id if update.effective_user else None)
         return job
 
     tpb_handlers = TPBHandlers(

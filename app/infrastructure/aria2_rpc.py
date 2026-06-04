@@ -190,6 +190,8 @@ class Aria2RpcClient:
             "totalLength",
             "completedLength",
             "downloadSpeed",
+            "uploadLength",
+            "uploadSpeed",
             "errorCode",
             "errorMessage",
             "bittorrent",
@@ -201,6 +203,15 @@ class Aria2RpcClient:
         await self.ensure_started()
         method = "aria2.forceRemove" if force else "aria2.remove"
         return cast(str, await self.call(method, gid))
+
+    async def pause(self, gid: str, force: bool = False) -> str:
+        await self.ensure_started()
+        method = "aria2.forcePause" if force else "aria2.pause"
+        return cast(str, await self.call(method, gid))
+
+    async def unpause(self, gid: str) -> str:
+        await self.ensure_started()
+        return cast(str, await self.call("aria2.unpause", gid))
 
     async def purge_results(self) -> None:
         await self.ensure_started()
