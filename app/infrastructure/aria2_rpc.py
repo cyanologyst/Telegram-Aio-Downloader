@@ -28,6 +28,7 @@ class Aria2DaemonConfig:
     rpc_port: int = 6800
     rpc_secret: str = ""
     session_file: Path | None = None
+    secret_file: Path | None = None
 
     @property
     def rpc_url(self) -> str:
@@ -42,11 +43,27 @@ class Aria2RpcClient:
         self._request_id = 0
         self._process: asyncio.subprocess.Process | None = None
         self._startup_lock = asyncio.Lock()
-        self._secret = config.rpc_secret or secrets.token_urlsafe(24)
+        self._secret = config.rpc_secret or self._load_or_create_secret()
 
     @property
     def pid(self) -> int | None:
         return self._process.pid if self._process else None
+
+    def _load_or_create_secret(self) -> str:
+        secret_file = self.config.secret_file or self.config.download_dir / ".aria2.rpc-secret"
+        try:
+            if secret_file.exists():
+                existing = secret_file.read_text(encoding="utf-8").strip()
+                if existing:
+                    return existing
+
+            secret_file.parent.mkdir(parents=True, exist_ok=True)
+            secret = secrets.token_urlsafe(24)
+            secret_file.write_text(f"{secret}\n", encoding="utf-8")
+            secret_file.chmod(0o600)
+            return secret
+        except OSError:
+            return secrets.token_urlsafe(24)
 
     async def ensure_started(self) -> None:
         """Start aria2 as a local daemon if an RPC endpoint is not already available."""
@@ -87,16 +104,30 @@ class Aria2RpcClient:
             self._process = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.config.download_dir),
             )
 
             for _ in range(30):
                 if await self.is_ready():
                     return
+                if self._process.returncode is not None:
+                    break
                 await asyncio.sleep(0.2)
 
-            raise RuntimeError("aria2 RPC daemon did not become ready")
+            stderr = ""
+            if self._process.stderr:
+                raw = await self._process.stderr.read()
+                stderr = raw.decode("utf-8", errors="replace").strip()
+
+            message = "aria2 RPC daemon did not become ready"
+            if stderr:
+                message = f"{message}: {stderr}"
+            message = (
+                f"{message}. If port {self.config.rpc_port} is already used by an old "
+                "aria2c process, stop it once with `pkill aria2c` and restart the bot."
+            )
+            raise RuntimeError(message)
 
     async def is_ready(self) -> bool:
         try:

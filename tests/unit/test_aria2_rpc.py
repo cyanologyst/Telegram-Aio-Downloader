@@ -24,3 +24,13 @@ def test_aria2_rpc_client_uses_configured_secret(tmp_path):
     client = Aria2RpcClient(config)
 
     assert client._secret == "test-secret"
+
+
+def test_aria2_rpc_client_reuses_generated_secret(tmp_path):
+    config = Aria2DaemonConfig(aria2_bin="aria2c", download_dir=tmp_path)
+
+    first = Aria2RpcClient(config)
+    second = Aria2RpcClient(config)
+
+    assert first._secret == second._secret
+    assert (tmp_path / ".aria2.rpc-secret").exists()

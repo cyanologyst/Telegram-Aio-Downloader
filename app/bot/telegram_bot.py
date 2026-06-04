@@ -3917,6 +3917,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{ICON_FAIL} {ARIA2_BIN} was not found.",
             reply_markup=build_reply_menu(user_id),
         )
+    except (Aria2RpcError, RuntimeError) as e:
+        logger.error(f"aria2 error: {type(e).__name__}: {e}", exc_info=e)
+        await update.message.reply_text(
+            f"{ICON_FAIL} aria2 error:\n{shorten(str(e), 900)}",
+            reply_markup=build_reply_menu(user_id),
+        )
     except Exception as e:
         # FIX #2: Sanitize error messages to avoid exposing internal details
         logger.error(f"on_text error: {type(e).__name__}: {e}", exc_info=e)

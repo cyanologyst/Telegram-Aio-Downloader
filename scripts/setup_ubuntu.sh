@@ -41,6 +41,14 @@ ask_yes_no() {
   [[ "${answer,,}" =~ ^(y|yes)$ ]]
 }
 
+generate_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 24
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(24))'
+  fi
+}
+
 require_ubuntu() {
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -122,7 +130,7 @@ write_env() {
   if ask_yes_no "Use automatic local-only ports and hosts?" "y"; then
     aria2_host="127.0.0.1"
     aria2_port="6800"
-    aria2_secret=""
+    aria2_secret="$(generate_secret)"
     dashboard_enable="true"
     dashboard_host="127.0.0.1"
     dashboard_port="8080"
