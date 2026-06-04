@@ -5,12 +5,16 @@ let currentFiles = [];
 let selectedPaths = new Set();
 let activeTab = "files";
 let selectionSummaryTimer = null;
+let zipPollTimer = null;
+let cachedSettings = {};
 
 document.addEventListener("DOMContentLoaded", () => {
     initTelegramApp();
     loadFiles();
     loadDownloads();
     loadStats();
+    loadSettings();
+    loadZipJobs();
     setInterval(loadDownloads, 3000);
     setInterval(loadStats, 10000);
 });
@@ -32,16 +36,25 @@ function apiHeaders(extra = {}) {
 }
 
 function switchTab(tabId, element) {
+    if (tabId === activeTab) return;
+    const current = document.getElementById(`tab-${activeTab}`);
     activeTab = tabId;
-    document.querySelectorAll(".tab-content").forEach((tab) => tab.classList.remove("active"));
+    if (current) {
+        current.classList.add("is-leaving");
+        setTimeout(() => current.classList.remove("active", "is-leaving"), 180);
+    }
     document.querySelectorAll(".nav-item").forEach((nav) => nav.classList.remove("active"));
 
-    document.getElementById(`tab-${tabId}`).classList.add("active");
+    const next = document.getElementById(`tab-${tabId}`);
+    next.classList.add("active");
     element.classList.add("active");
+    element.classList.add("animating");
+    setTimeout(() => element.classList.remove("animating"), 340);
     document.getElementById("header-title").innerText = element.getAttribute("data-title");
 
     if (tabId === "downloads") loadDownloads();
     if (tabId === "info") loadStats();
+    if (tabId === "settings") loadSettings();
 }
 
 async function loadFiles() {
@@ -187,20 +200,23 @@ async function zipFiles() {
     }
 
     const name = `archive_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
-    toast("Creating archive...");
+    toast("Starting ZIP and upload job...");
     try {
-        const response = await fetch("/api/files/create-archive", {
+        const response = await fetch("/api/files/zip-upload", {
             method: "POST",
             headers: apiHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ paths, name, format: "zip" }),
+            body: JSON.stringify({ paths, name }),
         });
         const data = await response.json();
-        if (!response.ok || data.error) throw new Error(data.error || "Archive failed");
-        toast(`Created ${data.archive}`);
+        if (!response.ok || data.error) throw new Error(data.error || "ZIP failed");
+        toast("ZIP job started. Watch progress in Downloads.");
         selectedPaths.clear();
         loadFiles();
+        loadZipJobs();
+        const downloadsNav = document.querySelector('[data-title="Active Downloads"]');
+        if (downloadsNav) switchTab("downloads", downloadsNav);
     } catch (error) {
-        toast(`Archive failed: ${error.message}`);
+        toast(`ZIP failed: ${error.message}`);
     }
 }
 
@@ -315,6 +331,7 @@ async function loadDownloads() {
         if (!response.ok || data.error) throw new Error(data.error || "Downloads unavailable");
         renderDownloads(data.jobs || []);
         document.getElementById("dl-speed").innerText = formatSpeed(data.total_down_speed || 0);
+        loadZipJobs();
     } catch (error) {
         document.getElementById("download-list").innerHTML =
             `<div class="empty-state">Could not load downloads.<br>${escapeHtml(error.message)}</div>`;
@@ -323,12 +340,14 @@ async function loadDownloads() {
 
 function renderDownloads(downloads) {
     const list = document.getElementById("download-list");
-    if (downloads.length === 0) {
+    const zipJobs = window.latestZipJobs || [];
+    if (downloads.length === 0 && zipJobs.length === 0) {
         list.innerHTML = `<div class="empty-state">No downloads yet.</div>`;
         return;
     }
 
-    list.innerHTML = downloads
+    const zipHtml = zipJobs.map(renderZipJob).join("");
+    const downloadHtml = downloads
         .map((dl) => {
             const progress = Math.max(0, Math.min(100, Number(dl.progress || 0)));
             const isPaused = dl.status === "paused";
@@ -367,6 +386,47 @@ function renderDownloads(downloads) {
             `;
         })
         .join("");
+    list.innerHTML = zipHtml + downloadHtml;
+}
+
+function renderZipJob(job) {
+    const done = ["completed", "failed"].includes(job.status);
+    const icon = job.status === "failed" ? "fa-triangle-exclamation" : done ? "fa-circle-check" : "fa-file-zipper";
+    return `
+        <div class="download-item neu-out">
+            <div class="dl-header">
+                <span><i class="fas ${icon}"></i> ZIP Upload</span>
+                <span>${escapeHtml(titleCase(job.phase || job.status || "queued"))}</span>
+            </div>
+            <div class="progress-track neu-in">
+                <div class="progress-bar zip-pulse" style="width: ${done ? 100 : 55}%"></div>
+            </div>
+            <div class="dl-status">
+                ${escapeHtml(job.progress_text || "Queued...")}<br>
+                ${Number(job.file_count || 0)} file(s) &bull; ${escapeHtml(job.total_size || "0 B")}
+            </div>
+        </div>
+    `;
+}
+
+async function loadZipJobs() {
+    try {
+        const response = await fetch("/api/zip-jobs", { headers: apiHeaders() });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "ZIP jobs unavailable");
+        window.latestZipJobs = data.jobs || [];
+        if (activeTab === "downloads") {
+            const responseDownloads = await fetch("/api/downloads", { headers: apiHeaders() });
+            const downloadsData = await responseDownloads.json();
+            renderDownloads(downloadsData.jobs || []);
+        }
+        clearTimeout(zipPollTimer);
+        if (window.latestZipJobs.some((job) => !["completed", "failed"].includes(job.status))) {
+            zipPollTimer = setTimeout(loadZipJobs, 2000);
+        }
+    } catch (error) {
+        console.error(error);
+    }
 }
 
 async function controlDownload(jobId, action) {
@@ -408,6 +468,126 @@ async function loadStats() {
         document.getElementById("dl-speed").innerText = formatSpeed(downloads.total_down_speed || 0);
     } catch (error) {
         console.error(error);
+    }
+}
+
+async function loadSettings() {
+    const list = document.getElementById("settings-list");
+    if (!list) return;
+
+    try {
+        const response = await fetch("/api/settings", { headers: apiHeaders() });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Settings unavailable");
+        cachedSettings = data.settings || {};
+        renderSettings();
+    } catch (error) {
+        list.innerHTML = `<div class="empty-state">Could not load settings.<br>${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function renderSettings() {
+    const settings = cachedSettings;
+    const partSizeMb = Number(settings.zip_part_size || 0) / (1024 * 1024);
+    document.getElementById("settings-list").innerHTML = `
+        ${settingSelect("Archive Part Size", "Split archives into Telegram-friendly volumes.", "zip_part_size", [
+            [268435456, "256 MB"],
+            [536870912, "512 MB"],
+            [1073741824, "1 GB"],
+            [2147483648, "2 GB"],
+        ], settings.zip_part_size || 1073741824, `${partSizeMb || 1024} MB`)}
+        ${settingSelect("Archive Method", "Choose ZIP for speed or 7Z for stronger compression.", "zip_method", [
+            ["zip", "ZIP"],
+            ["7z", "7Z"],
+        ], settings.zip_method || "zip")}
+        ${settingSelect("Compression Level", "Higher levels are smaller but slower.", "compression_level", [
+            [1, "1"],
+            [3, "3"],
+            [5, "5"],
+            [7, "7"],
+            [9, "9"],
+        ], settings.compression_level || 3)}
+        ${settingPassword(settings.password || "")}
+        ${settingToggle("Auto-delete after ZIP", "Delete source files after ZIP/upload finishes.", "auto_delete_files_after_zip", settings.auto_delete_files_after_zip)}
+        ${settingToggle("Delete ZIPs after send", "Remove generated archives after Telegram upload.", "auto_delete_zips_after_send", settings.auto_delete_zips_after_send)}
+        ${settingToggle("Auto-delete after upload", "Delete selected source files after direct upload.", "auto_delete_files_after_upload", settings.auto_delete_files_after_upload)}
+        ${settingToggle("Forwarded posts", "Automatically download forwarded Telegram media.", "auto_download_forwarded_posts", settings.auto_download_forwarded_posts)}
+    `;
+}
+
+function settingSelect(title, description, key, options, value, fallbackLabel = "") {
+    return `
+        <div class="setting-item neu-out">
+            <div class="setting-copy">
+                <h4>${escapeHtml(title)}</h4>
+                <p>${escapeHtml(description)}</p>
+            </div>
+            <select class="setting-select neu-in" onchange="saveSetting('${key}', this.value)">
+                ${options.map(([optionValue, label]) => `
+                    <option value="${optionValue}" ${String(optionValue) === String(value) ? "selected" : ""}>${escapeHtml(label)}</option>
+                `).join("")}
+                ${fallbackLabel && !options.some(([optionValue]) => String(optionValue) === String(value)) ? `<option selected>${escapeHtml(fallbackLabel)}</option>` : ""}
+            </select>
+        </div>
+    `;
+}
+
+function settingToggle(title, description, key, value) {
+    return `
+        <div class="setting-item neu-out">
+            <div class="setting-copy">
+                <h4>${escapeHtml(title)}</h4>
+                <p>${escapeHtml(description)}</p>
+            </div>
+            <button class="neu-btn setting-toggle ${value ? "active" : ""}" onclick="saveSetting('${key}', ${value ? "false" : "true"})" aria-label="${escapeHtml(title)}"></button>
+        </div>
+    `;
+}
+
+function settingPassword(value) {
+    return `
+        <div class="setting-item neu-out">
+            <div class="setting-copy">
+                <h4>Archive Password</h4>
+                <p>${value ? "Password is set." : "Leave empty for no password."}</p>
+            </div>
+            <button class="neu-btn setting-control" onclick="promptPassword()">Set</button>
+        </div>
+    `;
+}
+
+async function promptPassword() {
+    const value = window.prompt("Archive password. Leave empty to remove it.", cachedSettings.password || "");
+    if (value === null) return;
+    await saveSetting("password", value);
+}
+
+async function saveSetting(key, value) {
+    const numericKeys = new Set(["zip_part_size", "compression_level"]);
+    const booleanKeys = new Set([
+        "auto_delete_files_after_zip",
+        "auto_delete_zips_after_send",
+        "auto_delete_files_after_upload",
+        "auto_download_forwarded_posts",
+    ]);
+    let normalized = value;
+    if (numericKeys.has(key)) normalized = Number(value);
+    if (booleanKeys.has(key)) normalized = value === true || value === "true";
+
+    try {
+        const response = await fetch("/api/settings", {
+            method: "POST",
+            headers: apiHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ key, value: normalized }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Save failed");
+        cachedSettings = data.settings || {};
+        renderSettings();
+        toast("Settings saved");
+    } catch (error) {
+        toast(`Settings failed: ${error.message}`);
+        renderSettings();
     }
 }
 

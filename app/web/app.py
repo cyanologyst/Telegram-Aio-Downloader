@@ -5,6 +5,7 @@ import hmac
 import json
 import shutil
 import time
+import uuid
 import zipfile
 from collections.abc import Callable
 from datetime import datetime
@@ -16,12 +17,21 @@ from urllib.parse import parse_qsl
 from flask import Flask, jsonify, render_template, request, send_file
 from flask_cors import CORS
 
+from app.services.user_settings import (
+    DEFAULT_SETTINGS,
+    get_user_settings,
+    save_user_settings,
+    validate_compression_level,
+    validate_part_size,
+)
+
 
 def create_web_app(
     download_dir: str,
     bot_token: str,
     *,
     download_jobs: dict[Any, Any] | None = None,
+    zip_jobs: dict[Any, Any] | None = None,
     bot_loop: Any = None,
     bot_app: Any = None,
     start_download: Callable[..., Any] | None = None,
@@ -29,6 +39,7 @@ def create_web_app(
     resume_download: Callable[..., Any] | None = None,
     cancel_download: Callable[..., Any] | None = None,
     upload_selected: Callable[..., Any] | None = None,
+    zip_selected: Callable[..., Any] | None = None,
     default_chat_id: int | None = None,
 ) -> Flask:
     """
@@ -46,6 +57,7 @@ def create_web_app(
     app.download_dir = Path(download_dir).resolve()
     app.bot_token = bot_token
     app.download_jobs = download_jobs if download_jobs is not None else {}
+    app.zip_jobs = zip_jobs if zip_jobs is not None else {}
     app.bot_loop = bot_loop
     app.bot_app = bot_app
     app.start_download = start_download
@@ -53,6 +65,7 @@ def create_web_app(
     app.resume_download = resume_download
     app.cancel_download = cancel_download
     app.upload_selected = upload_selected
+    app.zip_selected = zip_selected
     app.default_chat_id = default_chat_id
 
     # Ensure download directory exists
@@ -118,6 +131,14 @@ def create_web_app(
 
         future = asyncio.run_coroutine_threadsafe(coro, app.bot_loop)
         return future.result(timeout=30)
+
+    def schedule_bot_coroutine(coro: Any) -> None:
+        if app.bot_loop is None:
+            raise RuntimeError("Bot event loop is not available")
+
+        import asyncio
+
+        asyncio.run_coroutine_threadsafe(coro, app.bot_loop)
 
     def require_telegram_auth(f):
         """Decorator to validate Telegram auth for API endpoints."""
@@ -200,6 +221,28 @@ def create_web_app(
                 total_size += item.stat().st_size
 
         return files, total_size
+
+    def request_user_id() -> int:
+        data = request.get_json(silent=True) or {}
+        user = get_request_user() or {}
+        return int(data.get("user_id") or user.get("id") or app.default_chat_id or 0)
+
+    def request_chat_id() -> int:
+        data = request.get_json(silent=True) or {}
+        user = get_request_user() or {}
+        return int(data.get("chat_id") or user.get("id") or app.default_chat_id or 0)
+
+    def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "zip_part_size": int(settings.get("zip_part_size", DEFAULT_SETTINGS["zip_part_size"])),
+            "zip_method": settings.get("zip_method", "zip"),
+            "password": settings.get("password", ""),
+            "auto_delete_files_after_zip": bool(settings.get("auto_delete_files_after_zip")),
+            "auto_delete_zips_after_send": bool(settings.get("auto_delete_zips_after_send")),
+            "auto_delete_files_after_upload": bool(settings.get("auto_delete_files_after_upload")),
+            "auto_download_forwarded_posts": bool(settings.get("auto_download_forwarded_posts")),
+            "compression_level": int(settings.get("compression_level", 3)),
+        }
 
     def format_size(bytes_size: int) -> str:
         """Format bytes to human readable size."""
@@ -446,6 +489,63 @@ def create_web_app(
         except Exception as e:
             return jsonify({"error": f"Archive creation failed: {str(e)}"}), 500
 
+    @app.route("/api/files/zip-upload", methods=["POST"])
+    @require_telegram_auth
+    def zip_upload_selected_files():
+        """Create a ZIP job, upload archives to Telegram, and expose live progress."""
+        if app.zip_selected is None or app.bot_app is None or app.bot_loop is None:
+            return jsonify({"error": "ZIP upload control is not available"}), 503
+
+        data = request.get_json() or {}
+        paths = data.get("paths", [])
+        if not paths:
+            return jsonify({"error": "No files selected"}), 400
+
+        chat_id = request_chat_id()
+        user_id = request_user_id()
+        if not chat_id:
+            return jsonify({"error": "Open the mini-app from your bot chat first"}), 400
+
+        try:
+            files, total_size = expand_selected_files(paths)
+            if not files:
+                return jsonify({"error": "No files selected"}), 400
+
+            job_id = uuid.uuid4().hex[:12]
+            app.zip_jobs[job_id] = {
+                "id": job_id,
+                "status": "queued",
+                "phase": "queued",
+                "progress_text": "Queued...",
+                "file_count": len(files),
+                "total_size": format_size(total_size),
+                "total_size_bytes": total_size,
+                "created": [],
+                "started_at": time.time(),
+                "updated_at": time.time(),
+            }
+            schedule_bot_coroutine(
+                app.zip_selected(app.bot_app, int(chat_id), files, int(user_id), job_id)
+            )
+            return jsonify({"job": app.zip_jobs[job_id]})
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/zip-jobs")
+    @require_telegram_auth
+    def list_zip_jobs():
+        return jsonify(
+            {
+                "jobs": sorted(
+                    app.zip_jobs.values(),
+                    key=lambda job: job.get("started_at", 0),
+                    reverse=True,
+                )
+            }
+        )
+
     @app.route("/api/files/upload", methods=["POST"])
     @require_telegram_auth
     def upload_files():
@@ -496,7 +596,7 @@ def create_web_app(
     @require_telegram_auth
     def upload_selected_files():
         """Upload selected VPS files to the Telegram user account."""
-        if app.upload_selected is None or app.bot_app is None:
+        if app.upload_selected is None or app.bot_app is None or app.bot_loop is None:
             return jsonify({"error": "Telegram upload control is not available"}), 503
 
         data = request.get_json() or {}
@@ -546,7 +646,7 @@ def create_web_app(
     @app.route("/api/downloads/start", methods=["POST"])
     @require_telegram_auth
     def start_download_route():
-        if app.start_download is None or app.bot_app is None:
+        if app.start_download is None or app.bot_app is None or app.bot_loop is None:
             return jsonify({"error": "Download control is not available"}), 503
 
         data = request.get_json() or {}
@@ -594,6 +694,53 @@ def create_web_app(
             )
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/settings", methods=["GET", "POST"])
+    @require_telegram_auth
+    def settings_route():
+        user_id = request_user_id()
+        if not user_id:
+            return jsonify({"error": "Open the mini-app from your bot chat first"}), 400
+
+        if request.method == "GET":
+            return jsonify({"settings": public_settings(get_user_settings(user_id))})
+
+        data = request.get_json() or {}
+        key = data.get("key")
+        value = data.get("value")
+        if key not in DEFAULT_SETTINGS:
+            return jsonify({"error": "Unknown setting"}), 400
+
+        try:
+            if key == "zip_part_size":
+                value = int(value)
+                if not validate_part_size(value // (1024 * 1024)):
+                    return jsonify({"error": "Part size must be 100 MB to 5 GB"}), 400
+            elif key == "compression_level":
+                value = int(value)
+                if not validate_compression_level(value):
+                    return jsonify({"error": "Compression level must be 1 to 9"}), 400
+            elif key == "zip_method":
+                value = str(value).lower()
+                if value not in {"zip", "7z"}:
+                    return jsonify({"error": "Method must be ZIP or 7Z"}), 400
+            elif key in {
+                "auto_delete_files_after_zip",
+                "auto_delete_zips_after_send",
+                "auto_delete_files_after_upload",
+                "auto_download_forwarded_posts",
+            }:
+                value = bool(value)
+            elif key == "password":
+                value = str(value or "")[:100]
+
+            settings = get_user_settings(user_id)
+            settings[key] = value
+            if not save_user_settings(user_id, settings):
+                return jsonify({"error": "Could not save settings"}), 500
+            return jsonify({"settings": public_settings(settings)})
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid setting value"}), 400
 
     @app.route("/api/files/download/<path:filename>")
     @require_telegram_auth

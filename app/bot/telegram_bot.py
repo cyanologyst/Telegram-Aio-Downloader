@@ -138,6 +138,7 @@ upload_jobs = {}  # {job_id: {"status": "pending|uploading|completed|failed", "f
 upload_queue = []  # Queue of upload job IDs
 upload_counter = 0
 upload_lock = asyncio.Lock()
+mini_app_zip_jobs = {}
 
 download_jobs = {}
 job_counter = 0
@@ -2924,6 +2925,76 @@ async def upload_mini_app_selection(
     return f"Queued upload for {len(files)} file(s)."
 
 
+async def zip_upload_mini_app_selection(
+    app: Application,
+    chat_id: int,
+    files: list[str],
+    user_id: int,
+    job_id: str,
+):
+    job = mini_app_zip_jobs[job_id]
+    try:
+        settings = get_user_settings(user_id)
+        source_paths = [safe_join(DOWNLOAD_DIR, rel_path) for rel_path in files]
+        source_paths = filter_files_for_archiving(source_paths)
+        if not source_paths:
+            raise RuntimeError("No files selected.")
+
+        files_to_zip = build_files_to_zip(source_paths)
+        zip_name = f"miniapp_{int(time.time())}"
+        job.update(
+            {
+                "status": "zipping",
+                "phase": "zipping",
+                "progress_text": f"Preparing {len(files_to_zip)} file(s)...",
+                "file_count": len(files_to_zip),
+                "created": [],
+            }
+        )
+
+        async def on_progress(text: str):
+            job["progress_text"] = clean_emoji_prefix(text)
+            job["updated_at"] = now_ts()
+
+        zip_paths, size_warnings = await run_archive_job(
+            user_id,
+            files_to_zip,
+            DOWNLOAD_DIR,
+            zip_name=zip_name,
+            settings=settings,
+            on_progress=on_progress,
+        )
+
+        job["phase"] = "uploading"
+        job["status"] = "uploading"
+        job["progress_text"] = f"Uploading {len(zip_paths)} archive volume(s)..."
+        job["created"] = [p.name for p in zip_paths]
+        job["updated_at"] = now_ts()
+
+        all_ok = await send_archives_to_chat(app, chat_id, zip_paths, settings, None, user_id)
+
+        if settings.get("auto_delete_files_after_zip"):
+            for path in source_paths:
+                try:
+                    if path.is_file():
+                        path.unlink()
+                except Exception as exc:
+                    logger.warning("Could not delete zipped source file %s: %s", path, exc)
+
+        job["status"] = "completed" if all_ok else "failed"
+        job["phase"] = "completed" if all_ok else "failed"
+        job["progress_text"] = "ZIP created and uploaded." if all_ok else "Some archive volumes failed to upload."
+        if size_warnings:
+            job["warnings"] = size_warnings
+        job["finished_at"] = now_ts()
+    except Exception as exc:
+        job["status"] = "failed"
+        job["phase"] = "failed"
+        job["progress_text"] = str(exc)
+        job["finished_at"] = now_ts()
+        logger.error("Mini-app zip job failed: %s", exc)
+
+
 # =========================================================
 # Aria2 RPC daemon manager
 # =========================================================
@@ -5408,6 +5479,7 @@ def main():
                 str(DOWNLOAD_DIR),
                 BOT_TOKEN,
                 download_jobs=download_jobs,
+                zip_jobs=mini_app_zip_jobs,
                 bot_loop=asyncio.get_event_loop(),
                 bot_app=app,
                 start_download=start_aria2_download,
@@ -5415,6 +5487,7 @@ def main():
                 resume_download=resume_job,
                 cancel_download=cancel_job,
                 upload_selected=upload_mini_app_selection,
+                zip_selected=zip_upload_mini_app_selection,
                 default_chat_id=default_chat_id,
             )
             

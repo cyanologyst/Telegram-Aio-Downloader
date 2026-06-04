@@ -12,34 +12,33 @@
 
     <main>
         <section id="tab-files" class="tab-content active">
-            <div class="navigation-bar">
-                <button class="neu-btn back-btn" id="back-btn" onclick="navigateUp()" aria-label="Go back">
-                    <i class="fas fa-arrow-left"></i>
-                </button>
-                <div class="breadcrumbs neu-in" id="breadcrumbs"></div>
-            </div>
-
-            <div class="toolbar">
-                <button class="neu-btn text-accent" onclick="uploadSelectedFiles()">
-                    <i class="fas fa-cloud-arrow-up"></i> Upload
-                </button>
-                <button class="neu-btn" onclick="showDownloadDialog()">
-                    <i class="fas fa-magnet"></i> Add
-                </button>
-                <button class="neu-btn" onclick="zipFiles()">
-                    <i class="fas fa-file-zipper"></i> Zip
-                </button>
-                <button class="neu-btn text-danger" onclick="deleteFiles()">
-                    <i class="fas fa-trash"></i> Delete
-                </button>
-            </div>
-
-            <div id="selection-summary" class="selection-summary neu-out hidden">
-                <div>
-                    <strong id="selected-count">0 files</strong>
-                    <span id="selected-size">0 B selected</span>
+            <div class="file-control-deck">
+                <div class="navigation-bar">
+                    <button class="neu-btn back-btn" id="back-btn" onclick="navigateUp()" aria-label="Go back">
+                        <i class="fas fa-arrow-left"></i>
+                    </button>
+                    <div class="breadcrumbs neu-in" id="breadcrumbs"></div>
                 </div>
-                <button class="neu-btn clear-selection" onclick="clearSelection()">Clear</button>
+
+                <div class="toolbar">
+                    <button class="neu-btn text-accent" onclick="uploadSelectedFiles()">
+                        <i class="fas fa-cloud-arrow-up"></i> Upload
+                    </button>
+                    <button class="neu-btn" onclick="zipFiles()">
+                        <i class="fas fa-file-zipper"></i> Zip
+                    </button>
+                    <button class="neu-btn text-danger" onclick="deleteFiles()">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </div>
+
+                <div id="selection-summary" class="selection-summary neu-out hidden">
+                    <div>
+                        <strong id="selected-count">0 files</strong>
+                        <span id="selected-size">0 B selected</span>
+                    </div>
+                    <button class="neu-btn clear-selection" onclick="clearSelection()">Clear</button>
+                </div>
             </div>
 
             <div class="file-list" id="file-list"></div>
@@ -77,6 +76,10 @@
                 <p id="storage-summary">Calculated from the download folder.</p>
             </div>
         </section>
+
+        <section id="tab-settings" class="tab-content">
+            <div id="settings-list" class="settings-list"></div>
+        </section>
     </main>
 
     <nav>
@@ -88,6 +91,9 @@
         </div>
         <div class="nav-item" onclick="switchTab('info', this)" data-title="System Monitor">
             <i class="fas fa-chart-pie"></i>
+        </div>
+        <div class="nav-item" onclick="switchTab('settings', this)" data-title="Settings">
+            <i class="fas fa-sliders"></i>
         </div>
     </nav>
 
