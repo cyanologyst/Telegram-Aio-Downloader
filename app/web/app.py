@@ -28,6 +28,7 @@ def create_web_app(
     pause_download: Callable[..., Any] | None = None,
     resume_download: Callable[..., Any] | None = None,
     cancel_download: Callable[..., Any] | None = None,
+    upload_selected: Callable[..., Any] | None = None,
     default_chat_id: int | None = None,
 ) -> Flask:
     """
@@ -42,7 +43,7 @@ def create_web_app(
     app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
 
     # Store config
-    app.download_dir = Path(download_dir)
+    app.download_dir = Path(download_dir).resolve()
     app.bot_token = bot_token
     app.download_jobs = download_jobs if download_jobs is not None else {}
     app.bot_loop = bot_loop
@@ -51,6 +52,7 @@ def create_web_app(
     app.pause_download = pause_download
     app.resume_download = resume_download
     app.cancel_download = cancel_download
+    app.upload_selected = upload_selected
     app.default_chat_id = default_chat_id
 
     # Ensure download directory exists
@@ -176,6 +178,28 @@ def create_web_app(
             "started_at": job.get("started_at"),
             "finished_at": job.get("finished_at"),
         }
+
+    def expand_selected_files(paths: list[str]) -> tuple[list[str], int]:
+        files: list[str] = []
+        total_size = 0
+        seen: set[str] = set()
+
+        for path in paths:
+            target = secure_path(path)
+            candidates = (
+                [target]
+                if target.is_file()
+                else [item for item in target.rglob("*") if item.is_file()]
+            )
+            for item in candidates:
+                rel_path = str(item.relative_to(app.download_dir.resolve()))
+                if rel_path in seen:
+                    continue
+                seen.add(rel_path)
+                files.append(rel_path)
+                total_size += item.stat().st_size
+
+        return files, total_size
 
     def format_size(bytes_size: int) -> str:
         """Format bytes to human readable size."""
@@ -443,6 +467,57 @@ def create_web_app(
                 saved.append(str(destination.relative_to(app.download_dir.resolve())))
 
             return jsonify({"saved": saved, "message": f"Uploaded {len(saved)} file(s)"})
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/files/selection-summary", methods=["POST"])
+    @require_telegram_auth
+    def selection_summary():
+        """Return recursive file count and size for selected files/folders."""
+        data = request.get_json() or {}
+        paths = data.get("paths", [])
+        try:
+            files, total_size = expand_selected_files(paths)
+            return jsonify(
+                {
+                    "file_count": len(files),
+                    "total_size": format_size(total_size),
+                    "total_size_bytes": total_size,
+                }
+            )
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/files/upload-selected", methods=["POST"])
+    @require_telegram_auth
+    def upload_selected_files():
+        """Upload selected VPS files to the Telegram user account."""
+        if app.upload_selected is None or app.bot_app is None:
+            return jsonify({"error": "Telegram upload control is not available"}), 503
+
+        data = request.get_json() or {}
+        paths = data.get("paths", [])
+        if not paths:
+            return jsonify({"error": "No files selected"}), 400
+
+        user = get_request_user() or {}
+        chat_id = data.get("chat_id") or user.get("id") or app.default_chat_id
+        user_id = user.get("id") or chat_id or 0
+        if not chat_id:
+            return jsonify({"error": "Open the mini-app from your bot chat first"}), 400
+
+        try:
+            files, _ = expand_selected_files(paths)
+            if not files:
+                return jsonify({"error": "No files selected"}), 400
+            result = run_bot_coroutine(
+                app.upload_selected(app.bot_app, int(chat_id), files, int(user_id))
+            )
+            return jsonify({"success": True, "message": result, "file_count": len(files)})
         except PermissionError as exc:
             return jsonify({"error": str(exc)}), 403
         except Exception as exc:

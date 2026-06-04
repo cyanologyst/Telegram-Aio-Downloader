@@ -172,6 +172,50 @@ main::-webkit-scrollbar,
     margin-bottom: 18px;
 }
 
+.selection-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: -4px 0 18px;
+    padding: 12px 14px;
+    animation: selectionPop 0.28s ease-out both;
+}
+
+.selection-summary.hidden {
+    display: none;
+}
+
+.selection-summary strong {
+    display: block;
+    font-size: 0.9rem;
+    color: var(--accent);
+}
+
+.selection-summary span {
+    display: block;
+    margin-top: 2px;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+
+.clear-selection {
+    min-height: 34px;
+    padding: 0 12px;
+    font-size: 0.78rem;
+}
+
+@keyframes selectionPop {
+    from {
+        opacity: 0;
+        transform: translateY(-8px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
 .file-list {
     display: flex;
     flex-direction: column;

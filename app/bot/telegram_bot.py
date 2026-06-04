@@ -2900,6 +2900,30 @@ async def send_folder_files_via_pyrogram(
     )
 
 
+async def upload_mini_app_selection(
+    app: Application,
+    chat_id: int,
+    files: list[str],
+    user_id: int = None,
+):
+    if not files:
+        raise RuntimeError("No files selected.")
+
+    status_msg = await app.bot.send_message(
+        chat_id=chat_id,
+        text=f"{ICON_UPLOAD} Preparing mini-app upload ({len(files)} files)...",
+    )
+    await send_folder_files_via_pyrogram(
+        app,
+        chat_id,
+        status_msg.message_id,
+        "",
+        file_list=files,
+        user_id=user_id,
+    )
+    return f"Queued upload for {len(files)} file(s)."
+
+
 # =========================================================
 # Aria2 RPC daemon manager
 # =========================================================
@@ -5390,6 +5414,7 @@ def main():
                 pause_download=pause_job,
                 resume_download=resume_job,
                 cancel_download=cancel_job,
+                upload_selected=upload_mini_app_selection,
                 default_chat_id=default_chat_id,
             )
             

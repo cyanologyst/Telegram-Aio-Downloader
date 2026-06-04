@@ -4,6 +4,7 @@ let currentPath = "";
 let currentFiles = [];
 let selectedPaths = new Set();
 let activeTab = "files";
+let selectionSummaryTimer = null;
 
 document.addEventListener("DOMContentLoaded", () => {
     initTelegramApp();
@@ -56,10 +57,10 @@ async function loadFiles() {
 
         currentPath = data.current_path || "";
         currentFiles = data.items || [];
-        selectedPaths.clear();
         renderBreadcrumbs();
         renderFiles();
         updateBackButton();
+        updateSelectionSummary();
         await loadStats();
     } catch (error) {
         list.innerHTML = `<div class="empty-state">Could not load files.<br>${escapeHtml(error.message)}</div>`;
@@ -116,6 +117,7 @@ function handleRowClick(path, isFolder) {
 function toggleSelection(path, checked) {
     if (checked) selectedPaths.add(path);
     else selectedPaths.delete(path);
+    updateSelectionSummary();
 }
 
 function navigateUp() {
@@ -152,35 +154,6 @@ function updateBackButton() {
     backBtn.style.opacity = currentPath ? "1" : "0.4";
 }
 
-function triggerUpload() {
-    document.getElementById("file-upload").click();
-}
-
-async function handleFileUpload(event) {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
-
-    const form = new FormData();
-    form.append("path", currentPath);
-    files.forEach((file) => form.append("files", file));
-
-    toast(`Uploading ${files.length} file(s)...`);
-    try {
-        const response = await fetch("/api/files/upload", {
-            method: "POST",
-            headers: apiHeaders(),
-            body: form,
-        });
-        const data = await response.json();
-        if (!response.ok || data.error) throw new Error(data.error || "Upload failed");
-        toast(data.message || "Upload complete");
-        event.target.value = "";
-        loadFiles();
-    } catch (error) {
-        toast(`Upload failed: ${error.message}`);
-    }
-}
-
 async function deleteFiles() {
     const paths = Array.from(selectedPaths);
     if (paths.length === 0) {
@@ -199,7 +172,8 @@ async function deleteFiles() {
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Delete failed");
         toast(data.message || "Deleted");
-        loadFiles();
+        selectedPaths.clear();
+        await loadFiles();
     } catch (error) {
         toast(`Delete failed: ${error.message}`);
     }
@@ -223,9 +197,74 @@ async function zipFiles() {
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Archive failed");
         toast(`Created ${data.archive}`);
+        selectedPaths.clear();
         loadFiles();
     } catch (error) {
         toast(`Archive failed: ${error.message}`);
+    }
+}
+
+async function uploadSelectedFiles() {
+    const paths = Array.from(selectedPaths);
+    if (paths.length === 0) {
+        toast("Select files or folders first");
+        return;
+    }
+
+    toast(`Preparing ${paths.length} selected item(s) for upload...`);
+    try {
+        const response = await fetch("/api/files/upload-selected", {
+            method: "POST",
+            headers: apiHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ paths }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Upload failed");
+        toast(data.message || `Uploading ${data.file_count || paths.length} file(s)`);
+        selectedPaths.clear();
+        renderFiles();
+        updateSelectionSummary();
+    } catch (error) {
+        toast(`Upload failed: ${error.message}`);
+    }
+}
+
+function clearSelection() {
+    selectedPaths.clear();
+    renderFiles();
+    updateSelectionSummary();
+}
+
+function updateSelectionSummary() {
+    clearTimeout(selectionSummaryTimer);
+    selectionSummaryTimer = setTimeout(loadSelectionSummary, 120);
+}
+
+async function loadSelectionSummary() {
+    const summary = document.getElementById("selection-summary");
+    if (!selectedPaths.size) {
+        summary.classList.add("hidden");
+        return;
+    }
+
+    summary.classList.remove("hidden");
+    document.getElementById("selected-count").innerText = "Calculating...";
+    document.getElementById("selected-size").innerText = `${selectedPaths.size} selected item(s)`;
+
+    try {
+        const response = await fetch("/api/files/selection-summary", {
+            method: "POST",
+            headers: apiHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ paths: Array.from(selectedPaths) }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Summary failed");
+        const label = data.file_count === 1 ? "1 file" : `${data.file_count} files`;
+        document.getElementById("selected-count").innerText = label;
+        document.getElementById("selected-size").innerText = `${data.total_size || "0 B"} selected`;
+    } catch (error) {
+        document.getElementById("selected-count").innerText = `${selectedPaths.size} selected`;
+        document.getElementById("selected-size").innerText = "Could not calculate size";
     }
 }
 
