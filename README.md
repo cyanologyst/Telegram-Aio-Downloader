@@ -46,6 +46,7 @@ Useful optional variables:
 - `ALLOWED_USER_IDS`: comma-separated user IDs allowed to use the bot.
 - `PYRO_SESSION_NAME`: Pyrogram session name for large file uploads.
 - `ARIA2_BIN`: path to `aria2c`.
+- `ARIA2_RPC_HOST`, `ARIA2_RPC_PORT`, `ARIA2_RPC_SECRET`: local aria2 JSON-RPC daemon settings. The bot starts aria2 with RPC enabled when needed and stores resume state in `Download/.aria2.session`.
 - `FFMPEG_BIN`: path to `ffmpeg`.
 - `TPB_API_URL`: optional API Bay mirror.
 - `AUTO_CLEANUP_DAYS`: cleanup threshold for old temporary files.
@@ -71,4 +72,3 @@ See [docs/architecture.md](docs/architecture.md) and [docs/extension-guide.md](d
 ## License
 
 License is intentionally left as `TBD` until the maintainer chooses one.
-

@@ -8,6 +8,9 @@ py7zr
 opencv-python
 numpy
 httpx>=0.24.0
+Flask>=2.3.0
+flask-cors>=4.0.0
+beautifulsoup4
 python-dotenv>=1.0.0
 beautifulsoup4>=4.12.0
 

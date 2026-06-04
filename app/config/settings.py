@@ -23,6 +23,9 @@ class Settings:
     api_hash: str
     pyro_session_name: str = "pyrogram_uploader"
     aria2_bin: str = "aria2c"
+    aria2_rpc_host: str = "127.0.0.1"
+    aria2_rpc_port: int = 6800
+    aria2_rpc_secret: str = ""
     ffmpeg_bin: str = "ffmpeg"
     tpb_api_url: str = ""
     allowed_user_ids: frozenset[int] = frozenset()
@@ -62,6 +65,9 @@ def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         api_hash=os.getenv("API_HASH", "").strip(),
         pyro_session_name=os.getenv("PYRO_SESSION_NAME", "pyrogram_uploader").strip(),
         aria2_bin=os.getenv("ARIA2_BIN", "aria2c").strip(),
+        aria2_rpc_host=os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        aria2_rpc_port=_parse_int(os.getenv("ARIA2_RPC_PORT"), 6800),
+        aria2_rpc_secret=os.getenv("ARIA2_RPC_SECRET", "").strip(),
         ffmpeg_bin=os.getenv("FFMPEG_BIN", "ffmpeg").strip(),
         tpb_api_url=os.getenv("TPB_API_URL", "").strip(),
         allowed_user_ids=_parse_user_ids(os.getenv("ALLOWED_USER_IDS")),

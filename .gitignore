@@ -11,6 +11,7 @@ zip_settings/
 *.session-journal
 
 # Python
+.venv/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -28,4 +29,3 @@ build/
 .vscode/
 .DS_Store
 Thumbs.db
-

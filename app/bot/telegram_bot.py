@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -28,6 +29,7 @@ except ImportError:
         return False
 
 from app.bot.dashboard import start_dashboard_server, stop_dashboard_server
+from app.web.app import create_web_app
 
 load_dotenv()
 
@@ -60,6 +62,7 @@ from telegram.request import HTTPXRequest
 # Import TPB crawler subsystem
 from app.downloaders.torrents.tpb import TPBCrawler, TPBHandlers
 from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
+from app.infrastructure.aria2_rpc import Aria2DaemonConfig, Aria2RpcClient, Aria2RpcError
 
 # Import post downloader module for handling forwarded posts
 from app.handlers.forwarded_media import setup_pyrogram_forwarded_downloads
@@ -117,6 +120,9 @@ API_HASH = os.getenv("API_HASH", "").strip()
 PYRO_SESSION_NAME = os.getenv("PYRO_SESSION_NAME", "pyrogram_uploader")
 ARIA2_BIN = os.getenv("ARIA2_BIN", "aria2c")
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
+ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
+ARIA2_RPC_PORT = int(os.getenv("ARIA2_RPC_PORT", "6800") or "6800")
+ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
 
 # TPB crawler config
 TPB_API_URL = os.getenv("TPB_API_URL", "").strip()
@@ -133,6 +139,15 @@ upload_lock = asyncio.Lock()
 download_jobs = {}
 job_counter = 0
 jobs_lock = asyncio.Lock()
+aria2_client = Aria2RpcClient(
+    Aria2DaemonConfig(
+        aria2_bin=ARIA2_BIN,
+        download_dir=DOWNLOAD_DIR,
+        rpc_host=ARIA2_RPC_HOST,
+        rpc_port=ARIA2_RPC_PORT,
+        rpc_secret=ARIA2_RPC_SECRET,
+    )
+)
 
 # Short in-memory tokens for callback_data (with timestamp-based expiration)
 path_tokens = {}  # {token: (rel_path, timestamp)}
@@ -207,6 +222,12 @@ AUTO_CLEANUP_DAYS = int(os.getenv("AUTO_CLEANUP_DAYS", "7") or "7")
 WEB_DASHBOARD_ENABLE = os.getenv("WEB_DASHBOARD_ENABLE", "false").strip().lower() in {"1", "true", "yes", "on"}
 WEB_DASHBOARD_HOST = os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1").strip()
 WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080") or "8080")
+
+# Web App Mini-App configuration
+WEB_APP_ENABLE = os.getenv("WEB_APP_ENABLE", "true").strip().lower() in {"1", "true", "yes", "on"}
+WEB_APP_HOST = os.getenv("WEB_APP_HOST", "127.0.0.1").strip()
+WEB_APP_PORT = int(os.getenv("WEB_APP_PORT", "5000") or "5000")
+WEB_APP_URL = os.getenv("WEB_APP_URL", f"http://{WEB_APP_HOST}:{WEB_APP_PORT}").strip()
 
 # =========================================================
 # Language Support
@@ -1373,10 +1394,7 @@ def format_forwarded_posts_setting(user_id: int) -> str:
 
 def build_status_text(user_id: int = None):
     u = user_id or 0
-    active = [
-        j for j in download_jobs.values()
-        if j["status"] in ("starting", "downloading", "metadata", "allocating")
-    ]
+    active = [j for j in download_jobs.values() if j["status"] in JOB_ACTIVE_STATES]
 
     if not active:
         return (
@@ -2851,94 +2869,106 @@ async def send_folder_files_via_pyrogram(
 
 
 # =========================================================
-# Aria2 direct subprocess manager
+# Aria2 RPC daemon manager
 # =========================================================
 
-def parse_aria2_line(job: dict, line: str):
-    s = line.strip()
-    if not s:
-        return
+ARIA2_DONE_STATES = {"complete", "error", "removed"}
+JOB_ACTIVE_STATES = {"starting", "downloading", "metadata", "allocating", "queued", "paused"}
 
-    job["last_line"] = s
-    low = s.lower()
 
-    if "downloading metadata" in low:
-        job["status"] = "metadata"
-        return
+def _parse_int_field(value, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
 
-    if "allocating disk space" in low:
-        job["status"] = "allocating"
-        return
 
-    if "download complete" in low or "seed completed" in low or "seeding" in low:
-        if job["status"] not in ("completed", "failed", "cancelled"):
-            job["status"] = "downloading"
+def _format_eta(total_length: int, completed_length: int, download_speed: int) -> str:
+    if not total_length or not download_speed or completed_length >= total_length:
+        return "Unknown"
+    seconds = max(0, math.ceil((total_length - completed_length) / download_speed))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
-    m = re.search(
-        r"SIZE:([0-9.]+)([KMGTP]?i?B)/([0-9.]+)([KMGTP]?i?B)\((\d+)%\).*?DL:([0-9.]+)([KMGTP]?i?B).*?ETA:([0-9hms]+)",
-        s,
-        re.I
-    )
 
-    if m:
-        comp_val, comp_unit, total_val, total_unit, pct, dl_val, dl_unit, eta = m.groups()
+def _extract_rpc_name(status: dict, fallback: str) -> str:
+    bt_name = (status.get("bittorrent") or {}).get("info", {}).get("name")
+    if bt_name:
+        return bt_name
+    for file_info in status.get("files") or []:
+        path = file_info.get("path")
+        if path:
+            return Path(path).name
+    return fallback
 
-        def unit_to_bytes(val, unit):
-            unit = unit.upper()
-            binary = {
-                "B": 1,
-                "KIB": 1024,
-                "MIB": 1024**2,
-                "GIB": 1024**3,
-                "TIB": 1024**4,
-                "PIB": 1024**5,
-            }
-            decimal = {
-                "KB": 1000,
-                "MB": 1000**2,
-                "GB": 1000**3,
-                "TB": 1000**4,
-                "PB": 1000**5,
-            }
-            mult = binary.get(unit, decimal.get(unit, 1))
-            return int(float(val) * mult)
 
-        job["completed_length"] = unit_to_bytes(comp_val, comp_unit)
-        job["total_length"] = unit_to_bytes(total_val, total_unit)
-        job["progress"] = float(pct)
-        job["download_speed"] = unit_to_bytes(dl_val, dl_unit)
-        job["eta"] = eta
+def _apply_aria2_status(job: dict, status: dict):
+    total_length = _parse_int_field(status.get("totalLength"))
+    completed_length = _parse_int_field(status.get("completedLength"))
+    download_speed = _parse_int_field(status.get("downloadSpeed"))
+    rpc_status = status.get("status", "unknown")
+
+    job["aria2_status"] = rpc_status
+    job["total_length"] = total_length
+    job["completed_length"] = completed_length
+    job["download_speed"] = download_speed
+    job["progress"] = (completed_length / total_length * 100) if total_length else 0.0
+    job["eta"] = _format_eta(total_length, completed_length, download_speed)
+    job["name"] = _extract_rpc_name(status, job["name"])
+
+    if rpc_status == "active":
         job["status"] = "downloading"
-        return
-
-    m2 = re.search(r"\((\d+)%\)", s)
-    if m2:
-        job["progress"] = float(m2.group(1))
-        if job["status"] not in ("metadata", "allocating"):
-            job["status"] = "downloading"
-
-
-async def monitor_aria2_output(job: dict, stream):
-    while True:
-        line = await stream.readline()
-        if not line:
-            break
-        try:
-            text = line.decode("utf-8", errors="ignore").rstrip()
-        except Exception:
-            continue
-        parse_aria2_line(job, text)
+    elif rpc_status == "waiting":
+        job["status"] = "queued"
+    elif rpc_status == "paused":
+        job["status"] = "paused"
+    elif rpc_status == "complete":
+        job["status"] = "completed"
+        job["progress"] = 100.0
+    elif rpc_status == "error":
+        job["status"] = "failed"
+        message = status.get("errorMessage") or status.get("errorCode") or "Unknown error"
+        job["last_line"] = str(message)
+    elif rpc_status == "removed":
+        job["status"] = "cancelled"
 
 
-async def wait_for_job_finish(app: Application, job_id: int):
+def _split_torrent_source(source: str) -> tuple[str, str | None]:
+    if " --select-file=" in source:
+        torrent_path, selected = source.split(" --select-file=", 1)
+        return torrent_path.strip(), selected.strip()
+    return source.strip(), None
+
+
+async def monitor_aria2_job(app: Application, job_id: int):
     job = download_jobs[job_id]
-    proc = job["process"]
-    rc = await proc.wait()
+
+    while job["status"] not in ("completed", "failed", "cancelled"):
+        try:
+            status = await aria2_client.tell_status(job["gid"])
+            _apply_aria2_status(job, status)
+        except Aria2RpcError as exc:
+            if "not found" in str(exc).lower() and job["status"] == "cancelled":
+                return
+            job["status"] = "failed"
+            job["last_line"] = str(exc)
+            break
+
+        if status.get("status") in ARIA2_DONE_STATES:
+            break
+
+        await asyncio.sleep(2)
 
     if job["status"] == "cancelled":
+        job["finished_at"] = now_ts()
         return
 
-    if rc == 0:
+    if job["status"] == "completed":
         job["status"] = "completed"
         logger.info(f"Download completed: {job['name']}")
         job["progress"] = 100.0
@@ -2974,42 +3004,35 @@ async def wait_for_job_finish(app: Application, job_id: int):
 
 
 async def start_aria2_download(app: Application, chat_id: int, magnet: str):
-    if shutil.which(ARIA2_BIN) is None:
-        raise RuntimeError(f"aria2 executable not found: {ARIA2_BIN}")
-
     global job_counter, download_jobs
 
     async with jobs_lock:
         job_counter += 1
         job_id = job_counter
 
-    name = extract_bt_name(magnet)
+    source, selected_files = _split_torrent_source(magnet)
+    name = extract_bt_name(source)
 
-    proc = await asyncio.create_subprocess_exec(
-        ARIA2_BIN,
-        "--no-conf=true",
-        "--enable-rpc=false",
-        "--seed-time=0",
-        "--dir", str(DOWNLOAD_DIR),
-        "--summary-interval=2",
-        "--bt-save-metadata=true",
-        "--bt-metadata-only=false",
-        "--follow-torrent=true",
-        "--enable-color=false",
-        "--console-log-level=notice",
-        magnet,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    options = {"dir": str(DOWNLOAD_DIR)}
+    if selected_files:
+        options["select-file"] = selected_files
+
+    source_path = Path(source)
+    if source_path.exists() and source_path.suffix.lower() == ".torrent":
+        gid = await aria2_client.add_torrent(source_path, options)
+    else:
+        gid = await aria2_client.add_uri(source, options)
 
     job = {
         "id": job_id,
         "name": name,
-        "magnet": magnet,
+        "magnet": source,
+        "gid": gid,
         "chat_id": chat_id,
-        "pid": proc.pid,
-        "process": proc,
+        "pid": aria2_client.pid,
+        "process": None,
         "status": "starting",
+        "aria2_status": "starting",
         "progress": 0.0,
         "completed_length": 0,
         "total_length": 0,
@@ -3022,8 +3045,7 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str):
 
     download_jobs[job_id] = job
 
-    asyncio.create_task(monitor_aria2_output(job, proc.stdout))
-    asyncio.create_task(wait_for_job_finish(app, job_id))
+    asyncio.create_task(monitor_aria2_job(app, job_id))
 
     return job
 
@@ -3036,19 +3058,14 @@ async def cancel_job(job_id: int):
     if job["status"] in ("completed", "failed", "cancelled"):
         return False, f"Job #{job_id} is already {job['status']}."
 
-    proc = job.get("process")
     try:
-        if proc and proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-    except ProcessLookupError:
-        pass
+        await aria2_client.remove(job["gid"], force=True)
+    except Aria2RpcError as exc:
+        if "not found" not in str(exc).lower():
+            return False, f"Could not cancel job #{job_id}: {exc}"
 
     job["status"] = "cancelled"
+    job["aria2_status"] = "removed"
     job["finished_at"] = now_ts()
     return True, f"Cancelled job #{job_id}: {job['name']}"
 
@@ -3058,7 +3075,7 @@ def clear_finished_jobs():
 
     keep = {}
     for jid, job in download_jobs.items():
-        if job["status"] in ("starting", "downloading", "metadata", "allocating"):
+        if job["status"] in JOB_ACTIVE_STATES:
             keep[jid] = job
 
     removed = len(download_jobs) - len(keep)
@@ -3237,13 +3254,29 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not is_authorized_user(user_id):
-        await update.message.reply_text("⛔ Unauthorized")
+        await update.message.reply_text("Unauthorized")
         return
 
     await update.message.reply_text(
         build_home_text(user_id), 
         reply_markup=build_reply_menu(user_id)
     )
+    
+    # Show the file browser mini-app button
+    if WEB_APP_ENABLE:
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "Open Modern File Browser",
+                    web_app={"url": WEB_APP_URL}
+                )
+            ]
+        ])
+        
+        await update.message.reply_text(
+            "Or use our modern file browser:",
+            reply_markup=keyboard
+        )
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3278,6 +3311,41 @@ async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         build_files_text("", 0),
         reply_markup=build_files_markup("", 0),
         disable_web_page_preview=True,
+    )
+
+
+async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Open the modern file browser mini-app."""
+    user_id = update.effective_user.id
+
+    if not is_authorized_user(user_id):
+        await update.message.reply_text("Unauthorized")
+        return
+
+    # Use inline keyboard with Web App button
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "Open File Browser",
+                web_app={"url": WEB_APP_URL}
+            )
+        ],
+        [
+            InlineKeyboardButton("Back to Menu", callback_data="menu_home")
+        ]
+    ])
+    
+    await update.message.reply_text(
+        "Modern File Browser\n\n"
+        "Features:\n"
+        "- Browse all downloaded files\n"
+        "- Batch delete files\n"
+        "- Create archives (ZIP/7Z)\n"
+        "- Upload to Telegram\n"
+        "- Search and filter\n"
+        "- Real-time statistics\n\n"
+        "Click the button below to open the file browser.",
+        reply_markup=keyboard
     )
 
 
@@ -3671,10 +3739,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif normalized in ("cancel", "انصراف"):
-            active = [
-                j for j in download_jobs.values()
-                if j["status"] in ("starting", "downloading", "metadata", "allocating")
-            ]
+            active = [j for j in download_jobs.values() if j["status"] in JOB_ACTIVE_STATES]
 
             if not active:
                 await update.message.reply_text(
@@ -5020,6 +5085,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("files", files_cmd))
+    app.add_handler(CommandHandler("browse", browse_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("forwardedposts", forwarded_posts_cmd))
     app.add_handler(CommandHandler("autoforward", forwarded_posts_cmd))
@@ -5069,6 +5135,44 @@ def main():
     # Text handler (catches plain text messages)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(error_handler)
+
+    # Start Flask Web App mini-app server in a background thread
+    if WEB_APP_ENABLE:
+        try:
+            flask_app = create_web_app(str(DOWNLOAD_DIR), BOT_TOKEN)
+            
+            def run_flask():
+                # Run Flask in a separate thread with HTTPS
+                import os as os_ssl
+                cert_path = os_ssl.path.join(BASE_DIR, 'cert.pem')
+                key_path = os_ssl.path.join(BASE_DIR, 'key.pem')
+                
+                # Check if certificates exist
+                if os_ssl.path.exists(cert_path) and os_ssl.path.exists(key_path):
+                    ssl_context = (cert_path, key_path)
+                else:
+                    ssl_context = None
+                    logger.warning("SSL certificates not found. Flask running without HTTPS")
+                
+                flask_app.run(
+                    host=WEB_APP_HOST,
+                    port=WEB_APP_PORT,
+                    debug=False,
+                    use_reloader=False,
+                    threaded=True,
+                    ssl_context=ssl_context
+                )
+            
+            flask_thread = threading.Thread(target=run_flask, daemon=True)
+            flask_thread.start()
+            
+            logger.info(
+                "Flask Web App started at %s (Mini-App URL: %s)",
+                f"{WEB_APP_HOST}:{WEB_APP_PORT}",
+                WEB_APP_URL
+            )
+        except Exception as exc:
+            logger.warning("Unable to start Flask Web App: %s", exc)
 
     app.run_polling(close_loop=False)
 

@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modern File Browser - Telegram Mini App</title>
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- AOS Animations -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.css">
+    
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app" class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-top">
+                <div class="header-left">
+                    <button id="backBtn" class="header-btn" title="Go back">
+                        <i class="fas fa-arrow-left"></i>
+                    </button>
+                    <div class="breadcrumb" id="breadcrumb">
+                        <span class="breadcrumb-item active" onclick="navigateTo('')">
+                            <i class="fas fa-folder"></i> Root
+                        </span>
+                    </div>
+                </div>
+                <div class="header-right">
+                    <button id="searchBtn" class="header-btn" onclick="toggleSearch()" title="Search">
+                        <i class="fas fa-search"></i>
+                    </button>
+                    <button id="viewToggleBtn" class="header-btn" onclick="toggleViewMode()" title="Toggle view">
+                        <i class="fas fa-th"></i>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Search Bar -->
+            <div id="searchBar" class="search-bar hidden">
+                <div class="search-wrapper">
+                    <i class="fas fa-search search-icon"></i>
+                    <input type="text" id="searchInput" placeholder="Search files..." class="search-input">
+                </div>
+                <select id="filterType" class="filter-select">
+                    <option value="">All types</option>
+                    <option value="mp4">🎬 Videos</option>
+                    <option value="mp3">🎵 Audio</option>
+                    <option value="jpg">🖼️ Images</option>
+                    <option value="zip">📦 Archives</option>
+                </select>
+                <button class="search-btn" onclick="performSearch()">
+                    <i class="fas fa-search"></i> Search
+                </button>
+            </div>
+
+            <!-- Stats Bar -->
+            <div class="stats-bar" data-aos="fade-up" data-aos-duration="500">
+                <div class="stat-item">
+                    <span class="stat-icon"><i class="fas fa-file"></i></span>
+                    <div class="stat-content">
+                        <span class="stat-label">Files</span>
+                        <span class="stat-value" id="fileCount">0</span>
+                    </div>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-icon"><i class="fas fa-hdd"></i></span>
+                    <div class="stat-content">
+                        <span class="stat-label">Total</span>
+                        <span class="stat-value" id="totalSize">0 B</span>
+                    </div>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-icon"><i class="fas fa-check-square"></i></span>
+                    <div class="stat-content">
+                        <span class="stat-label">Selected</span>
+                        <span class="stat-value" id="selectedCount">0</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="app-main">
+            <!-- Loading State -->
+            <div id="loadingState" class="loading-state hidden">
+                <div class="spinner"></div>
+                <p>Loading files...</p>
+            </div>
+
+            <!-- File Browser -->
+            <div id="fileBrowser" class="file-browser"></div>
+
+            <!-- Empty State -->
+            <div id="emptyState" class="empty-state hidden">
+                <div class="empty-icon">📭</div>
+                <p class="empty-text">No files found</p>
+                <p class="empty-hint">Start downloading or uploading files</p>
+            </div>
+
+            <!-- Error State -->
+            <div id="errorState" class="error-state hidden">
+                <div class="error-icon">⚠️</div>
+                <p class="error-text" id="errorMessage">An error occurred</p>
+                <button class="error-btn" onclick="reloadFiles()">
+                    <i class="fas fa-redo"></i> Retry
+                </button>
+            </div>
+        </main>
+
+        <!-- Bottom Action Bar -->
+        <div class="action-bar">
+            <div class="action-scroll">
+                <div class="action-group">
+                    <button id="selectAllBtn" class="action-btn primary" onclick="selectAll()" title="Select all files">
+                        <i class="fas fa-check-double"></i>
+                        <span class="btn-label">Select All</span>
+                    </button>
+                    <button id="deselectAllBtn" class="action-btn secondary" onclick="deselectAll()" title="Deselect all">
+                        <i class="fas fa-times"></i>
+                        <span class="btn-label">Clear</span>
+                    </button>
+                </div>
+
+                <div class="action-group">
+                    <button id="deleteBtn" class="action-btn danger" onclick="showDeleteConfirm()" title="Delete selected files">
+                        <i class="fas fa-trash"></i>
+                        <span class="btn-label">Delete</span>
+                    </button>
+                    <button id="archiveBtn" class="action-btn info" onclick="showArchiveDialog()" title="Create archive">
+                        <i class="fas fa-archive"></i>
+                        <span class="btn-label">Archive</span>
+                    </button>
+                    <button id="uploadBtn" class="action-btn success" onclick="showUploadDialog()" title="Download new files">
+                        <i class="fas fa-cloud-download-alt"></i>
+                        <span class="btn-label">Download</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+
+    <!-- Delete Confirmation Modal -->
+    <div id="deleteModal" class="modal hidden">
+        <div class="modal-overlay" onclick="closeModal('deleteModal')"></div>
+        <div class="modal-content confirm-modal">
+            <div class="modal-header">
+                <h2><i class="fas fa-trash"></i> Delete Files?</h2>
+                <button class="modal-close" onclick="closeModal('deleteModal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p id="deleteCount" class="delete-count-text">Are you sure you want to delete these files?</p>
+                <div class="warning-box">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>This action cannot be undone.</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('deleteModal')">
+                    <i class="fas fa-times"></i> Cancel
+                </button>
+                <button class="btn btn-danger" onclick="confirmDelete()">
+                    <i class="fas fa-check"></i> Delete
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Archive Creation Modal -->
+    <div id="archiveModal" class="modal hidden">
+        <div class="modal-overlay" onclick="closeModal('archiveModal')"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-archive"></i> Create Archive</h2>
+                <button class="modal-close" onclick="closeModal('archiveModal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="archiveName"><i class="fas fa-tag"></i> Archive Name</label>
+                    <input type="text" id="archiveName" placeholder="my_archive" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label for="archiveFormat"><i class="fas fa-file-archive"></i> Format</label>
+                    <div class="format-options">
+                        <label class="format-option">
+                            <input type="radio" name="archiveFormat" value="zip" checked>
+                            <span>📦 ZIP</span>
+                        </label>
+                        <label class="format-option">
+                            <input type="radio" name="archiveFormat" value="7z">
+                            <span>📦 7Z</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="info-box">
+                    <i class="fas fa-info-circle"></i>
+                    <span>Selected: <strong id="archiveFileCount">0</strong> file(s)</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('archiveModal')">
+                    <i class="fas fa-times"></i> Cancel
+                </button>
+                <button class="btn btn-primary" onclick="createArchive()">
+                    <i class="fas fa-check"></i> Create
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Download Modal -->
+    <div id="uploadModal" class="modal hidden">
+        <div class="modal-overlay" onclick="closeModal('uploadModal')"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-cloud-download-alt"></i> Download Files</h2>
+                <button class="modal-close" onclick="closeModal('uploadModal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="uploadUrl"><i class="fas fa-link"></i> URL or Magnet Link</label>
+                    <textarea id="uploadUrl" class="form-input textarea" placeholder="https://example.com/file.mp4&#10;magnet:?xt=urn:btih:..." rows="5"></textarea>
+                </div>
+                <div class="info-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>Paste URLs or magnet links to download</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('uploadModal')">
+                    <i class="fas fa-times"></i> Cancel
+                </button>
+                <button class="btn btn-primary" onclick="startUpload()">
+                    <i class="fas fa-download"></i> Download
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification -->
+    <div id="notification" class="notification hidden">
+        <div class="notification-content">
+            <i class="fas fa-check-circle notification-icon"></i>
+            <span id="notificationText">Message</span>
+        </div>
+        <button class="notification-close" onclick="hideNotification()">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/aos/2.3.4/aos.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
