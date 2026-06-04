@@ -45,6 +45,7 @@ from pyrogram.errors import FloodWait, RPCError
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     MenuButtonWebApp,
     ReplyKeyboardMarkup,
     Update,
@@ -1334,14 +1335,18 @@ async def safe_edit_message(message, text, reply_markup=None):
 
 def build_reply_menu(user_id: int = None):
     u = user_id or 0
+    rows = [
+        [get_lang(u, 'status')],
+        [f"{ICON_FOLDER} File Browser", f"{ICON_BROOM} {clean_emoji_prefix(get_lang(u, 'clear'))}"],
+        [clean_emoji_prefix(get_lang(u, 'zip_menu')), get_lang(u, 'settings'), get_lang(u, 'help')],
+        [get_lang(u, 'tpb_search')],
+        [get_lang(u, 'toggle_language')],
+    ]
+    if WEB_APP_ENABLE and WEB_APP_URL:
+        rows.insert(0, [KeyboardButton("Mini-App", web_app=WebAppInfo(url=WEB_APP_URL))])
+
     return ReplyKeyboardMarkup(
-        [
-            [get_lang(u, 'status')],
-            [f"{ICON_FOLDER} File Browser", f"{ICON_BROOM} {clean_emoji_prefix(get_lang(u, 'clear'))}"],
-            [clean_emoji_prefix(get_lang(u, 'zip_menu')), get_lang(u, 'settings'), get_lang(u, 'help')],
-            [get_lang(u, 'tpb_search')],
-            [get_lang(u, 'toggle_language')],
-        ],
+        rows,
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder=get_lang(u, 'magnet_help'),
