@@ -207,6 +207,8 @@ main() {
   printf '\nNext steps:\n'
   printf '  source .venv/bin/activate\n'
   printf '  python main.py\n'
+  printf '\nFor Telegram Mini-App without a domain, use HTTPS tunnel startup instead:\n'
+  printf '  bash scripts/start_with_cloudflare_tunnel.sh\n'
 }
 
 main "$@"

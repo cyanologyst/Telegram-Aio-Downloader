@@ -43,6 +43,16 @@ bash scripts/setup_ubuntu.sh
 
 The script asks for BotFather token, Telegram `API_ID`/`API_HASH`, allowed user IDs, and whether to use automatic local ports or manually configure aria2 RPC, dashboard, and mini-app host/port settings.
 
+### Telegram Mini-App Without a Domain
+
+Telegram Mini Apps require a public HTTPS URL. If you do not own a domain, keep the mini-app on your VPS and expose it with a free Cloudflare Quick Tunnel:
+
+```bash
+bash scripts/start_with_cloudflare_tunnel.sh
+```
+
+The script starts `cloudflared`, writes the generated `https://....trycloudflare.com` URL to `WEB_APP_URL` in `.env`, then starts the bot. The generated URL changes when the tunnel restarts, so use this script whenever you start the bot without a domain.
+
 ## Configuration
 
 Required environment variables:
