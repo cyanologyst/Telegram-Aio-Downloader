@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 class Aria2RpcError(RuntimeError):
@@ -140,7 +140,7 @@ class Aria2RpcClient:
 
     async def add_uri(self, uri: str, options: dict[str, str] | None = None) -> str:
         await self.ensure_started()
-        return await self.call("aria2.addUri", [uri], options or {})
+        return cast(str, await self.call("aria2.addUri", [uri], options or {}))
 
     async def add_torrent(
         self,
@@ -150,7 +150,7 @@ class Aria2RpcClient:
         await self.ensure_started()
         content = await asyncio.to_thread(torrent_path.read_bytes)
         encoded = base64.b64encode(content).decode("ascii")
-        return await self.call("aria2.addTorrent", encoded, [], options or {})
+        return cast(str, await self.call("aria2.addTorrent", encoded, [], options or {}))
 
     async def tell_status(self, gid: str) -> dict[str, Any]:
         keys = [
@@ -164,12 +164,12 @@ class Aria2RpcClient:
             "bittorrent",
             "files",
         ]
-        return await self.call("aria2.tellStatus", gid, keys)
+        return cast(dict[str, Any], await self.call("aria2.tellStatus", gid, keys))
 
     async def remove(self, gid: str, force: bool = False) -> str:
         await self.ensure_started()
         method = "aria2.forceRemove" if force else "aria2.remove"
-        return await self.call(method, gid)
+        return cast(str, await self.call(method, gid))
 
     async def purge_results(self) -> None:
         await self.ensure_started()

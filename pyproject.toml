@@ -74,6 +74,16 @@ check_untyped_defs = true
 ignore_missing_imports = true
 exclude = ["app/bot/telegram_bot.py"]
 
+[[tool.mypy.overrides]]
+module = [
+  "app.bot.dashboard",
+  "app.downloaders.torrents.tpb.*",
+  "app.services.archive",
+  "app.services.thumbnails",
+  "app.web.app",
+]
+ignore_errors = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

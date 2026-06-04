@@ -62,10 +62,10 @@ from telegram.request import HTTPXRequest
 # Import TPB crawler subsystem
 from app.downloaders.torrents.tpb import TPBCrawler, TPBHandlers
 from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
-from app.infrastructure.aria2_rpc import Aria2DaemonConfig, Aria2RpcClient, Aria2RpcError
 
 # Import post downloader module for handling forwarded posts
 from app.handlers.forwarded_media import setup_pyrogram_forwarded_downloads
+from app.infrastructure.aria2_rpc import Aria2DaemonConfig, Aria2RpcClient, Aria2RpcError
 
 # Import zipping utilities module
 from app.services.archive import (

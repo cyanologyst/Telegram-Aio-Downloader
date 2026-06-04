@@ -6,12 +6,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
 
-    def load_dotenv(*args: object, **kwargs: object) -> bool:
+def _load_env_file(env_file: str | os.PathLike[str]) -> bool:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
         return False
+    return load_dotenv(env_file)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +58,7 @@ def _parse_user_ids(value: str | None) -> frozenset[int]:
 def load_settings(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
     """Load settings from ``env_file`` and process environment."""
     if env_file:
-        load_dotenv(env_file)
+        _load_env_file(env_file)
 
     return Settings(
         bot_token=os.getenv("BOT_TOKEN", "").strip(),
