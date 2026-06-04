@@ -2945,6 +2945,18 @@ def _split_torrent_source(source: str) -> tuple[str, str | None]:
     return source.strip(), None
 
 
+def _is_local_torrent_file(source: str) -> bool:
+    lowered = source.lower()
+    if lowered.startswith(("magnet:", "http://", "https://")):
+        return False
+
+    try:
+        source_path = Path(source)
+        return source_path.suffix.lower() == ".torrent" and source_path.exists()
+    except OSError:
+        return False
+
+
 async def monitor_aria2_job(app: Application, job_id: int):
     job = download_jobs[job_id]
 
@@ -3017,9 +3029,8 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str):
     if selected_files:
         options["select-file"] = selected_files
 
-    source_path = Path(source)
-    if source_path.exists() and source_path.suffix.lower() == ".torrent":
-        gid = await aria2_client.add_torrent(source_path, options)
+    if _is_local_torrent_file(source):
+        gid = await aria2_client.add_torrent(Path(source), options)
     else:
         gid = await aria2_client.add_uri(source, options)
 
