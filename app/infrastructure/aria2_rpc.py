@@ -38,6 +38,26 @@ class Aria2DaemonConfig:
 class Aria2RpcClient:
     """Small async wrapper around aria2's JSON-RPC interface."""
 
+    STATUS_KEYS = [
+        "gid",
+        "status",
+        "totalLength",
+        "completedLength",
+        "downloadSpeed",
+        "uploadLength",
+        "uploadSpeed",
+        "connections",
+        "errorCode",
+        "errorMessage",
+        "followedBy",
+        "following",
+        "infoHash",
+        "numSeeders",
+        "seeder",
+        "bittorrent",
+        "files",
+    ]
+
     def __init__(self, config: Aria2DaemonConfig) -> None:
         self.config = config
         self._request_id = 0
@@ -184,26 +204,29 @@ class Aria2RpcClient:
         return cast(str, await self.call("aria2.addTorrent", encoded, [], options or {}))
 
     async def tell_status(self, gid: str) -> dict[str, Any]:
-        keys = [
-            "gid",
-            "status",
-            "totalLength",
-            "completedLength",
-            "downloadSpeed",
-            "uploadLength",
-            "uploadSpeed",
-            "connections",
-            "errorCode",
-            "errorMessage",
-            "followedBy",
-            "following",
-            "infoHash",
-            "numSeeders",
-            "seeder",
-            "bittorrent",
-            "files",
-        ]
-        return cast(dict[str, Any], await self.call("aria2.tellStatus", gid, keys))
+        return cast(dict[str, Any], await self.call("aria2.tellStatus", gid, self.STATUS_KEYS))
+
+    async def tell_active(self) -> list[dict[str, Any]]:
+        await self.ensure_started()
+        return cast(list[dict[str, Any]], await self.call("aria2.tellActive", self.STATUS_KEYS))
+
+    async def tell_waiting(self, offset: int = 0, num: int = 100) -> list[dict[str, Any]]:
+        await self.ensure_started()
+        return cast(
+            list[dict[str, Any]],
+            await self.call("aria2.tellWaiting", offset, num, self.STATUS_KEYS),
+        )
+
+    async def tell_stopped(self, offset: int = 0, num: int = 100) -> list[dict[str, Any]]:
+        await self.ensure_started()
+        return cast(
+            list[dict[str, Any]],
+            await self.call("aria2.tellStopped", offset, num, self.STATUS_KEYS),
+        )
+
+    async def remove_download_result(self, gid: str) -> str:
+        await self.ensure_started()
+        return cast(str, await self.call("aria2.removeDownloadResult", gid))
 
     async def remove(self, gid: str, force: bool = False) -> str:
         await self.ensure_started()

@@ -2908,6 +2908,32 @@ def _parse_int_field(value, default: int = 0) -> int:
         return default
 
 
+def extract_info_hash(text: str) -> str:
+    """Return a normalized torrent info hash from a magnet or aria2 message."""
+    decoded = unquote_plus(text or "")
+    match = re.search(r"(?:btih:|InfoHash\s+)([A-Za-z0-9]+)", decoded, re.IGNORECASE)
+    return match.group(1).lower() if match else ""
+
+
+def _same_info_hash(left: str | None, right: str | None) -> bool:
+    return bool(left and right and str(left).lower() == str(right).lower())
+
+
+async def find_aria2_status_by_info_hash(info_hash: str) -> dict | None:
+    if not info_hash:
+        return None
+
+    batches = [
+        await aria2_client.tell_active(),
+        await aria2_client.tell_waiting(0, 100),
+        await aria2_client.tell_stopped(0, 100),
+    ]
+    for status in [item for batch in batches for item in batch]:
+        if _same_info_hash(status.get("infoHash"), info_hash):
+            return status
+    return None
+
+
 def _format_eta(total_length: int, completed_length: int, download_speed: int) -> str:
     if not total_length or not download_speed or completed_length >= total_length:
         return "Unknown"
@@ -2999,8 +3025,9 @@ def _is_local_torrent_file(source: str) -> bool:
 
 def build_download_started_text(job: dict) -> str:
     title = shorten(clean_download_name(job.get("name", "Unknown torrent")), 90)
+    action = "Download reattached" if job.get("last_line") == "Reattached to existing aria2 download." else "Download started"
     return (
-        f"{ICON_MAGNET} Download started\n\n"
+        f"{ICON_MAGNET} {action}\n\n"
         f"Job: #{job['id']}\n"
         f"Title:\n{title}\n\n"
         f"Engine: aria2 daemon\n"
@@ -3120,15 +3147,12 @@ async def monitor_aria2_job(app: Application, job_id: int):
 async def start_aria2_download(app: Application, chat_id: int, magnet: str, user_id: int = None):
     global job_counter, download_jobs
 
-    async with jobs_lock:
-        job_counter += 1
-        job_id = job_counter
-
     source, selected_files = _split_torrent_source(magnet)
     name = extract_bt_name(source)
 
     is_torrent_file = _is_local_torrent_file(source)
     source_type = "torrent" if is_torrent_file else "magnet" if source.lower().startswith("magnet:") else "uri"
+    info_hash = extract_info_hash(source)
     options = {
         "dir": str(DOWNLOAD_DIR),
         "continue": "true",
@@ -3140,10 +3164,29 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
     if selected_files:
         options["select-file"] = selected_files
 
-    if is_torrent_file:
-        gid = await aria2_client.add_torrent(Path(source), options)
-    else:
-        gid = await aria2_client.add_uri(source, options)
+    initial_status = None
+    reattached = False
+    try:
+        if is_torrent_file:
+            gid = await aria2_client.add_torrent(Path(source), options)
+        else:
+            gid = await aria2_client.add_uri(source, options)
+    except Aria2RpcError as exc:
+        duplicate_hash = extract_info_hash(str(exc)) or info_hash
+        if "already registered" not in str(exc).lower() or not duplicate_hash:
+            raise
+
+        initial_status = await find_aria2_status_by_info_hash(duplicate_hash)
+        if not initial_status:
+            raise
+
+        gid = initial_status["gid"]
+        info_hash = duplicate_hash
+        reattached = True
+
+    async with jobs_lock:
+        job_counter += 1
+        job_id = job_counter
 
     job = {
         "id": job_id,
@@ -3167,14 +3210,17 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
         "upload_speed": 0,
         "connections": 0,
         "num_seeders": 0,
-        "info_hash": "",
+        "info_hash": info_hash,
         "followed_by": [],
         "following": None,
         "eta": "Unknown",
         "started_at": now_ts(),
         "finished_at": None,
-        "last_line": "",
+        "last_line": "Reattached to existing aria2 download." if reattached else "",
     }
+    if initial_status:
+        _apply_aria2_status(job, initial_status)
+        switch_to_followed_gid(job, initial_status)
 
     download_jobs[job_id] = job
 
