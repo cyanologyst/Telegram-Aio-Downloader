@@ -1422,6 +1422,8 @@ def format_download_status_lines(job: dict) -> list[str]:
         f"Down {human_speed(job.get('download_speed', 0))}  |  "
         f"Up {human_speed(job.get('upload_speed', 0))}"
     )
+    peers = int(job.get("connections", 0) or 0)
+    seeders = int(job.get("num_seeders", 0) or 0)
 
     lines = [
         f"{ICON_DOWNLOAD} #{job['id']}  {title}",
@@ -1429,6 +1431,7 @@ def format_download_status_lines(job: dict) -> list[str]:
         bar,
         f"{ICON_BOX} {human_size(done)} / {human_size(total)}",
         f"{ICON_SPEED} {speed}",
+        f"Peers: {peers}  |  Seeders: {seeders}",
     ]
     if upload_done:
         lines.append(f"{ICON_UPLOAD} Uploaded: {human_size(upload_done)}")
@@ -2935,9 +2938,17 @@ def _apply_aria2_status(job: dict, status: dict):
     download_speed = _parse_int_field(status.get("downloadSpeed"))
     upload_length = _parse_int_field(status.get("uploadLength"))
     upload_speed = _parse_int_field(status.get("uploadSpeed"))
+    connections = _parse_int_field(status.get("connections"))
+    num_seeders = _parse_int_field(status.get("numSeeders"))
     rpc_status = status.get("status", "unknown")
 
     job["aria2_status"] = rpc_status
+    job["aria2_gid"] = status.get("gid", job.get("gid"))
+    job["followed_by"] = status.get("followedBy") or []
+    job["following"] = status.get("following")
+    job["info_hash"] = status.get("infoHash") or job.get("info_hash")
+    job["connections"] = connections
+    job["num_seeders"] = num_seeders
     job["total_length"] = total_length
     job["completed_length"] = completed_length
     job["download_speed"] = download_speed
@@ -2948,14 +2959,17 @@ def _apply_aria2_status(job: dict, status: dict):
     job["name"] = _extract_rpc_name(status, job["name"])
 
     if rpc_status == "active":
-        job["status"] = "downloading"
+        job["status"] = "metadata" if not total_length and job.get("source_type") == "magnet" else "downloading"
     elif rpc_status == "waiting":
         job["status"] = "queued"
     elif rpc_status == "paused":
         job["status"] = "paused"
     elif rpc_status == "complete":
-        job["status"] = "completed"
-        job["progress"] = 100.0
+        if status.get("followedBy"):
+            job["status"] = "metadata"
+        else:
+            job["status"] = "completed"
+            job["progress"] = 100.0
     elif rpc_status == "error":
         job["status"] = "failed"
         message = status.get("errorMessage") or status.get("errorCode") or "Unknown error"
@@ -2991,6 +3005,7 @@ def build_download_started_text(job: dict) -> str:
         f"Title:\n{title}\n\n"
         f"Engine: aria2 daemon\n"
         f"GID: {job.get('gid', 'unknown')}\n"
+        f"Mode: {job.get('source_type', 'torrent')}\n"
         f"Folder:\n{DOWNLOAD_DIR}"
     )
 
@@ -3009,8 +3024,31 @@ def build_download_completed_text(job: dict) -> str:
         lines.append(f"Size: {human_size(total)}")
     if uploaded:
         lines.append(f"Uploaded while active: {human_size(uploaded)}")
+    if job.get("metadata_gid"):
+        lines.append(f"Metadata GID: {job['metadata_gid']}")
+    lines.append(f"Download GID: {job.get('gid', 'unknown')}")
     lines.append(f"Folder:\n{DOWNLOAD_DIR}")
     return "\n".join(lines)
+
+
+def switch_to_followed_gid(job: dict, status: dict) -> bool:
+    followed_by = status.get("followedBy") or []
+    if not followed_by:
+        return False
+
+    next_gid = followed_by[0]
+    if not next_gid or next_gid == job.get("gid"):
+        return False
+
+    previous_gid = job.get("gid")
+    job["metadata_gid"] = previous_gid
+    job.setdefault("gid_history", []).append(previous_gid)
+    job["gid"] = next_gid
+    job["aria2_gid"] = next_gid
+    job["status"] = "queued"
+    job["aria2_status"] = "waiting"
+    job["last_line"] = "Torrent metadata resolved; following real download."
+    return True
 
 
 async def monitor_aria2_job(app: Application, job_id: int):
@@ -3020,6 +3058,10 @@ async def monitor_aria2_job(app: Application, job_id: int):
         try:
             status = await aria2_client.tell_status(job["gid"])
             _apply_aria2_status(job, status)
+            if switch_to_followed_gid(job, status):
+                await maybe_auto_update_status_message(app, job, force=True)
+                await asyncio.sleep(1)
+                continue
             await maybe_auto_update_status_message(app, job)
         except Aria2RpcError as exc:
             if "not found" in str(exc).lower() and job["status"] == "cancelled":
@@ -3085,11 +3127,20 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
     source, selected_files = _split_torrent_source(magnet)
     name = extract_bt_name(source)
 
-    options = {"dir": str(DOWNLOAD_DIR)}
+    is_torrent_file = _is_local_torrent_file(source)
+    source_type = "torrent" if is_torrent_file else "magnet" if source.lower().startswith("magnet:") else "uri"
+    options = {
+        "dir": str(DOWNLOAD_DIR),
+        "continue": "true",
+        "follow-torrent": "true",
+        "bt-save-metadata": "true",
+        "bt-metadata-only": "false",
+        "seed-time": "0",
+    }
     if selected_files:
         options["select-file"] = selected_files
 
-    if _is_local_torrent_file(source):
+    if is_torrent_file:
         gid = await aria2_client.add_torrent(Path(source), options)
     else:
         gid = await aria2_client.add_uri(source, options)
@@ -3099,6 +3150,9 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
         "name": name,
         "magnet": source,
         "gid": gid,
+        "gid_history": [gid],
+        "metadata_gid": None,
+        "source_type": source_type,
         "chat_id": chat_id,
         "user_id": user_id or 0,
         "pid": aria2_client.pid,
@@ -3111,6 +3165,11 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
         "download_speed": 0,
         "upload_length": 0,
         "upload_speed": 0,
+        "connections": 0,
+        "num_seeders": 0,
+        "info_hash": "",
+        "followed_by": [],
+        "following": None,
         "eta": "Unknown",
         "started_at": now_ts(),
         "finished_at": None,
@@ -3132,11 +3191,17 @@ async def cancel_job(job_id: int):
     if job["status"] in ("completed", "failed", "cancelled"):
         return False, f"Job #{job_id} is already {job['status']}."
 
-    try:
-        await aria2_client.remove(job["gid"], force=True)
-    except Aria2RpcError as exc:
-        if "not found" not in str(exc).lower():
-            return False, f"Could not cancel job #{job_id}: {exc}"
+    errors = []
+    for gid in dict.fromkeys([job.get("gid"), job.get("metadata_gid")]):
+        if not gid:
+            continue
+        try:
+            await aria2_client.remove(gid, force=True)
+        except Aria2RpcError as exc:
+            if "not found" not in str(exc).lower():
+                errors.append(str(exc))
+    if errors:
+        return False, f"Could not cancel job #{job_id}: {'; '.join(errors)}"
 
     job["status"] = "cancelled"
     job["aria2_status"] = "removed"
