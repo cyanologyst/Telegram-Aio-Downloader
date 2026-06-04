@@ -3,3 +3,4 @@
 *.pyi text eol=lf
 tests/** text eol=lf
 app/** text eol=lf
+*.sh text eol=lf

@@ -33,6 +33,16 @@ pip install -r requirements/dev.txt
 python main.py
 ```
 
+### Ubuntu One-Command Setup
+
+On Ubuntu/Debian, you can let the setup script install system packages, create `.venv`, install Python requirements, and write `.env` interactively:
+
+```bash
+bash scripts/setup_ubuntu.sh
+```
+
+The script asks for BotFather token, Telegram `API_ID`/`API_HASH`, allowed user IDs, and whether to use automatic local ports or manually configure aria2 RPC, dashboard, and mini-app host/port settings.
+
 ## Configuration
 
 Required environment variables:
@@ -53,6 +63,8 @@ Useful optional variables:
 - `WEB_DASHBOARD_ENABLE`: `true` or `false` to enable the local web dashboard.
 - `WEB_DASHBOARD_HOST`: dashboard bind host (default `127.0.0.1`).
 - `WEB_DASHBOARD_PORT`: dashboard port (default `8080`).
+- `WEB_APP_ENABLE`: `true` or `false` to enable the Telegram mini-app.
+- `WEB_APP_HOST`, `WEB_APP_PORT`, `WEB_APP_URL`: mini-app bind settings and public URL.
 
 ## Development
 
