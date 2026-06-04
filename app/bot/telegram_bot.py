@@ -45,8 +45,10 @@ from pyrogram.errors import FloodWait, RPCError
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MenuButtonWebApp,
     ReplyKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
@@ -5225,6 +5227,19 @@ async def post_init(app: Application):
     logger.info("✅ Auto-cleanup task started")
 
 
+    if WEB_APP_ENABLE and WEB_APP_URL:
+        try:
+            await app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Mini-App",
+                    web_app=WebAppInfo(url=WEB_APP_URL),
+                )
+            )
+            logger.info("Telegram mini-app menu button configured")
+        except Exception as exc:
+            logger.warning("Unable to configure Telegram mini-app menu button: %s", exc)
+
+
 async def post_shutdown(app: Application):
     """Cleanup on shutdown - stop pyrogram client and shutdown executor."""
     global zip_executor
@@ -5359,7 +5374,19 @@ def main():
     # Start Flask Web App mini-app server in a background thread
     if WEB_APP_ENABLE:
         try:
-            flask_app = create_web_app(str(DOWNLOAD_DIR), BOT_TOKEN)
+            default_chat_id = next(iter(ALLOWED_USER_IDS), None)
+            flask_app = create_web_app(
+                str(DOWNLOAD_DIR),
+                BOT_TOKEN,
+                download_jobs=download_jobs,
+                bot_loop=asyncio.get_event_loop(),
+                bot_app=app,
+                start_download=start_aria2_download,
+                pause_download=pause_job,
+                resume_download=resume_job,
+                cancel_download=cancel_job,
+                default_chat_id=default_chat_id,
+            )
             
             def run_flask():
                 # Run Flask in a separate thread with HTTPS

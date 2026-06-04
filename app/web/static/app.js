@@ -1,525 +1,420 @@
-// Telegram Web App API
-let tg = window.Telegram?.WebApp;
+const tg = window.Telegram?.WebApp;
 
-// State
-let currentPath = '';
-let selectedFiles = new Set();
-let allFiles = [];
-let viewMode = 'grid'; // 'grid' or 'list'
+let currentPath = "";
+let currentFiles = [];
+let selectedPaths = new Set();
+let activeTab = "files";
 
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener("DOMContentLoaded", () => {
     initTelegramApp();
-    initAOS();
     loadFiles();
-    attachEventListeners();
+    loadDownloads();
+    loadStats();
+    setInterval(loadDownloads, 3000);
+    setInterval(loadStats, 10000);
 });
 
 function initTelegramApp() {
-    if (tg) {
-        tg.ready();
-        tg.expand();
-        tg.enableClosingConfirmation();
-        
-        // Set header color
-        tg.setHeaderColor('#3b82f6');
-        tg.setBackgroundColor('#ffffff');
-    }
+    if (!tg) return;
+    tg.ready();
+    tg.expand();
+    tg.enableClosingConfirmation();
+    tg.setHeaderColor("#e0e5ec");
+    tg.setBackgroundColor("#e0e5ec");
 }
 
-function initAOS() {
-    if (window.AOS) {
-        AOS.init({
-            duration: 400,
-            once: true,
-            easing: 'ease-in-out'
+function apiHeaders(extra = {}) {
+    return {
+        "X-Init-Data": tg?.initData || "",
+        ...extra,
+    };
+}
+
+function switchTab(tabId, element) {
+    activeTab = tabId;
+    document.querySelectorAll(".tab-content").forEach((tab) => tab.classList.remove("active"));
+    document.querySelectorAll(".nav-item").forEach((nav) => nav.classList.remove("active"));
+
+    document.getElementById(`tab-${tabId}`).classList.add("active");
+    element.classList.add("active");
+    document.getElementById("header-title").innerText = element.getAttribute("data-title");
+
+    if (tabId === "downloads") loadDownloads();
+    if (tabId === "info") loadStats();
+}
+
+async function loadFiles() {
+    const list = document.getElementById("file-list");
+    list.innerHTML = `<div class="empty-state">Loading files...</div>`;
+
+    try {
+        const response = await fetch(`/api/files?path=${encodeURIComponent(currentPath)}`, {
+            headers: apiHeaders(),
         });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+
+        currentPath = data.current_path || "";
+        currentFiles = data.items || [];
+        selectedPaths.clear();
+        renderBreadcrumbs();
+        renderFiles();
+        updateBackButton();
+        await loadStats();
+    } catch (error) {
+        list.innerHTML = `<div class="empty-state">Could not load files.<br>${escapeHtml(error.message)}</div>`;
     }
 }
 
-function attachEventListeners() {
-    // Back button
-    document.getElementById('backBtn').addEventListener('click', goBack);
-    
-    // Search
-    document.getElementById('searchInput').addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') performSearch();
-    });
-    
-    // Archive format - update from radio to select
-    document.querySelectorAll('input[name="archiveFormat"]').forEach(radio => {
-        radio.addEventListener('change', (e) => {
-            // Format changed
-        });
-    });
-}
-
-// ==================== File Loading & Display ====================
-
-function loadFiles() {
-    const browser = document.getElementById('fileBrowser');
-    const loading = document.getElementById('loadingState');
-    const empty = document.getElementById('emptyState');
-    const error = document.getElementById('errorState');
-    
-    // Show loading
-    loading.classList.remove('hidden');
-    browser.innerHTML = '';
-    empty.classList.add('hidden');
-    error.classList.add('hidden');
-    
-    // Disable action buttons
-    document.getElementById('backBtn').disabled = true;
-    
-    fetch(`/api/files?path=${encodeURIComponent(currentPath)}`, {
-        headers: {
-            'X-Init-Data': tg?.initData || ''
-        }
-    })
-        .then(r => {
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            return r.json();
-        })
-        .then(data => {
-            loading.classList.add('hidden');
-            
-            allFiles = data.items || [];
-            
-            if (allFiles.length === 0) {
-                empty.classList.remove('hidden');
-            } else {
-                renderFiles(allFiles);
-            }
-            
-            // Update breadcrumb
-            updateBreadcrumb(data.current_path || '');
-            
-            // Update stats
-            document.getElementById('fileCount').textContent = allFiles.length;
-            document.getElementById('totalSize').textContent = data.total_size || '0 B';
-            
-            // Update back button
-            document.getElementById('backBtn').disabled = !currentPath;
-        })
-        .catch(err => {
-            console.error('Error loading files:', err);
-            loading.classList.add('hidden');
-            error.classList.remove('hidden');
-            document.getElementById('errorMessage').textContent = err.message;
-        });
-}
-
-function renderFiles(files) {
-    const browser = document.getElementById('fileBrowser');
-    browser.innerHTML = '';
-    
-    files.forEach((file, index) => {
-        const item = createFileItem(file);
-        item.setAttribute('data-aos', 'fade-up');
-        item.setAttribute('data-aos-delay', (index * 30) % 300);
-        browser.appendChild(item);
-    });
-    
-    // Re-initialize AOS for new elements
-    if (window.AOS) {
-        AOS.refresh();
-    }
-}
-
-function createFileItem(file) {
-    const item = document.createElement('div');
-    item.className = `file-item ${file.type === 'folder' ? 'folder' : ''}`;
-    
-    if (selectedFiles.has(file.path)) {
-        item.classList.add('selected');
-    }
-    
-    const isSelected = selectedFiles.has(file.path);
-    
-    item.innerHTML = `
-        <div class="file-item-checkbox">${isSelected ? '✓' : '○'}</div>
-        <div class="file-item-icon">${file.icon || (file.type === 'folder' ? '📁' : '📄')}</div>
-        <div class="file-item-name" title="${file.name}">${file.name}</div>
-        ${file.type !== 'folder' ? `<div class="file-item-size">${file.size_readable}</div>` : ''}
-    `;
-    
-    // Click handler
-    item.addEventListener('click', (e) => {
-        if (file.type === 'folder') {
-            navigateTo(file.path);
-        } else {
-            toggleFileSelection(file.path);
-            item.classList.toggle('selected');
-            renderFiles(allFiles);
-        }
-    });
-    
-    // Context menu for files
-    if (file.type !== 'folder') {
-        item.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            toggleFileSelection(file.path);
-            item.classList.toggle('selected');
-            renderFiles(allFiles);
-        });
-    }
-    
-    return item;
-}
-
-function updateBreadcrumb(path) {
-    currentPath = path;
-    const breadcrumb = document.getElementById('breadcrumb');
-    breadcrumb.innerHTML = '';
-    
-    // Root
-    const rootItem = document.createElement('span');
-    rootItem.className = 'breadcrumb-item active';
-    rootItem.innerHTML = '<i class="fas fa-folder"></i> Root';
-    rootItem.onclick = () => navigateTo('');
-    breadcrumb.appendChild(rootItem);
-    
-    // Parts
-    if (path) {
-        const parts = path.split('/');
-        let current = '';
-        
-        parts.forEach(part => {
-            if (part) {
-                current += (current ? '/' : '') + part;
-                
-                const sep = document.createElement('span');
-                sep.style.opacity = '0.5';
-                sep.textContent = ' / ';
-                breadcrumb.appendChild(sep);
-                
-                const item = document.createElement('span');
-                item.className = 'breadcrumb-item';
-                item.textContent = part;
-                item.onclick = () => navigateTo(current);
-                breadcrumb.appendChild(item);
-            }
-        });
-    }
-}
-
-function navigateTo(path) {
-    currentPath = path;
-    selectedFiles.clear();
-    updateSelectedCount();
-    loadFiles();
-}
-
-function goBack() {
-    if (currentPath) {
-        const parts = currentPath.split('/');
-        parts.pop();
-        navigateTo(parts.join('/'));
-    }
-}
-
-// ==================== File Selection ====================
-
-function toggleFileSelection(path) {
-    if (selectedFiles.has(path)) {
-        selectedFiles.delete(path);
-    } else {
-        selectedFiles.add(path);
-    }
-    updateSelectedCount();
-}
-
-function selectAll() {
-    allFiles.forEach(file => {
-        if (file.type !== 'folder') {
-            selectedFiles.add(file.path);
-        }
-    });
-    renderFiles(allFiles);
-    updateSelectedCount();
-    showNotification('✓ All files selected');
-}
-
-function deselectAll() {
-    selectedFiles.clear();
-    renderFiles(allFiles);
-    updateSelectedCount();
-    showNotification('Cleared selection');
-}
-
-function updateSelectedCount() {
-    document.getElementById('selectedCount').textContent = selectedFiles.size;
-    
-    // Disable action buttons if nothing selected
-    const hasSelection = selectedFiles.size > 0;
-    document.getElementById('deleteBtn').disabled = !hasSelection;
-    document.getElementById('archiveBtn').disabled = !hasSelection;
-    document.getElementById('uploadBtn').disabled = false; // Always enable
-}
-
-// ==================== Search ====================
-
-function toggleSearch() {
-    const searchBar = document.getElementById('searchBar');
-    searchBar.classList.toggle('hidden');
-    
-    if (!searchBar.classList.contains('hidden')) {
-        document.getElementById('searchInput').focus();
-    }
-}
-
-function performSearch() {
-    const query = document.getElementById('searchInput').value;
-    const type = document.getElementById('filterType').value;
-    
-    if (!query && !type) {
-        showNotification('⚠️ Enter a search query');
+function renderFiles() {
+    const list = document.getElementById("file-list");
+    if (currentFiles.length === 0) {
+        list.innerHTML = `<div class="empty-state">This directory is empty.</div>`;
         return;
     }
-    
-    const url = `/api/files/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}`;
-    
-    fetch(url, {
-        headers: {
-            'X-Init-Data': tg?.initData || ''
-        }
-    })
-        .then(r => r.json())
-        .then(data => {
-            allFiles = data.results || [];
-            
-            if (allFiles.length === 0) {
-                document.getElementById('fileBrowser').innerHTML = '';
-                document.getElementById('emptyState').classList.remove('hidden');
-            } else {
-                document.getElementById('emptyState').classList.add('hidden');
-                renderFiles(allFiles);
-            }
-            
-            updateBreadcrumb('🔍 Search Results');
-            showNotification(`✓ Found ${allFiles.length} result(s)`);
+
+    list.innerHTML = currentFiles
+        .map((item) => {
+            const isFolder = item.type === "folder";
+            const icon = isFolder ? "fa-folder-closed" : iconForFile(item.name);
+            const size = isFolder ? "Folder" : item.size_readable || formatBytes(item.size || 0);
+            const modified = item.modified ? new Date(item.modified).toLocaleDateString() : "";
+            const checked = selectedPaths.has(item.path) ? "checked" : "";
+            return `
+                <div class="file-item neu-out" onclick="handleRowClick('${jsString(item.path)}', ${isFolder})">
+                    <div class="file-info">
+                        <div class="file-icon neu-in ${isFolder ? "folder-icon" : ""}">
+                            <i class="fas ${icon}"></i>
+                        </div>
+                        <div class="file-details">
+                            <h4>${escapeHtml(item.name)}</h4>
+                            <p>${escapeHtml(size)} &bull; ${escapeHtml(modified)}</p>
+                        </div>
+                    </div>
+                    <label class="checkbox-wrapper" onclick="event.stopPropagation()">
+                        <input type="checkbox" class="file-checkbox" value="${escapeHtml(item.path)}" ${checked}
+                            onchange="toggleSelection('${jsString(item.path)}', this.checked)">
+                        <div class="checkmark"></div>
+                    </label>
+                </div>
+            `;
         })
-        .catch(err => {
-            console.error('Search error:', err);
-            showNotification('❌ Search failed');
-        });
+        .join("");
 }
 
-// ==================== Delete Operations ====================
-
-function showDeleteConfirm() {
-    if (selectedFiles.size === 0) {
-        showNotification('⚠️ No files selected');
-        return;
-    }
-    
-    document.getElementById('deleteCount').textContent = `Are you sure you want to delete ${selectedFiles.size} file(s)? This action cannot be undone.`;
-    openModal('deleteModal');
-}
-
-function confirmDelete() {
-    closeModal('deleteModal');
-    deleteFiles(Array.from(selectedFiles));
-}
-
-function deleteFiles(paths) {
-    if (paths.length === 0) return;
-    
-    showNotification('🗑️ Deleting files...');
-    
-    fetch('/api/files/delete', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Init-Data': tg?.initData || ''
-        },
-        body: JSON.stringify({ paths })
-    })
-        .then(r => r.json())
-        .then(data => {
-            showNotification(`✓ ${data.message}`);
-            selectedFiles.clear();
-            loadFiles();
-        })
-        .catch(err => {
-            console.error('Delete error:', err);
-            showNotification('❌ Delete failed');
-        });
-}
-
-// ==================== Archive Operations ====================
-
-function showArchiveDialog() {
-    if (selectedFiles.size === 0) {
-        showNotification('⚠️ No files selected');
-        return;
-    }
-    
-    document.getElementById('archiveFileCount').textContent = selectedFiles.size;
-    document.getElementById('archiveName').value = `archive_${new Date().toISOString().slice(0, 10)}`;
-    openModal('archiveModal');
-}
-
-function createArchive() {
-    const name = document.getElementById('archiveName').value.trim();
-    const format = document.querySelector('input[name="archiveFormat"]:checked').value;
-    
-    if (!name) {
-        showNotification('⚠️ Enter archive name');
-        return;
-    }
-    
-    closeModal('archiveModal');
-    showNotification('📦 Creating archive...');
-    
-    fetch('/api/files/create-archive', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Init-Data': tg?.initData || ''
-        },
-        body: JSON.stringify({
-            paths: Array.from(selectedFiles),
-            name,
-            format
-        })
-    })
-        .then(r => r.json())
-        .then(data => {
-            if (data.error) {
-                showNotification(`❌ Error: ${data.error}`);
-            } else {
-                showNotification(`✓ Archive created: ${data.archive}`);
-                selectedFiles.clear();
-                loadFiles();
-            }
-        })
-        .catch(err => {
-            console.error('Archive error:', err);
-            showNotification('❌ Archive creation failed');
-        });
-}
-
-// ==================== Upload Dialog ====================
-
-function showUploadDialog() {
-    document.getElementById('uploadUrl').value = '';
-    openModal('uploadModal');
-}
-
-function startUpload() {
-    const urls = document.getElementById('uploadUrl').value.trim().split('\n').filter(u => u.trim());
-    
-    if (urls.length === 0) {
-        showNotification('⚠️ Enter at least one URL');
-        return;
-    }
-    
-    closeModal('uploadModal');
-    showNotification(`📌 Queued ${urls.length} download(s)`);
-    
-    setTimeout(() => {
+function handleRowClick(path, isFolder) {
+    if (isFolder) {
+        currentPath = path;
         loadFiles();
-    }, 2000);
-}
-
-// ==================== View Mode ====================
-
-function toggleViewMode() {
-    viewMode = viewMode === 'grid' ? 'list' : 'grid';
-    
-    const browser = document.getElementById('fileBrowser');
-    if (viewMode === 'list') {
-        browser.classList.add('list-view');
-        document.getElementById('viewToggleBtn').innerHTML = '<i class="fas fa-list"></i>';
-    } else {
-        browser.classList.remove('list-view');
-        document.getElementById('viewToggleBtn').innerHTML = '<i class="fas fa-th"></i>';
+        return;
     }
-    
-    renderFiles(allFiles);
+    const next = !selectedPaths.has(path);
+    toggleSelection(path, next);
+    renderFiles();
 }
 
-function reloadFiles() {
-    selectedFiles.clear();
+function toggleSelection(path, checked) {
+    if (checked) selectedPaths.add(path);
+    else selectedPaths.delete(path);
+}
+
+function navigateUp() {
+    if (!currentPath) return;
+    const parts = currentPath.split("/");
+    parts.pop();
+    currentPath = parts.join("/");
     loadFiles();
 }
 
-// ==================== Modal Management ====================
+function jumpToPath(path) {
+    currentPath = path;
+    loadFiles();
+}
 
-function openModal(id) {
-    const modal = document.getElementById(id);
-    if (modal) {
-        modal.classList.remove('hidden');
-        document.body.style.overflow = 'hidden';
+function renderBreadcrumbs() {
+    const container = document.getElementById("breadcrumbs");
+    const parts = currentPath ? currentPath.split("/").filter(Boolean) : [];
+    const crumbs = [`<span class="breadcrumb-item" onclick="jumpToPath('')">Root</span>`];
+    let path = "";
+
+    parts.forEach((part) => {
+        path += (path ? "/" : "") + part;
+        crumbs.push(`<span class="breadcrumb-separator">/</span>`);
+        crumbs.push(`<span class="breadcrumb-item" onclick="jumpToPath('${jsString(path)}')">${escapeHtml(part)}</span>`);
+    });
+
+    container.innerHTML = crumbs.join("");
+}
+
+function updateBackButton() {
+    const backBtn = document.getElementById("back-btn");
+    backBtn.disabled = !currentPath;
+    backBtn.style.opacity = currentPath ? "1" : "0.4";
+}
+
+function triggerUpload() {
+    document.getElementById("file-upload").click();
+}
+
+async function handleFileUpload(event) {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+
+    const form = new FormData();
+    form.append("path", currentPath);
+    files.forEach((file) => form.append("files", file));
+
+    toast(`Uploading ${files.length} file(s)...`);
+    try {
+        const response = await fetch("/api/files/upload", {
+            method: "POST",
+            headers: apiHeaders(),
+            body: form,
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Upload failed");
+        toast(data.message || "Upload complete");
+        event.target.value = "";
+        loadFiles();
+    } catch (error) {
+        toast(`Upload failed: ${error.message}`);
     }
 }
 
-function closeModal(id) {
-    const modal = document.getElementById(id);
-    if (modal) {
-        modal.classList.add('hidden');
-        document.body.style.overflow = '';
+async function deleteFiles() {
+    const paths = Array.from(selectedPaths);
+    if (paths.length === 0) {
+        toast("Select files or folders first");
+        return;
+    }
+    if (!window.confirm(`Delete ${paths.length} selected item(s)?`)) return;
+
+    toast("Deleting...");
+    try {
+        const response = await fetch("/api/files/delete", {
+            method: "POST",
+            headers: apiHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ paths }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Delete failed");
+        toast(data.message || "Deleted");
+        loadFiles();
+    } catch (error) {
+        toast(`Delete failed: ${error.message}`);
     }
 }
 
-// Close modal on outside click
-document.addEventListener('click', (e) => {
-    if (e.target.classList.contains('modal-overlay')) {
-        e.target.parentElement.classList.add('hidden');
-        document.body.style.overflow = '';
+async function zipFiles() {
+    const paths = Array.from(selectedPaths);
+    if (paths.length === 0) {
+        toast("Select files or folders first");
+        return;
     }
-});
 
-// ==================== Notifications ====================
-
-function showNotification(message, duration = 3000) {
-    const notification = document.getElementById('notification');
-    document.getElementById('notificationText').textContent = message;
-    notification.classList.remove('hidden');
-    
-    if (duration > 0) {
-        setTimeout(hideNotification, duration);
+    const name = `archive_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
+    toast("Creating archive...");
+    try {
+        const response = await fetch("/api/files/create-archive", {
+            method: "POST",
+            headers: apiHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ paths, name, format: "zip" }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Archive failed");
+        toast(`Created ${data.archive}`);
+        loadFiles();
+    } catch (error) {
+        toast(`Archive failed: ${error.message}`);
     }
 }
 
-function hideNotification() {
-    const notification = document.getElementById('notification');
-    notification.classList.add('hidden');
+function showDownloadDialog() {
+    document.getElementById("download-source").value = "";
+    document.getElementById("download-modal").classList.remove("hidden");
 }
 
-// ==================== Stats ====================
+function closeDownloadDialog() {
+    document.getElementById("download-modal").classList.add("hidden");
+}
 
-function loadStats() {
-    fetch('/api/stats', {
-        headers: {
-            'X-Init-Data': tg?.initData || ''
-        }
-    })
-        .then(r => r.json())
-        .then(data => {
-            // Update stats bar
-            document.getElementById('fileCount').textContent = data.file_count;
-            document.getElementById('totalSize').textContent = data.total_size;
+async function startDownloads() {
+    const sources = document
+        .getElementById("download-source")
+        .value.split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    if (sources.length === 0) {
+        toast("Paste at least one URL or magnet link");
+        return;
+    }
+
+    closeDownloadDialog();
+    toast(`Starting ${sources.length} download(s)...`);
+    try {
+        const response = await fetch("/api/downloads/start", {
+            method: "POST",
+            headers: apiHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ sources }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Could not start download");
+        const started = data.started?.length || 0;
+        const failed = data.errors?.length || 0;
+        toast(`Started ${started}; failed ${failed}`);
+        loadDownloads();
+    } catch (error) {
+        toast(`Start failed: ${error.message}`);
+    }
+}
+
+async function loadDownloads() {
+    try {
+        const response = await fetch("/api/downloads", { headers: apiHeaders() });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Downloads unavailable");
+        renderDownloads(data.jobs || []);
+        document.getElementById("dl-speed").innerText = formatSpeed(data.total_down_speed || 0);
+    } catch (error) {
+        document.getElementById("download-list").innerHTML =
+            `<div class="empty-state">Could not load downloads.<br>${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function renderDownloads(downloads) {
+    const list = document.getElementById("download-list");
+    if (downloads.length === 0) {
+        list.innerHTML = `<div class="empty-state">No downloads yet.</div>`;
+        return;
+    }
+
+    list.innerHTML = downloads
+        .map((dl) => {
+            const progress = Math.max(0, Math.min(100, Number(dl.progress || 0)));
+            const isPaused = dl.status === "paused";
+            const isFinished = ["completed", "failed", "cancelled"].includes(dl.status);
+            const toggleAction = isPaused ? "resume" : "pause";
+            const toggleIcon = isPaused ? "fa-play" : "fa-pause";
+            const toggleText = isPaused ? "Resume" : "Pause";
+            return `
+                <div class="download-item neu-out">
+                    <div class="dl-header">
+                        <span>${escapeHtml(dl.name || "Unknown download")}</span>
+                        <span>${progress.toFixed(1)}%</span>
+                    </div>
+                    <div class="progress-track neu-in">
+                        <div class="progress-bar" style="width: ${progress}%"></div>
+                    </div>
+                    <div class="dl-status">
+                        ${escapeHtml(titleCase(dl.status || "unknown"))} &bull;
+                        ${escapeHtml(dl.completed_readable || "0 B")} / ${escapeHtml(dl.total_readable || "0 B")}<br>
+                        Down ${formatSpeed(dl.download_speed || 0)} &bull; Up ${formatSpeed(dl.upload_speed || 0)} &bull;
+                        ETA ${escapeHtml(dl.eta || "Unknown")}
+                    </div>
+                    ${
+                        isFinished
+                            ? ""
+                            : `<div class="download-controls">
+                                <button class="neu-btn text-accent" onclick="controlDownload(${dl.id}, '${toggleAction}')">
+                                    <i class="fas ${toggleIcon}"></i> ${toggleText}
+                                </button>
+                                <button class="neu-btn text-danger" onclick="controlDownload(${dl.id}, 'cancel')">
+                                    <i class="fas fa-stop"></i> Cancel
+                                </button>
+                            </div>`
+                    }
+                </div>
+            `;
         })
-        .catch(err => console.error('Stats error:', err));
+        .join("");
 }
 
-// Update stats every 30 seconds
-setInterval(loadStats, 30000);
-
-// ==================== Telegram Mini-App Integration ====================
-
-// Send data back to bot if needed
-function sendDataToBot(data) {
-    if (tg) {
-        tg.sendData(JSON.stringify(data));
+async function controlDownload(jobId, action) {
+    toast(`${titleCase(action)} job #${jobId}...`);
+    try {
+        const response = await fetch(`/api/downloads/${jobId}/${action}`, {
+            method: "POST",
+            headers: apiHeaders(),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || "Action failed");
+        toast(data.message || "Done");
+        loadDownloads();
+    } catch (error) {
+        toast(`${titleCase(action)} failed: ${error.message}`);
     }
 }
 
-// Handle closing
-function closeApp() {
-    if (tg) {
-        tg.close();
+async function loadStats() {
+    try {
+        const [statsResponse, downloadsResponse] = await Promise.all([
+            fetch("/api/stats", { headers: apiHeaders() }),
+            fetch("/api/downloads", { headers: apiHeaders() }),
+        ]);
+        const stats = await statsResponse.json();
+        const downloads = await downloadsResponse.json();
+        if (!statsResponse.ok || stats.error) throw new Error(stats.error || "Stats failed");
+
+        const totalItems = (stats.file_count || 0) + (stats.folder_count || 0);
+        const totalBytes = stats.total_size_bytes || 0;
+        const displayLimit = Math.max(totalBytes, 1 * 1024 * 1024 * 1024);
+        const percentage = Math.min(100, Math.round((totalBytes / displayLimit) * 100));
+
+        document.getElementById("total-count").innerText = totalItems.toLocaleString();
+        document.getElementById("storage-percentage").innerText = `${percentage}%`;
+        document.getElementById("storage-ratio").innerText = stats.total_size || "0 B";
+        document.getElementById("storage-summary").innerText =
+            `${stats.file_count || 0} files, ${stats.folder_count || 0} folders in the download tree.`;
+        document.getElementById("dl-speed").innerText = formatSpeed(downloads.total_down_speed || 0);
+    } catch (error) {
+        console.error(error);
     }
+}
+
+function iconForFile(name) {
+    if (/\.(jpg|jpeg|png|gif|webp)$/i.test(name)) return "fa-image";
+    if (/\.(zip|rar|tar|gz|7z)$/i.test(name)) return "fa-file-zipper";
+    if (/\.(mp4|mkv|mov|avi|webm)$/i.test(name)) return "fa-file-video";
+    if (/\.(mp3|wav|flac|aac|ogg)$/i.test(name)) return "fa-file-audio";
+    if (/\.(json|txt|py|html|css|js|ts|md)$/i.test(name)) return "fa-file-code";
+    if (/\.(pdf|doc|docx)$/i.test(name)) return "fa-file-lines";
+    return "fa-file";
+}
+
+function formatBytes(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+    return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function formatSpeed(bytesPerSecond) {
+    return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function titleCase(text) {
+    return String(text).replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function toast(message) {
+    const el = document.getElementById("toast");
+    el.textContent = message;
+    el.classList.remove("hidden");
+    clearTimeout(window.toastTimer);
+    window.toastTimer = setTimeout(() => el.classList.add("hidden"), 2600);
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function jsString(value) {
+    return String(value ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }

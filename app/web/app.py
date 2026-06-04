@@ -2,17 +2,34 @@
 
 import hashlib
 import hmac
+import json
 import shutil
+import time
+import zipfile
+from collections.abc import Callable
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
 
 from flask import Flask, jsonify, render_template, request, send_file
 from flask_cors import CORS
 
 
-def create_web_app(download_dir: str, bot_token: str) -> Flask:
+def create_web_app(
+    download_dir: str,
+    bot_token: str,
+    *,
+    download_jobs: dict[Any, Any] | None = None,
+    bot_loop: Any = None,
+    bot_app: Any = None,
+    start_download: Callable[..., Any] | None = None,
+    pause_download: Callable[..., Any] | None = None,
+    resume_download: Callable[..., Any] | None = None,
+    cancel_download: Callable[..., Any] | None = None,
+    default_chat_id: int | None = None,
+) -> Flask:
     """
     Create and configure Flask app for Telegram mini-app.
 
@@ -27,6 +44,14 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
     # Store config
     app.download_dir = Path(download_dir)
     app.bot_token = bot_token
+    app.download_jobs = download_jobs if download_jobs is not None else {}
+    app.bot_loop = bot_loop
+    app.bot_app = bot_app
+    app.start_download = start_download
+    app.pause_download = pause_download
+    app.resume_download = resume_download
+    app.cancel_download = cancel_download
+    app.default_chat_id = default_chat_id
 
     # Ensure download directory exists
     app.download_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +84,38 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
         except Exception as e:
             print(f"Validation error: {e}")
             return False
+
+    def parse_telegram_user(init_data: str) -> dict[str, Any] | None:
+        """Parse the Telegram user object from initData without trusting it for auth."""
+        if not init_data:
+            return None
+        try:
+            params = dict(parse_qsl(init_data, keep_blank_values=True))
+            raw_user = params.get("user")
+            return json.loads(raw_user) if raw_user else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def get_request_user() -> dict[str, Any] | None:
+        return parse_telegram_user(request.headers.get("X-Init-Data", ""))
+
+    def secure_path(path: str = "") -> Path:
+        target = (app.download_dir / path).resolve()
+        base = app.download_dir.resolve()
+        try:
+            target.relative_to(base)
+        except ValueError as exc:
+            raise PermissionError("Access denied") from exc
+        return target
+
+    def run_bot_coroutine(coro: Any) -> Any:
+        if app.bot_loop is None:
+            raise RuntimeError("Bot event loop is not available")
+
+        import asyncio
+
+        future = asyncio.run_coroutine_threadsafe(coro, app.bot_loop)
+        return future.result(timeout=30)
 
     def require_telegram_auth(f):
         """Decorator to validate Telegram auth for API endpoints."""
@@ -93,6 +150,31 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
             "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
             "thumbnail": thumbnail,
             "extension": file_path.suffix.lower() if not is_dir else "",
+        }
+
+    def serialize_download_job(job: dict[str, Any]) -> dict[str, Any]:
+        total = int(job.get("total_length", 0) or 0)
+        completed = int(job.get("completed_length", 0) or 0)
+        progress = float(job.get("progress", 0.0) or 0.0)
+        return {
+            "id": job.get("id"),
+            "name": job.get("name", "Unknown download"),
+            "status": job.get("status", "unknown"),
+            "aria2_status": job.get("aria2_status", "unknown"),
+            "gid": job.get("gid"),
+            "source_type": job.get("source_type", "download"),
+            "progress": progress,
+            "completed_length": completed,
+            "total_length": total,
+            "completed_readable": format_size(completed),
+            "total_readable": format_size(total),
+            "download_speed": int(job.get("download_speed", 0) or 0),
+            "upload_speed": int(job.get("upload_speed", 0) or 0),
+            "eta": job.get("eta", "Unknown"),
+            "peers": int(job.get("connections", 0) or 0),
+            "seeders": int(job.get("num_seeders", 0) or 0),
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
         }
 
     def format_size(bytes_size: int) -> str:
@@ -161,15 +243,7 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
 
         # Security: prevent directory traversal
         try:
-            if path_param:
-                target_dir = app.download_dir / path_param
-                target_dir = target_dir.resolve()
-
-                # Ensure the resolved path is still within download_dir
-                if not str(target_dir).startswith(str(app.download_dir)):
-                    return jsonify({"error": "Access denied"}), 403
-            else:
-                target_dir = app.download_dir
+            target_dir = secure_path(path_param) if path_param else app.download_dir.resolve()
 
             if not target_dir.exists():
                 return jsonify({"error": "Directory not found"}), 404
@@ -195,7 +269,9 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
             return jsonify(
                 {
                     "current_path": (
-                        str(target_dir.relative_to(app.download_dir)) if path_param else ""
+                        str(target_dir.relative_to(app.download_dir.resolve()))
+                        if path_param
+                        else ""
                     ),
                     "items": items,
                     "total_size": format_size(
@@ -223,10 +299,7 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
         for path in paths:
             try:
                 # Security check
-                file_path = (app.download_dir / path).resolve()
-                if not str(file_path).startswith(str(app.download_dir)):
-                    errors.append({"path": path, "error": "Access denied"})
-                    continue
+                file_path = secure_path(path)
 
                 if not file_path.exists():
                     errors.append({"path": path, "error": "File not found"})
@@ -301,9 +374,7 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
             # Verify all paths exist and are within download_dir
             files_to_archive = []
             for path in paths:
-                file_path = (app.download_dir / path).resolve()
-                if not str(file_path).startswith(str(app.download_dir)):
-                    return jsonify({"error": f"Access denied: {path}"}), 403
+                file_path = secure_path(path)
                 if not file_path.exists():
                     return jsonify({"error": f"Not found: {path}"}), 404
                 files_to_archive.append(file_path)
@@ -312,12 +383,18 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
             archive_path = app.download_dir / f"{archive_name}.{archive_format}"
 
             if archive_format == "zip":
-                shutil.make_archive(
-                    str(archive_path.with_suffix("")),
-                    "zip",
-                    app.download_dir,
-                    *[Path(p).name for p in paths],
-                )
+                with zipfile.ZipFile(
+                    archive_path, "w", compression=zipfile.ZIP_DEFLATED
+                ) as archive:
+                    for file_path in files_to_archive:
+                        if file_path.is_file():
+                            archive.write(
+                                file_path, arcname=file_path.relative_to(app.download_dir)
+                            )
+                        else:
+                            for item in file_path.rglob("*"):
+                                if item.is_file():
+                                    archive.write(item, arcname=item.relative_to(app.download_dir))
             elif archive_format == "7z":
                 # For 7z, we'd need py7zr library (already in requirements)
                 import py7zr
@@ -345,16 +422,110 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
         except Exception as e:
             return jsonify({"error": f"Archive creation failed: {str(e)}"}), 500
 
+    @app.route("/api/files/upload", methods=["POST"])
+    @require_telegram_auth
+    def upload_files():
+        """Upload local browser files into the current mini-app folder."""
+        target_path = request.form.get("path", "").strip()
+        try:
+            target_dir = secure_path(target_path)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if not target_dir.is_dir():
+                return jsonify({"error": "Upload target is not a directory"}), 400
+
+            saved = []
+            for incoming in request.files.getlist("files"):
+                if not incoming.filename:
+                    continue
+                safe_name = Path(incoming.filename).name
+                destination = secure_path(str(Path(target_path) / safe_name))
+                incoming.save(destination)
+                saved.append(str(destination.relative_to(app.download_dir.resolve())))
+
+            return jsonify({"saved": saved, "message": f"Uploaded {len(saved)} file(s)"})
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/downloads")
+    @require_telegram_auth
+    def list_downloads():
+        jobs = [
+            serialize_download_job(job)
+            for job in sorted(
+                app.download_jobs.values(), key=lambda item: item.get("id", 0), reverse=True
+            )
+        ]
+        active = [job for job in jobs if job["status"] not in {"completed", "failed", "cancelled"}]
+        return jsonify(
+            {
+                "jobs": jobs,
+                "active": active,
+                "updated_at": time.time(),
+                "total_down_speed": sum(job["download_speed"] for job in active),
+                "total_up_speed": sum(job["upload_speed"] for job in active),
+            }
+        )
+
+    @app.route("/api/downloads/start", methods=["POST"])
+    @require_telegram_auth
+    def start_download_route():
+        if app.start_download is None or app.bot_app is None:
+            return jsonify({"error": "Download control is not available"}), 503
+
+        data = request.get_json() or {}
+        sources = [item.strip() for item in data.get("sources", []) if str(item).strip()]
+        if not sources and data.get("source"):
+            sources = [str(data["source"]).strip()]
+        if not sources:
+            return jsonify({"error": "No URL or magnet link provided"}), 400
+
+        user = get_request_user() or {}
+        chat_id = data.get("chat_id") or user.get("id") or app.default_chat_id
+        user_id = user.get("id") or chat_id or 0
+        if not chat_id:
+            return jsonify({"error": "Open the mini-app from your bot chat first"}), 400
+
+        started = []
+        errors = []
+        for source in sources:
+            try:
+                job = run_bot_coroutine(
+                    app.start_download(app.bot_app, int(chat_id), source, int(user_id))
+                )
+                started.append(serialize_download_job(job))
+            except Exception as exc:
+                errors.append({"source": source, "error": str(exc)})
+
+        status = 200 if started else 500
+        return jsonify({"started": started, "errors": errors}), status
+
+    @app.route("/api/downloads/<int:job_id>/<action>", methods=["POST"])
+    @require_telegram_auth
+    def control_download_route(job_id: int, action: str):
+        handlers = {
+            "pause": app.pause_download,
+            "resume": app.resume_download,
+            "cancel": app.cancel_download,
+        }
+        handler = handlers.get(action)
+        if handler is None:
+            return jsonify({"error": "Unknown action"}), 400
+        try:
+            ok, message = run_bot_coroutine(handler(job_id))
+            return jsonify(
+                {"success": ok, "message": message, "job": app.download_jobs.get(job_id)}
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
     @app.route("/api/files/download/<path:filename>")
     @require_telegram_auth
     def download_file(filename: str):
         """Download a file."""
         try:
-            file_path = (app.download_dir / filename).resolve()
-
-            # Security check
-            if not str(file_path).startswith(str(app.download_dir)):
-                return jsonify({"error": "Access denied"}), 403
+            file_path = secure_path(filename)
 
             if not file_path.exists() or not file_path.is_file():
                 return jsonify({"error": "File not found"}), 404
@@ -368,11 +539,7 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
     def get_thumbnail(filename: str):
         """Get thumbnail for image files."""
         try:
-            file_path = (app.download_dir / filename).resolve()
-
-            # Security check
-            if not str(file_path).startswith(str(app.download_dir)):
-                return jsonify({"error": "Access denied"}), 403
+            file_path = secure_path(filename)
 
             if not file_path.exists() or not file_path.is_file():
                 return jsonify({"error": "File not found"}), 404
@@ -411,6 +578,7 @@ def create_web_app(download_dir: str, bot_token: str) -> Flask:
                     "total_size_bytes": total_size,
                     "file_count": file_count,
                     "folder_count": folder_count,
+                    "download_count": len(app.download_jobs),
                 }
             )
 
