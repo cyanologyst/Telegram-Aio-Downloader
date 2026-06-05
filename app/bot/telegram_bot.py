@@ -269,7 +269,7 @@ LANGUAGES = {
         "target": "📤 Upload target:",
         "target_val": "Your own Telegram account (Saved Messages / me)",
         "help": "❓ Help",
-        "magnet_help": "🧲 Send a magnet link to start downloading.",
+        "magnet_help": "🧲 Send a magnet or direct file URL to start downloading.",
         "status_help": "📊 Status: show active downloads.",
         "queue_help": "📋 Queue: show all jobs.",
         "cancel_help": "🛑 Cancel: show active jobs.",
@@ -314,7 +314,7 @@ LANGUAGES = {
         "yes_upload_all": "✅ Yes, Upload All",
         "yes_delete_folder": "🗑 Yes, Delete Folder",
         "cancelled": "Cancelled.",
-        "unknown_input": "Unknown input.\nUse the keyboard below or send a magnet link.",
+        "unknown_input": "Unknown input.\nUse the keyboard below, send a magnet, direct file URL, or supported media link.",
         "usage": "Usage: cancel <job_id>",
         "not_found": "not found.",
         "deleted_successfully": "✅ Deleted successfully",
@@ -440,7 +440,7 @@ LANGUAGES = {
         "target": "📤 مقصد آپلود:",
         "target_val": "حساب تلگرام شخصی خود (Saved Messages / من)",
         "help": "❓ راهنما",
-        "magnet_help": "🧲 یک لینک مغناطیسی برای شروع دانلود ارسال کنید.",
+        "magnet_help": "🧲 برای شروع دانلود، لینک مگنت یا لینک مستقیم فایل ارسال کنید.",
         "status_help": "📊 وضعیت: نمایش دانلودهای فعال.",
         "queue_help": "📋 صف: نمایش تمام کارها.",
         "cancel_help": "🛑 انصراف: نمایش کارهای فعال.",
@@ -485,7 +485,7 @@ LANGUAGES = {
         "yes_upload_all": "✅ بله، تمام را آپلود کنید",
         "yes_delete_folder": "🗑 بله، پوشه را حذف کنید",
         "cancelled": "لغو شد.",
-        "unknown_input": "ورودی نامعلوم.\nاز صفحه کلید زیر استفاده کنید یا یک لینک مغناطیسی ارسال کنید.",
+        "unknown_input": "ورودی نامعلوم.\nاز صفحه کلید زیر استفاده کنید یا لینک مگنت، لینک مستقیم فایل، یا لینک رسانه پشتیبانی‌شده ارسال کنید.",
         "usage": "نحوه استفاده: cancel <job_id>",
         "not_found": "پیدا نشد.",
         "deleted_successfully": "✅ با موفقیت حذف شد",
@@ -1152,6 +1152,68 @@ def clean_download_name(name: str) -> str:
     name = re.sub(r"^\[metadata\]\s*", "", name, flags=re.I)
     name = re.sub(r"\s+", " ", name.replace("+", " ")).strip()
     return name or "Unknown torrent"
+
+
+DIRECT_HTTP_EXTENSIONS = {
+    ".7z",
+    ".apk",
+    ".avi",
+    ".bin",
+    ".bz2",
+    ".csv",
+    ".deb",
+    ".doc",
+    ".docx",
+    ".exe",
+    ".flac",
+    ".gz",
+    ".iso",
+    ".jpeg",
+    ".jpg",
+    ".m4a",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".msi",
+    ".pdf",
+    ".png",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".torrent",
+    ".txt",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".xz",
+    ".zip",
+}
+
+
+def extract_http_url(text: str) -> str:
+    match = re.search(r"https?://\S+", text.strip(), re.IGNORECASE)
+    if not match:
+        return text.strip()
+    return match.group(0).rstrip(").,]}")
+
+
+def is_http_url(text: str) -> bool:
+    return extract_http_url(text).lower().startswith(("http://", "https://"))
+
+
+def extract_http_filename(url: str) -> str:
+    url = extract_http_url(url)
+    clean_url = url.split("?", 1)[0].split("#", 1)[0]
+    name = Path(unquote_plus(clean_url)).name
+    return clean_download_name(name) if name else "HTTP download"
+
+
+def is_direct_http_download_url(text: str) -> bool:
+    if not is_http_url(text):
+        return False
+    path = extract_http_url(text).split("?", 1)[0].split("#", 1)[0]
+    return Path(path).suffix.lower() in DIRECT_HTTP_EXTENSIONS
 
 
 def now_ts():
@@ -2351,12 +2413,25 @@ SUPPORTED_VIDEO_SITES = (
 
 
 def is_video_url(text: str) -> bool:
-    text = text.strip().lower()
+    text = extract_http_url(text).lower()
 
     if not text.startswith(("http://", "https://")):
         return False
 
     return any(site in text for site in SUPPORTED_VIDEO_SITES)
+
+
+def video_platform_label(url: str) -> str:
+    lowered = url.lower()
+    if "tiktok.com" in lowered:
+        return "TikTok"
+    if "instagram.com" in lowered:
+        return "Instagram"
+    if "twitter.com" in lowered or "x.com" in lowered:
+        return "X / Twitter"
+    if "youtu.be" in lowered or "youtube.com" in lowered:
+        return "YouTube"
+    return "Video"
 
 
 def extract_spotify_url(text: str) -> str:
@@ -3482,21 +3557,29 @@ def _is_local_torrent_file(source: str) -> bool:
 
 
 def build_download_started_text(job: dict) -> str:
-    title = shorten(clean_download_name(job.get("name", "Unknown torrent")), 90)
+    source_type = job.get("source_type", "torrent")
+    title = shorten(clean_download_name(job.get("name", "Download")), 90)
     action = "Download reattached" if job.get("last_line") == "Reattached to existing aria2 download." else "Download started"
+    mode_label = {
+        "http": "direct HTTP/HTTPS",
+        "magnet": "magnet",
+        "torrent": "torrent",
+        "uri": "direct URI",
+    }.get(source_type, source_type)
+    icon = ICON_DOWNLOAD if source_type in ("http", "uri") else ICON_MAGNET
     return (
-        f"{ICON_MAGNET} {action}\n\n"
+        f"{icon} {action}\n\n"
         f"Job: #{job['id']}\n"
         f"Title:\n{title}\n\n"
         f"Engine: aria2 daemon\n"
         f"GID: {job.get('gid', 'unknown')}\n"
-        f"Mode: {job.get('source_type', 'torrent')}\n"
+        f"Mode: {mode_label}\n"
         f"Folder:\n{DOWNLOAD_DIR}"
     )
 
 
 def build_download_completed_text(job: dict) -> str:
-    title = shorten(clean_download_name(job.get("name", "Unknown torrent")), 90)
+    title = shorten(clean_download_name(job.get("name", "Download")), 90)
     total = int(job.get("total_length", 0) or job.get("completed_length", 0) or 0)
     uploaded = int(job.get("upload_length", 0) or 0)
     lines = [
@@ -3606,10 +3689,18 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
     global job_counter, download_jobs
 
     source, selected_files = _split_torrent_source(magnet)
-    name = extract_bt_name(source)
-
     is_torrent_file = _is_local_torrent_file(source)
-    source_type = "torrent" if is_torrent_file else "magnet" if source.lower().startswith("magnet:") else "uri"
+    lowered_source = source.lower()
+    is_http_uri = lowered_source.startswith(("http://", "https://"))
+    source_type = "torrent" if is_torrent_file else "magnet" if lowered_source.startswith("magnet:") else "http" if is_http_uri else "uri"
+    if source_type == "magnet":
+        name = extract_bt_name(source)
+    elif source_type == "http":
+        name = extract_http_filename(source)
+    elif is_torrent_file:
+        name = clean_download_name(Path(source).name)
+    else:
+        name = "Download"
     info_hash = extract_info_hash(source)
     options = {
         "dir": str(DOWNLOAD_DIR),
@@ -4580,20 +4671,42 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif is_video_url(text):
+            video_url = extract_http_url(text)
             pending_ytdlp_requests[user_id] = {
-                "url": text,
+                "url": video_url,
                 "chat_id": chat_id,
             }
 
             await update.message.reply_text(
-                f"{ICON_DOWNLOAD} Choose download format:",
+                f"{ICON_DOWNLOAD} {video_platform_label(video_url)} link detected\n\n"
+                "Choose download format:",
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("🎬 Video", callback_data="ytdlp_video"),
                         InlineKeyboardButton("🎵 MP3", callback_data="ytdlp_mp3"),
                     ],
                 ]),
+                disable_web_page_preview=True,
             )
+
+        elif is_direct_http_download_url(text):
+            direct_url = extract_http_url(text)
+            name = extract_http_filename(direct_url)
+            if is_duplicate_name(name):
+                await update.message.reply_text(
+                    f"{ICON_WARN} {get_lang(user_id, 'duplicate_detected')} {name}",
+                    reply_markup=build_reply_menu(user_id)
+                )
+                return
+
+            job = await start_aria2_download(context.application, chat_id, direct_url, user_id)
+
+            await update.message.reply_text(
+                build_download_started_text(job),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+            await update_status_message(context.application, chat_id, user_id)
 
         elif normalized in ("zip menu", "منوی فشرده‌سازی", "zip", "📦 zip menu"):
             await update.message.reply_text(

@@ -1,14 +1,14 @@
 # Telegram Downloader Bot
 
-Async Telegram downloader bot for torrents, Spotify links, manga galleries, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
+Async Telegram downloader bot for torrents, direct HTTP/HTTPS file links, Spotify links, manga galleries, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
 
 ## Features
 
-- Magnet and `.torrent` downloads through `aria2c`
+- Magnet, `.torrent`, and direct HTTP/HTTPS file downloads through `aria2c`
 - Spotify track/album/playlist downloads through `spotDL`
 - Manga/gallery image downloads with optional PDF conversion
 - The Pirate Bay search integration
-- yt-dlp video/audio downloads
+- yt-dlp video/audio downloads, including Instagram, X/Twitter, TikTok, YouTube, and similar supported sites
 - Telegram Bot API interaction with Pyrogram user-session uploads for large files
 - File browser, batch upload/delete, archive creation, password-protected archives
 - Per-user settings, including forwarded-post auto-download control
