@@ -1542,13 +1542,18 @@ def format_download_status_lines(job: dict) -> list[str]:
             bar,
             f"{ICON_BOX} {human_size(done)} / {human_size(total)}",
         ])
+    elif done:
+        lines.append(f"{ICON_BOX} {human_size(done)} downloaded")
     if provider == "aria2":
         lines.extend([
             f"{ICON_SPEED} {speed}",
             f"Peers: {peers}  |  Seeders: {seeders}",
         ])
-    elif job.get("last_line"):
-        lines.append(f"Last: {shorten(str(job['last_line']), 120)}")
+    else:
+        if job.get("download_speed"):
+            lines.append(f"{ICON_SPEED} Down {human_speed(job.get('download_speed', 0))}")
+        if job.get("last_line"):
+            lines.append(f"Last: {shorten(str(job['last_line']), 120)}")
     if upload_done:
         lines.append(f"{ICON_UPLOAD} Uploaded: {human_size(upload_done)}")
     lines.extend([
@@ -2803,6 +2808,11 @@ async def start_ytdlp_download(
         except Exception as e:
             logger.exception(f"yt-dlp progress hook error: {e}")
 
+    async def refresh_ytdlp_status():
+        while job["status"] in JOB_ACTIVE_STATES:
+            await maybe_auto_update_status_message(app, job)
+            await asyncio.sleep(1)
+
     def run_download():
         ydl_opts = {
             "outtmpl": str(output_dir / "%(title).200B [%(id)s].%(ext)s"),
@@ -2878,6 +2888,7 @@ async def start_ytdlp_download(
             return title, filepath
 
     async def finish_download():
+        refresh_task = asyncio.create_task(refresh_ytdlp_status())
         try:
             title, filepath = await loop.run_in_executor(None, run_download)
 
@@ -2890,6 +2901,7 @@ async def start_ytdlp_download(
                 job["total_length"] = size
             job["download_speed"] = 0
             job["finished_at"] = now_ts()
+            await maybe_auto_update_status_message(app, job, force=True)
 
             await app.bot.send_message(
                 chat_id=chat_id,
@@ -2910,6 +2922,7 @@ async def start_ytdlp_download(
             job["status"] = "failed"
             job["finished_at"] = now_ts()
             job["last_line"] = str(e)
+            await maybe_auto_update_status_message(app, job, force=True)
 
             await app.bot.send_message(
                 chat_id=chat_id,
@@ -2922,7 +2935,14 @@ async def start_ytdlp_download(
                 reply_markup=build_reply_menu(user_id),
                 disable_web_page_preview=True,
             )
+        finally:
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
 
+    await update_status_message(app, chat_id, user_id)
     if run_in_background:
         asyncio.create_task(finish_download())
     else:
@@ -3493,7 +3513,7 @@ async def zip_upload_mini_app_selection(
 # =========================================================
 
 ARIA2_DONE_STATES = {"complete", "error", "removed"}
-JOB_ACTIVE_STATES = {"starting", "downloading", "metadata", "allocating", "queued", "paused"}
+JOB_ACTIVE_STATES = {"starting", "downloading", "metadata", "allocating", "queued", "paused", "processing"}
 
 
 def _parse_int_field(value, default: int = 0) -> int:
