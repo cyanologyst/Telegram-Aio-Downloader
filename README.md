@@ -73,6 +73,7 @@ Useful optional variables:
 - `FFMPEG_BIN`: path to `ffmpeg`.
 - `SPOTDL_BIN`: path to the `spotdl` executable. Spotify downloads are saved under `Download/Spotify`.
 - Hanime downloads are saved under `Download/Hanime` and use `pycryptodomex` for AES HLS decryption.
+- `HANIME_API_URLS`: optional comma-separated Hanime API base URLs. Defaults to `hanime.tv`, `www.hanime.tv`, and `hanime1.com` API hosts.
 - `TPB_API_URL`: optional API Bay mirror.
 - `AUTO_CLEANUP_DAYS`: cleanup threshold for old temporary files.
 - `WEB_DASHBOARD_ENABLE`: `true` or `false` to enable the local web dashboard.

@@ -2,6 +2,7 @@ from app.downloaders.hanime.provider import (
     HanimeDownloader,
     hanime_slug_from_url,
     is_hanime_url,
+    normalize_stream_url,
     parse_hls_playlist,
     parse_iv,
 )
@@ -48,3 +49,25 @@ def test_hanime_hls_parser_tracks_keys_and_sequences():
         "00000000000000000000000000000009"
     )
     assert parse_iv(None, 7) == (7).to_bytes(16, "big")
+
+
+def test_hanime_hls_parser_detects_master_playlist_variants():
+    playlist = parse_hls_playlist("""
+        #EXTM3U
+        #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=854x480
+        480p/index.m3u8
+        #EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720
+        720p/index.m3u8
+        """)
+
+    assert playlist.segments == ()
+    assert playlist.variants == ("480p/index.m3u8", "720p/index.m3u8")
+
+
+def test_hanime_stream_url_normalization():
+    assert normalize_stream_url("//m3u8s.example.com/video.m3u8") == (
+        "https://m3u8s.example.com/video.m3u8"
+    )
+    assert normalize_stream_url("m3u8s.example.com/video.m3u8") == (
+        "https://m3u8s.example.com/video.m3u8"
+    )

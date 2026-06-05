@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+import httpcore
 import httpx
 from Cryptodome.Cipher import AES
 from Cryptodome.Util.Padding import pad, unpad
@@ -20,7 +22,11 @@ HANIME_URL_RE = re.compile(
     r"https?://hanime\.tv/videos/hentai/([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)",
     re.IGNORECASE,
 )
-API_URL = "https://hanime.tv/api/v8"
+DEFAULT_API_URLS = (
+    "https://hanime.tv/api/v8",
+    "https://www.hanime.tv/api/v8",
+    "https://hanime1.com/api/v8",
+)
 RESOLUTION_ORDER = {
     "1080p": 0,
     "720p": 1,
@@ -40,6 +46,7 @@ class HlsSegment:
 @dataclass(frozen=True, slots=True)
 class HlsPlaylist:
     segments: tuple[HlsSegment, ...]
+    variants: tuple[str, ...] = ()
 
 
 def is_hanime_url(text: str) -> bool:
@@ -57,6 +64,14 @@ class HanimeDownloader(BaseDownloader):
     """Download a Hanime episode from its HLS manifest."""
 
     provider_name = "hanime"
+
+    def __init__(self, api_urls: tuple[str, ...] | None = None) -> None:
+        configured = tuple(
+            url.strip().rstrip("/")
+            for url in os.getenv("HANIME_API_URLS", "").split(",")
+            if url.strip()
+        )
+        self.api_urls = api_urls or configured or DEFAULT_API_URLS
 
     async def can_handle(self, url: str) -> bool:
         return is_hanime_url(url)
@@ -77,9 +92,7 @@ class HanimeDownloader(BaseDownloader):
             streams = self._fetch_streams(info)
             stream = self._select_stream(resolution, streams)
             stream_url = str(stream["url"])
-            playlist_response = await client.get(stream_url)
-            playlist_response.raise_for_status()
-            playlist = parse_hls_playlist(playlist_response.text)
+            playlist_url, playlist = await self._fetch_media_playlist(client, stream_url)
             if not playlist.segments:
                 raise RuntimeError("Hanime stream playlist has no segments")
 
@@ -91,7 +104,7 @@ class HanimeDownloader(BaseDownloader):
             chunks = await self._download_segments(
                 client,
                 playlist,
-                stream_url,
+                playlist_url,
                 key_cache,
                 progress_callback if callable(progress_callback) else None,
             )
@@ -115,9 +128,33 @@ class HanimeDownloader(BaseDownloader):
         )
 
     async def _fetch_video_info(self, client: httpx.AsyncClient, slug: str) -> dict[str, Any]:
-        response = await client.get(f"{API_URL}/video", params={"id": slug})
-        response.raise_for_status()
-        return cast(dict[str, Any], response.json())
+        errors = []
+        for api_url in self.api_urls:
+            try:
+                response = await client.get(f"{api_url}/video", params={"id": slug})
+                response.raise_for_status()
+                return cast(dict[str, Any], response.json())
+            except httpx.RequestError as exc:
+                errors.append(_describe_request_error(exc, f"{api_url}/video"))
+            except httpx.HTTPStatusError as exc:
+                errors.append(f"{api_url}/video returned HTTP {exc.response.status_code}")
+        raise RuntimeError("Could not reach Hanime API. Tried: " + "; ".join(errors))
+
+    async def _fetch_media_playlist(
+        self,
+        client: httpx.AsyncClient,
+        stream_url: str,
+    ) -> tuple[str, HlsPlaylist]:
+        playlist_url = normalize_stream_url(stream_url)
+        playlist_response = await get_with_context(client, playlist_url)
+        playlist_response.raise_for_status()
+        playlist = parse_hls_playlist(playlist_response.text)
+        if playlist.variants:
+            variant_url = urljoin(playlist_url, playlist.variants[-1])
+            variant_response = await get_with_context(client, variant_url)
+            variant_response.raise_for_status()
+            return variant_url, parse_hls_playlist(variant_response.text)
+        return playlist_url, playlist
 
     @staticmethod
     def _fetch_streams(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -193,7 +230,7 @@ class HanimeDownloader(BaseDownloader):
         key_cache: dict[str, bytes],
     ) -> bytes:
         segment_url = urljoin(playlist_url, segment.uri)
-        response = await client.get(segment_url)
+        response = await get_with_context(client, segment_url)
         response.raise_for_status()
         data = response.content
 
@@ -202,7 +239,7 @@ class HanimeDownloader(BaseDownloader):
 
         key_url = urljoin(playlist_url, segment.key_uri)
         if key_url not in key_cache:
-            key_response = await client.get(key_url)
+            key_response = await get_with_context(client, key_url)
             key_response.raise_for_status()
             key_cache[key_url] = key_response.content
 
@@ -219,10 +256,12 @@ class HanimeDownloader(BaseDownloader):
 
 def parse_hls_playlist(text: str) -> HlsPlaylist:
     segments: list[HlsSegment] = []
+    variants: list[str] = []
     key_uri: str | None = None
     key_iv: str | None = None
     media_sequence = 0
     next_sequence = 0
+    next_uri_is_variant = False
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -237,12 +276,19 @@ def parse_hls_playlist(text: str) -> HlsPlaylist:
             key_uri = attrs.get("URI")
             key_iv = attrs.get("IV")
             continue
+        if line.startswith("#EXT-X-STREAM-INF:"):
+            next_uri_is_variant = True
+            continue
         if line.startswith("#"):
+            continue
+        if next_uri_is_variant:
+            variants.append(line)
+            next_uri_is_variant = False
             continue
         segments.append(HlsSegment(uri=line, key_uri=key_uri, iv=key_iv, sequence=next_sequence))
         next_sequence += 1
 
-    return HlsPlaylist(segments=tuple(segments))
+    return HlsPlaylist(segments=tuple(segments), variants=tuple(variants))
 
 
 def parse_m3u8_attrs(value: str) -> dict[str, str]:
@@ -276,3 +322,26 @@ def unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise RuntimeError("Could not allocate a unique Hanime output path")
+
+
+def normalize_stream_url(url: str) -> str:
+    if url.startswith("//"):
+        return f"https:{url}"
+    if not urlparse(url).scheme:
+        return f"https://{url.lstrip('/')}"
+    return url
+
+
+async def get_with_context(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    try:
+        return await client.get(url)
+    except httpx.RequestError as exc:
+        raise RuntimeError(_describe_request_error(exc, url)) from exc
+
+
+def _describe_request_error(exc: httpx.RequestError, url: str) -> str:
+    host = urlparse(url).netloc or "unknown host"
+    cause = exc.__cause__
+    if isinstance(cause, (httpcore.ConnectError, httpcore.ConnectTimeout)):
+        return f"Could not connect to {host}: {cause}"
+    return f"Request failed for {host}: {exc}"
