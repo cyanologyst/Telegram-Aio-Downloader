@@ -18,6 +18,10 @@ MANGADEX_CHAPTER_RE = re.compile(
     r"https?://(?:www\.)?mangadex\.org/chapter/([0-9a-f-]{36})",
     re.IGNORECASE,
 )
+NHENTAI_GALLERY_RE = re.compile(
+    r"https?://(?:www\.)?nhentai\.[^/\s]+/g/(\d+)/?",
+    re.IGNORECASE,
+)
 MANGA_URL_RE = re.compile(
     r"https?://[^\s]*(manga|comic|chapter|gallery|doujin|nhentai|mangadex|manganato)[^\s]*",
     re.IGNORECASE,
@@ -111,6 +115,8 @@ async def download_manga_gallery(url: str, destination_root: Path) -> MangaDownl
     chapter_id = _mangadex_chapter_id(url)
     if chapter_id:
         return await _download_mangadex_chapter(chapter_id, destination_root)
+    if _nhentai_gallery_id(url):
+        return await _download_nhentai_gallery(url, destination_root)
     return await _download_generic_gallery(url, destination_root)
 
 
@@ -163,6 +169,41 @@ async def _download_generic_gallery(url: str, destination_root: Path) -> MangaDo
     return MangaDownloadResult(title=title, folder=folder, images=tuple(images))
 
 
+async def _download_nhentai_gallery(url: str, destination_root: Path) -> MangaDownloadResult:
+    gallery_id = _nhentai_gallery_id(url)
+    if not gallery_id:
+        raise RuntimeError("Invalid nhentai gallery URL")
+
+    headers = {"User-Agent": "Mozilla/5.0 Telegram-Aio-Downloader/1.0"}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+        response = await client.get(_nhentai_gallery_url(url, gallery_id))
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        title = _page_title(soup) or f"nhentai {gallery_id}"
+        title = re.sub(r"\s*[»|-]\s*nhentai\s*$", "", title, flags=re.IGNORECASE).strip()
+        page_count = _nhentai_page_count(soup, response.text)
+        if page_count <= 0:
+            raise RuntimeError("Could not detect nhentai page count")
+
+        folder = _unique_folder(destination_root / sanitize_gallery_name(title))
+        folder.mkdir(parents=True, exist_ok=True)
+        images = []
+        for page in range(1, page_count + 1):
+            page_url = urljoin(str(response.url), f"/g/{gallery_id}/{page}/")
+            page_response = await client.get(page_url)
+            page_response.raise_for_status()
+            image_url = _nhentai_reader_image_url(
+                BeautifulSoup(page_response.text, "html.parser"),
+                page_url,
+            )
+            if not image_url:
+                raise RuntimeError(f"Could not find image for page {page}")
+            images.append(await _download_image(client, image_url, folder, page))
+            await asyncio.sleep(0.1)
+
+    return MangaDownloadResult(title=title, folder=folder, images=tuple(images))
+
+
 async def _download_image(
     client: httpx.AsyncClient,
     url: str,
@@ -200,6 +241,52 @@ def _extract_image_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
             seen.add(absolute)
             found.append(absolute)
     return found
+
+
+def _nhentai_gallery_id(url: str) -> str | None:
+    match = NHENTAI_GALLERY_RE.search(url)
+    return match.group(1) if match else None
+
+
+def _nhentai_gallery_url(url: str, gallery_id: str) -> str:
+    parsed = urlparse(url)
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc
+    if not host:
+        raise RuntimeError("Invalid nhentai gallery host")
+    return f"{scheme}://{host}/g/{gallery_id}/"
+
+
+def _nhentai_page_count(soup: BeautifulSoup, html: str) -> int:
+    page_badge = soup.select_one(".pages")
+    if page_badge:
+        try:
+            return int(page_badge.get_text(strip=True))
+        except ValueError:
+            pass
+
+    match = re.search(r"Pages:\s*</span>\s*<span[^>]*>.*?(\d+)", html, re.IGNORECASE | re.S)
+    return int(match.group(1)) if match else 0
+
+
+def _nhentai_reader_image_url(soup: BeautifulSoup, page_url: str) -> str | None:
+    candidates = []
+    for image in soup.find_all("img"):
+        value = (
+            image.get("data-src")
+            or image.get("data-original")
+            or image.get("data-lazy-src")
+            or image.get("src")
+        )
+        if isinstance(value, str):
+            candidates.append(urljoin(page_url, value))
+    for candidate in candidates:
+        path = urlparse(candidate).path.lower()
+        if "/images/logo" in path or path.endswith(".svg"):
+            continue
+        if Path(path).suffix.lower() in IMAGE_EXTENSIONS:
+            return candidate
+    return None
 
 
 def _best_srcset_url(srcset: str | None) -> str | None:

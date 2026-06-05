@@ -1,6 +1,13 @@
+from bs4 import BeautifulSoup
 from PIL import Image
 
-from app.services.manga import convert_images_to_pdf, is_manga_url, list_manga_images
+from app.services.manga import (
+    _nhentai_page_count,
+    _nhentai_reader_image_url,
+    convert_images_to_pdf,
+    is_manga_url,
+    list_manga_images,
+)
 
 
 def test_manga_url_detection():
@@ -20,3 +27,25 @@ def test_convert_images_to_pdf_and_remove_sources(tmp_path):
     assert output.exists()
     assert output.suffix == ".pdf"
     assert list_manga_images(folder) == []
+
+
+def test_nhentai_page_count_and_reader_image_detection():
+    gallery_html = """
+    <li>
+        <span class="text">Pages:</span>
+        <span class="tags"><a><span class="tag_name pages">107</span></a></span>
+    </li>
+    """
+    page_html = """
+    <img src="/images/logo.svg">
+    <img src="data:image/svg+xml,%3Csvg%3E" data-src="https://i4.nhentaimg.com/016/hash/107.webp">
+    """
+
+    assert _nhentai_page_count(BeautifulSoup(gallery_html, "html.parser"), gallery_html) == 107
+    assert (
+        _nhentai_reader_image_url(
+            BeautifulSoup(page_html, "html.parser"),
+            "https://nhentai.xxx/g/560002/107/",
+        )
+        == "https://i4.nhentaimg.com/016/hash/107.webp"
+    )
