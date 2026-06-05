@@ -531,6 +531,8 @@ function renderSettings() {
         ${settingToggle("Delete ZIPs after send", "Remove generated archives after Telegram upload.", "auto_delete_zips_after_send", settings.auto_delete_zips_after_send)}
         ${settingToggle("Auto-delete after upload", "Delete selected source files after direct upload.", "auto_delete_files_after_upload", settings.auto_delete_files_after_upload)}
         ${settingToggle("Forwarded posts", "Automatically download forwarded Telegram media.", "auto_download_forwarded_posts", settings.auto_download_forwarded_posts)}
+        ${settingToggle("Manga auto PDF", "Convert downloaded manga image folders to PDF automatically.", "manga_auto_convert_pdf", settings.manga_auto_convert_pdf)}
+        ${settingToggle("Remove manga images", "Delete manga images after PDF conversion finishes.", "manga_remove_images_after_conversion", settings.manga_remove_images_after_conversion)}
     `;
 }
 
@@ -588,6 +590,8 @@ async function saveSetting(key, value) {
         "auto_delete_zips_after_send",
         "auto_delete_files_after_upload",
         "auto_download_forwarded_posts",
+        "manga_auto_convert_pdf",
+        "manga_remove_images_after_conversion",
     ]);
     let normalized = value;
     if (numericKeys.has(key)) normalized = Number(value);

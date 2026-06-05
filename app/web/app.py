@@ -253,6 +253,10 @@ def create_web_app(
             "auto_delete_zips_after_send": bool(settings.get("auto_delete_zips_after_send")),
             "auto_delete_files_after_upload": bool(settings.get("auto_delete_files_after_upload")),
             "auto_download_forwarded_posts": bool(settings.get("auto_download_forwarded_posts")),
+            "manga_auto_convert_pdf": bool(settings.get("manga_auto_convert_pdf")),
+            "manga_remove_images_after_conversion": bool(
+                settings.get("manga_remove_images_after_conversion")
+            ),
             "compression_level": int(settings.get("compression_level", 3)),
         }
 

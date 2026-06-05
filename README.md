@@ -1,11 +1,12 @@
 # Telegram Downloader Bot
 
-Async Telegram downloader bot for torrents, Spotify links, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
+Async Telegram downloader bot for torrents, Spotify links, manga galleries, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
 
 ## Features
 
 - Magnet and `.torrent` downloads through `aria2c`
 - Spotify track/album/playlist downloads through `spotDL`
+- Manga/gallery image downloads with optional PDF conversion
 - The Pirate Bay search integration
 - yt-dlp video/audio downloads
 - Telegram Bot API interaction with Pyrogram user-session uploads for large files
@@ -78,6 +79,8 @@ Useful optional variables:
 - `WEB_APP_ENABLE`: `true` or `false` to enable the Telegram mini-app.
 - `WEB_APP_HOST`, `WEB_APP_PORT`, `WEB_APP_URL`: mini-app bind settings and public URL.
 - `MINI_APP_DEFAULT_CHAT_ID`: optional private Telegram user ID fallback for mini-app settings, zip, and upload actions when Telegram does not send WebApp init data.
+
+Manga downloads are stored under `Download/Manga/<gallery name>`. Use `Manga Settings` or `/mangasettings` to auto-convert downloaded galleries to PDF and optionally remove source images after conversion. Manual conversion is available from a manga folder's file-browser details.
 
 ## Development
 

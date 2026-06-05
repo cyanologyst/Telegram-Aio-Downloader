@@ -20,6 +20,8 @@ DEFAULT_SETTINGS = {
     "auto_delete_zips_after_send": False,
     "auto_delete_files_after_upload": False,
     "auto_download_forwarded_posts": False,
+    "manga_auto_convert_pdf": False,
+    "manga_remove_images_after_conversion": False,
     "compression_level": 3,  # 1-9, reduced from 5 for better responsiveness
 }
 

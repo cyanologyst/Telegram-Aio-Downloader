@@ -89,6 +89,14 @@ from app.services.archive import (
     render_progress_bar,
 )
 from app.services.archive import sanitize_filename as zip_sanitize
+from app.services.manga import (
+    convert_images_to_pdf,
+    download_manga_gallery,
+    extract_manga_url,
+    is_manga_url,
+    list_manga_images,
+    remove_manga_folder_if_empty,
+)
 
 # Import thumbnail generation module
 from app.services.thumbnails import generate_contact_sheet
@@ -120,6 +128,8 @@ TELEGRAM_DIR = BASE_DIR / "Download" / "Telegram"
 TELEGRAM_DIR.mkdir(parents=True, exist_ok=True)
 SPOTIFY_DIR = BASE_DIR / "Download" / "Spotify"
 SPOTIFY_DIR.mkdir(parents=True, exist_ok=True)
+MANGA_DIR = BASE_DIR / "Download" / "Manga"
+MANGA_DIR.mkdir(parents=True, exist_ok=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 API_ID = int(os.getenv("API_ID", "0") or "0")
@@ -195,6 +205,9 @@ pending_ytdlp_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
 # Pending Spotify confirmations
 pending_spotify_requests = {}  # {user_id: {"url": str, "chat_id": int}}
+
+# Pending manga gallery confirmations
+pending_manga_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
 # Dedicated executors for CPU-intensive operations
 # Using ProcessPoolExecutor for py7zr since it's CPU-bound
@@ -1349,7 +1362,7 @@ def build_reply_menu(user_id: int = None):
     rows = [
         [get_lang(u, 'status')],
         [f"{ICON_FOLDER} File Browser", f"{ICON_BROOM} {clean_emoji_prefix(get_lang(u, 'clear'))}"],
-        [clean_emoji_prefix(get_lang(u, 'zip_menu')), get_lang(u, 'settings'), get_lang(u, 'help')],
+        [clean_emoji_prefix(get_lang(u, 'zip_menu')), "Manga Settings", get_lang(u, 'settings'), get_lang(u, 'help')],
         [get_lang(u, 'tpb_search')],
         [get_lang(u, 'toggle_language')],
     ]
@@ -1475,7 +1488,7 @@ def build_status_controls_markup():
     rows = []
     for job in active:
         jid = job["id"]
-        if job.get("provider") == "spotify":
+        if job.get("provider") in {"spotify", "manga"}:
             rows.append([
                 InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
             ])
@@ -1863,7 +1876,7 @@ def build_file_details_markup(rel_path: str, page: int = 0):
 def build_folder_details_markup(rel_path: str, page: int = 0):
     encoded = encode_path(rel_path)
     parent = encode_path(rel_parent(rel_path))
-    return InlineKeyboardMarkup([
+    buttons = [
         [InlineKeyboardButton(f"{ICON_FOLDER} Open Folder", callback_data=f"fb:list:0:{encoded}")],
         [InlineKeyboardButton(f"{ICON_UPLOAD} Upload All Files", callback_data=f"fb:send_folder_confirm:{page}:{encoded}")],
         [InlineKeyboardButton(f"{ICON_DELETE} Delete Folder", callback_data=f"fb:delete_confirm:{page}:{encoded}")],
@@ -1871,7 +1884,22 @@ def build_folder_details_markup(rel_path: str, page: int = 0):
             InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent}"),
             InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")
         ],
-    ])
+    ]
+    full = safe_join(DOWNLOAD_DIR, rel_path)
+    if is_manga_gallery_folder(full):
+        buttons.insert(
+            2,
+            [InlineKeyboardButton("Convert to PDF", callback_data=f"fb:manga_pdf:{page}:{encoded}")],
+        )
+    return InlineKeyboardMarkup(buttons)
+
+
+def is_manga_gallery_folder(folder: Path) -> bool:
+    try:
+        folder.relative_to(MANGA_DIR)
+    except ValueError:
+        return False
+    return folder.is_dir() and bool(list_manga_images(folder))
 
 
 def build_delete_confirm_text(rel_path: str) -> str:
@@ -2372,6 +2400,166 @@ def build_spotify_completed_text(job: dict) -> str:
         lines.append(f"Files: {count}")
     lines.append(f"Folder:\n{SPOTIFY_DIR}")
     return "\n".join(lines)
+
+
+def build_manga_prompt_text(url: str) -> str:
+    return (
+        f"{ICON_IMAGE} Manga/gallery link detected\n\n"
+        "Download this gallery?\n\n"
+        f"Folder:\n{MANGA_DIR}\n\n"
+        f"Link:\n{shorten(url, 160)}"
+    )
+
+
+def build_manga_started_text(job: dict) -> str:
+    return (
+        f"{ICON_IMAGE} Manga download started\n\n"
+        f"Job: #{job['id']}\n"
+        "Engine: manga gallery downloader\n"
+        f"Folder:\n{MANGA_DIR}"
+    )
+
+
+def build_manga_completed_text(job: dict) -> str:
+    lines = [
+        f"{ICON_OK} Manga download completed",
+        "",
+        f"Job: #{job['id']}",
+        f"Title:\n{shorten(clean_download_name(job.get('name', 'Manga gallery')), 90)}",
+        f"Images: {job.get('image_count', 0)}",
+        f"Folder:\n{job.get('folder', MANGA_DIR)}",
+    ]
+    if job.get("pdf_path"):
+        lines.extend(["", f"PDF:\n{job['pdf_path']}"])
+    return "\n".join(lines)
+
+
+def build_manga_settings_text(user_id: int) -> str:
+    settings = get_user_settings(user_id)
+    return (
+        f"{ICON_IMAGE} Manga Settings\n\n"
+        f"Auto convert manga to PDF: {'ON' if settings.get('manga_auto_convert_pdf') else 'OFF'}\n"
+        f"Remove images after conversion: {'ON' if settings.get('manga_remove_images_after_conversion') else 'OFF'}\n\n"
+        f"Downloaded galleries go to:\n{MANGA_DIR}\n\n"
+        "PDF files are created in the main Download folder."
+    )
+
+
+def build_manga_settings_markup(user_id: int) -> InlineKeyboardMarkup:
+    settings = get_user_settings(user_id)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"Auto convert PDF: {'ON' if settings.get('manga_auto_convert_pdf') else 'OFF'}",
+                callback_data="manga_setting:auto_convert",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "Remove images after PDF: "
+                f"{'ON' if settings.get('manga_remove_images_after_conversion') else 'OFF'}",
+                callback_data="manga_setting:remove_images",
+            )
+        ],
+    ])
+
+
+async def convert_manga_folder_to_pdf_job(folder: Path, user_id: int) -> Path:
+    settings = get_user_settings(user_id)
+    remove_images = bool(settings.get("manga_remove_images_after_conversion"))
+    loop = asyncio.get_running_loop()
+    pdf_path = await loop.run_in_executor(
+        None,
+        lambda: convert_images_to_pdf(
+            folder,
+            DOWNLOAD_DIR,
+            remove_images=remove_images,
+            title=folder.name,
+        ),
+    )
+    if remove_images:
+        remove_manga_folder_if_empty(folder)
+    return pdf_path
+
+
+async def start_manga_download(app: Application, chat_id: int, url: str, user_id: int = None):
+    global job_counter, download_jobs
+
+    async with jobs_lock:
+        job_counter += 1
+        job_id = job_counter
+
+    job = {
+        "id": job_id,
+        "provider": "manga",
+        "name": "Manga gallery",
+        "url": url,
+        "chat_id": chat_id,
+        "user_id": user_id or 0,
+        "pid": None,
+        "process": None,
+        "status": "starting",
+        "progress": 0.0,
+        "completed_length": 0,
+        "total_length": 0,
+        "download_speed": 0,
+        "upload_speed": 0,
+        "eta": "Unknown",
+        "started_at": now_ts(),
+        "finished_at": None,
+        "last_line": "Fetching gallery images...",
+        "image_count": 0,
+        "folder": str(MANGA_DIR),
+        "pdf_path": "",
+    }
+    download_jobs[job_id] = job
+
+    async def run_job():
+        try:
+            result = await download_manga_gallery(url, MANGA_DIR)
+            if job.get("status") == "cancelled":
+                return
+            job["status"] = "processing"
+            job["name"] = result.title
+            job["progress"] = 90.0
+            job["image_count"] = len(result.images)
+            job["folder"] = str(result.folder)
+            job["last_line"] = "Images downloaded"
+            settings = get_user_settings(user_id or 0)
+            if settings.get("manga_auto_convert_pdf"):
+                job["last_line"] = "Converting images to PDF..."
+                pdf_path = await convert_manga_folder_to_pdf_job(result.folder, user_id or 0)
+                job["pdf_path"] = str(pdf_path)
+            job["status"] = "completed"
+            job["progress"] = 100.0
+            job["finished_at"] = now_ts()
+            job["last_line"] = "Completed"
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=build_manga_completed_text(job),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.exception("Manga download failed")
+            job["status"] = "failed"
+            job["finished_at"] = now_ts()
+            job["last_line"] = str(e)
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_FAIL} Manga download failed.\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Reason:\n{shorten(str(e), 900)}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+
+    asyncio.create_task(run_job())
+    return job
 
 
 async def start_spotify_download(app: Application, chat_id: int, url: str, user_id: int = None):
@@ -3526,6 +3714,12 @@ async def cancel_job(job_id: int):
         job["last_line"] = "Cancelled by user"
         return True, f"Cancelled job #{job_id}: {job['name']}"
 
+    if job.get("provider") == "manga":
+        job["status"] = "cancelled"
+        job["finished_at"] = now_ts()
+        job["last_line"] = "Cancelled by user"
+        return True, f"Cancelled job #{job_id}: {job['name']}"
+
     errors = []
     for gid in dict.fromkeys([job.get("gid"), job.get("metadata_gid")]):
         if not gid:
@@ -3858,6 +4052,20 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         build_zip_settings_text(user_id),
         reply_markup=build_zip_settings_markup(user_id),
+        disable_web_page_preview=True,
+    )
+
+
+async def manga_settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_authorized_user(user_id):
+        await update.message.reply_text("Unauthorized")
+        return
+
+    await update.message.reply_text(
+        build_manga_settings_text(user_id),
+        reply_markup=build_manga_settings_markup(user_id),
         disable_web_page_preview=True,
     )
 
@@ -4300,6 +4508,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True,
             )
 
+        elif normalized in ("manga settings", "manga"):
+            await update.message.reply_text(
+                build_manga_settings_text(user_id),
+                reply_markup=build_manga_settings_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
         elif get_lang(user_id, 'toggle_language').lower() in lower or "language" in lower or "زبان" in text:
             lang_keyboard = InlineKeyboardMarkup([
                 [
@@ -4329,6 +4544,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True,
             )
             await update_status_message(context.application, chat_id, user_id)
+
+        elif is_manga_url(text):
+            manga_url = extract_manga_url(text)
+            pending_manga_requests[user_id] = {
+                "url": manga_url,
+                "chat_id": chat_id,
+            }
+            await update.message.reply_text(
+                build_manga_prompt_text(manga_url),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("Continue", callback_data="manga_confirm"),
+                        InlineKeyboardButton("Cancel", callback_data="manga_cancel"),
+                    ],
+                ]),
+                disable_web_page_preview=True,
+            )
 
         elif is_spotify_url(text):
             spotify_url = extract_spotify_url(text)
@@ -4583,6 +4815,48 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_status_message(context.application, chat_id, user_id)
             await query.answer(msg, show_alert=not ok)
 
+        elif data == "manga_confirm":
+            pending = pending_manga_requests.pop(user_id, None)
+            if not pending:
+                await safe_edit_message(query.message, f"{ICON_WARN} No pending manga link found.")
+                return
+
+            job = await start_manga_download(
+                context.application,
+                pending["chat_id"],
+                pending["url"],
+                user_id,
+            )
+            await safe_edit_message(
+                query.message,
+                build_manga_started_text(job),
+            )
+            await update_status_message(context.application, chat_id, user_id)
+
+        elif data == "manga_cancel":
+            pending_manga_requests.pop(user_id, None)
+            await safe_edit_message(
+                query.message,
+                f"{ICON_STOP} Manga download cancelled.",
+            )
+
+        elif data.startswith("manga_setting:"):
+            setting_key = data.split(":", 1)[1]
+            setting_name = {
+                "auto_convert": "manga_auto_convert_pdf",
+                "remove_images": "manga_remove_images_after_conversion",
+            }.get(setting_key)
+            if not setting_name:
+                await query.answer("Unknown manga setting", show_alert=True)
+                return
+            settings = get_user_settings(user_id)
+            await update_setting(user_id, setting_name, not settings.get(setting_name, False))
+            await safe_edit_message(
+                query.message,
+                build_manga_settings_text(user_id),
+                build_manga_settings_markup(user_id),
+            )
+
         elif data == "spotify_confirm":
             pending = pending_spotify_requests.pop(user_id, None)
             if not pending:
@@ -4700,6 +4974,29 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     query.message,
                     build_folder_details_text(rel_path),
                     build_folder_details_markup(rel_path, page),
+                )
+
+            elif action == "manga_pdf":
+                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
+                encoded = parts[3] if len(parts) > 3 else ""
+                rel_path = decode_path(encoded) if encoded else ""
+                folder = safe_join(DOWNLOAD_DIR, rel_path)
+                if not is_manga_gallery_folder(folder):
+                    await query.answer("No manga images found in this folder.", show_alert=True)
+                    return
+
+                await safe_edit_message(
+                    query.message,
+                    f"{ICON_IMAGE} Converting manga folder to PDF...\n\n{folder.name}",
+                )
+                pdf_path = await convert_manga_folder_to_pdf_job(folder, user_id)
+                await safe_edit_message(
+                    query.message,
+                    f"{ICON_OK} Manga PDF created\n\n{pdf_path.name}\n\nSaved in:\n{DOWNLOAD_DIR}",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{ICON_FOLDER} Folder", callback_data=f"fb:dirinfo:{page}:{encoded}")],
+                        [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
+                    ]),
                 )
 
             elif action == "file":
@@ -5645,6 +5942,7 @@ def main():
     app.add_handler(CommandHandler("files", files_cmd))
     app.add_handler(CommandHandler("browse", browse_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
+    app.add_handler(CommandHandler("mangasettings", manga_settings_cmd))
     app.add_handler(CommandHandler("forwardedposts", forwarded_posts_cmd))
     app.add_handler(CommandHandler("autoforward", forwarded_posts_cmd))
 
