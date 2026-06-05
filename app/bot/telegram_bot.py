@@ -114,6 +114,7 @@ from app.services.user_settings import (
 )
 from app.services.video_sites import (
     is_adult_video_url,
+    is_hentai_video_url,
     is_supported_video_url,
     video_platform_label,
     video_platform_slug,
@@ -138,6 +139,8 @@ MANGA_DIR = BASE_DIR / "Download" / "Manga"
 MANGA_DIR.mkdir(parents=True, exist_ok=True)
 ADULT_VIDEO_DIR = BASE_DIR / "Download" / "Adult"
 ADULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+HENTAI_VIDEO_DIR = BASE_DIR / "Download" / "Hentai"
+HENTAI_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 API_ID = int(os.getenv("API_ID", "0") or "0")
@@ -2730,9 +2733,15 @@ async def start_ytdlp_download(
         job_counter += 1
         job_id = job_counter
 
+    is_hentai = is_hentai_video_url(url)
     is_adult = is_adult_video_url(url)
     platform = video_platform_label(url)
-    output_dir = ADULT_VIDEO_DIR / video_platform_slug(url) if is_adult else DOWNLOAD_DIR
+    if is_hentai:
+        output_dir = HENTAI_VIDEO_DIR / video_platform_slug(url)
+    elif is_adult:
+        output_dir = ADULT_VIDEO_DIR / video_platform_slug(url)
+    else:
+        output_dir = DOWNLOAD_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     job = {
@@ -2742,7 +2751,7 @@ async def start_ytdlp_download(
         "chat_id": chat_id,
         "user_id": user_id or 0,
         "provider": "yt-dlp",
-        "source_type": "adult_video" if is_adult else "video",
+        "source_type": "hentai_video" if is_hentai else "adult_video" if is_adult else "video",
         "platform": platform,
         "pid": None,
         "process": None,
@@ -4731,7 +4740,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             platform = video_platform_label(video_url)
             target_folder = (
-                ADULT_VIDEO_DIR / video_platform_slug(video_url)
+                HENTAI_VIDEO_DIR / video_platform_slug(video_url)
+                if is_hentai_video_url(video_url)
+                else ADULT_VIDEO_DIR / video_platform_slug(video_url)
                 if is_adult_video_url(video_url)
                 else DOWNLOAD_DIR
             )

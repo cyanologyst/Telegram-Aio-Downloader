@@ -8,7 +8,7 @@ Async Telegram downloader bot for torrents, direct HTTP/HTTPS file links, Spotif
 - Spotify track/album/playlist downloads through `spotDL`
 - Manga/gallery image downloads with optional PDF conversion
 - The Pirate Bay search integration
-- yt-dlp video/audio downloads, including Instagram, X/Twitter, TikTok, YouTube, adult video sites inspired by Porn_Fetch coverage, and similar supported sites
+- yt-dlp video/audio downloads, including Instagram, X/Twitter, TikTok, YouTube, adult video sites inspired by Porn_Fetch coverage, hentai video sites through `hanime-plugin`, and similar supported sites
 - Telegram Bot API interaction with Pyrogram user-session uploads for large files
 - File browser, batch upload/delete, archive creation, password-protected archives
 - Per-user settings, including forwarded-post auto-download control
@@ -85,6 +85,8 @@ Useful optional variables:
 Manga downloads are stored under `Download/Manga/<gallery name>`. Use `Manga Settings` or `/mangasettings` to auto-convert downloaded galleries to PDF and optionally remove source images after conversion. Manual conversion is available from a manga folder's file-browser details.
 
 Adult video links supported by yt-dlp are saved under `Download/Adult/<site>`. Use this only for content you are allowed to access and download; the bot does not bypass paywalls, DRM, or private content restrictions.
+
+Hentai video links are saved under `Download/Hentai/<site>`. The actively routed sites are the ones verified with `hanime-plugin`: `hstream.moe`, `hentaihaven.com`, `hentaimama.io`, and `hanime.red`. `hanime.tv`, `ohentai.org`, and `oppai.stream` are intentionally not active because they failed local extractor checks or need extra runtime fixes.
 
 ## Development
 

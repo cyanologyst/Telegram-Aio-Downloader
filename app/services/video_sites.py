@@ -42,9 +42,17 @@ ADULT_VIDEO_SITES: dict[str, str] = {
     "empflix.com": "Empflix",
 }
 
+HENTAI_VIDEO_SITES: dict[str, str] = {
+    "hstream.moe": "HStream",
+    "hentaihaven.com": "HentaiHaven",
+    "hentaimama.io": "HentaiMama",
+    "hanime.red": "HanimeRed",
+}
+
 SUPPORTED_VIDEO_SITES: dict[str, str] = {
     **GENERAL_VIDEO_SITES,
     **ADULT_VIDEO_SITES,
+    **HENTAI_VIDEO_SITES,
 }
 
 
@@ -73,6 +81,13 @@ def is_adult_video_url(url: str) -> bool:
         return False
     host = _host(url)
     return any(_matches_domain(host, domain) for domain in ADULT_VIDEO_SITES)
+
+
+def is_hentai_video_url(url: str) -> bool:
+    if not url.lower().startswith(("http://", "https://")):
+        return False
+    host = _host(url)
+    return any(_matches_domain(host, domain) for domain in HENTAI_VIDEO_SITES)
 
 
 def video_platform_label(url: str) -> str:
