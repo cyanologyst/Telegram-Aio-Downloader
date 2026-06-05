@@ -8,7 +8,7 @@ Async Telegram downloader bot for torrents, direct HTTP/HTTPS file links, Spotif
 - Spotify track/album/playlist downloads through `spotDL`
 - Manga/gallery image downloads with optional PDF conversion
 - The Pirate Bay search integration
-- yt-dlp video/audio downloads, including Instagram, X/Twitter, TikTok, YouTube, and similar supported sites
+- yt-dlp video/audio downloads, including Instagram, X/Twitter, TikTok, YouTube, adult video sites inspired by Porn_Fetch coverage, and similar supported sites
 - Telegram Bot API interaction with Pyrogram user-session uploads for large files
 - File browser, batch upload/delete, archive creation, password-protected archives
 - Per-user settings, including forwarded-post auto-download control
@@ -71,6 +71,8 @@ Useful optional variables:
 - `ARIA2_RPC_HOST`, `ARIA2_RPC_PORT`, `ARIA2_RPC_SECRET`: local aria2 JSON-RPC daemon settings. The bot starts aria2 with RPC enabled when needed and stores resume state in `Download/.aria2.session`.
 - `FFMPEG_BIN`: path to `ffmpeg`.
 - `SPOTDL_BIN`: path to the `spotdl` executable. Spotify downloads are saved under `Download/Spotify`.
+- `YTDLP_COOKIES_FILE`: optional path to a Netscape cookies file for yt-dlp. Useful for sites that require login, consent, or age confirmation.
+- `YTDLP_PROXY`: optional proxy URL passed to yt-dlp for video sites that are blocked or unreliable from your server network.
 - `TPB_API_URL`: optional API Bay mirror.
 - `AUTO_CLEANUP_DAYS`: cleanup threshold for old temporary files.
 - `WEB_DASHBOARD_ENABLE`: `true` or `false` to enable the local web dashboard.
@@ -81,6 +83,8 @@ Useful optional variables:
 - `MINI_APP_DEFAULT_CHAT_ID`: optional private Telegram user ID fallback for mini-app settings, zip, and upload actions when Telegram does not send WebApp init data.
 
 Manga downloads are stored under `Download/Manga/<gallery name>`. Use `Manga Settings` or `/mangasettings` to auto-convert downloaded galleries to PDF and optionally remove source images after conversion. Manual conversion is available from a manga folder's file-browser details.
+
+Adult video links supported by yt-dlp are saved under `Download/Adult/<site>`. Use this only for content you are allowed to access and download; the bot does not bypass paywalls, DRM, or private content restrictions.
 
 ## Development
 

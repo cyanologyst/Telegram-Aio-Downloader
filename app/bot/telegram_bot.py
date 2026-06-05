@@ -112,6 +112,12 @@ from app.services.user_settings import (
     validate_part_size,
     validate_password,
 )
+from app.services.video_sites import (
+    is_adult_video_url,
+    is_supported_video_url,
+    video_platform_label,
+    video_platform_slug,
+)
 
 MAX_ZIP_FILES = float('inf')  # No limit on number of files to zip
 BOT_MAX_DOCUMENT_BYTES = 49 * 1024 * 1024  # Telegram Bot API document limit
@@ -130,6 +136,8 @@ SPOTIFY_DIR = BASE_DIR / "Download" / "Spotify"
 SPOTIFY_DIR.mkdir(parents=True, exist_ok=True)
 MANGA_DIR = BASE_DIR / "Download" / "Manga"
 MANGA_DIR.mkdir(parents=True, exist_ok=True)
+ADULT_VIDEO_DIR = BASE_DIR / "Download" / "Adult"
+ADULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 API_ID = int(os.getenv("API_ID", "0") or "0")
@@ -139,6 +147,8 @@ PYRO_SESSION_NAME = os.getenv("PYRO_SESSION_NAME", "pyrogram_uploader")
 ARIA2_BIN = os.getenv("ARIA2_BIN", "aria2c")
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 SPOTDL_BIN = os.getenv("SPOTDL_BIN", "spotdl")
+YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
 ARIA2_RPC_PORT = int(os.getenv("ARIA2_RPC_PORT", "6800") or "6800")
 ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
@@ -2398,40 +2408,9 @@ async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel
 # yt-dlp video downloader
 # =========================================================
 
-SUPPORTED_VIDEO_SITES = (
-    "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "instagram.com",
-    "facebook.com",
-    "twitter.com",
-    "x.com",
-    "vimeo.com",
-    "dailymotion.com",
-    "twitch.tv",
-)
-
-
 def is_video_url(text: str) -> bool:
     text = extract_http_url(text).lower()
-
-    if not text.startswith(("http://", "https://")):
-        return False
-
-    return any(site in text for site in SUPPORTED_VIDEO_SITES)
-
-
-def video_platform_label(url: str) -> str:
-    lowered = url.lower()
-    if "tiktok.com" in lowered:
-        return "TikTok"
-    if "instagram.com" in lowered:
-        return "Instagram"
-    if "twitter.com" in lowered or "x.com" in lowered:
-        return "X / Twitter"
-    if "youtu.be" in lowered or "youtube.com" in lowered:
-        return "YouTube"
-    return "Video"
+    return is_supported_video_url(text)
 
 
 def extract_spotify_url(text: str) -> str:
@@ -2737,18 +2716,34 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
     return job
 
 
-async def start_ytdlp_download(app: Application, chat_id: int, url: str, audio_only: bool = False):
+async def start_ytdlp_download(
+    app: Application,
+    chat_id: int,
+    url: str,
+    audio_only: bool = False,
+    user_id: int = None,
+    run_in_background: bool = False,
+):
     global job_counter, download_jobs
 
     async with jobs_lock:
         job_counter += 1
         job_id = job_counter
 
+    is_adult = is_adult_video_url(url)
+    platform = video_platform_label(url)
+    output_dir = ADULT_VIDEO_DIR / video_platform_slug(url) if is_adult else DOWNLOAD_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     job = {
         "id": job_id,
         "name": "Fetching video info...",
         "url": url,
         "chat_id": chat_id,
+        "user_id": user_id or 0,
+        "provider": "yt-dlp",
+        "source_type": "adult_video" if is_adult else "video",
+        "platform": platform,
         "pid": None,
         "process": None,
         "status": "starting",
@@ -2756,10 +2751,12 @@ async def start_ytdlp_download(app: Application, chat_id: int, url: str, audio_o
         "completed_length": 0,
         "total_length": 0,
         "download_speed": 0,
+        "upload_speed": 0,
         "eta": "Unknown",
         "started_at": now_ts(),
         "finished_at": None,
         "last_line": "",
+        "folder": str(output_dir),
     }
 
     download_jobs[job_id] = job
@@ -2799,7 +2796,7 @@ async def start_ytdlp_download(app: Application, chat_id: int, url: str, audio_o
 
     def run_download():
         ydl_opts = {
-            "outtmpl": str(DOWNLOAD_DIR / "%(title).200B [%(id)s].%(ext)s"),
+            "outtmpl": str(output_dir / "%(title).200B [%(id)s].%(ext)s"),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -2807,8 +2804,26 @@ async def start_ytdlp_download(app: Application, chat_id: int, url: str, audio_o
             "concurrent_fragment_downloads": 4,
             "retries": 10,
             "fragment_retries": 10,
+            "extractor_retries": 3,
+            "file_access_retries": 3,
+            "socket_timeout": 30,
+            "continuedl": True,
+            "part": True,
             "windowsfilenames": False,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         }
+
+        if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists():
+            ydl_opts["cookiefile"] = YTDLP_COOKIES_FILE
+        if YTDLP_PROXY:
+            ydl_opts["proxy"] = YTDLP_PROXY
 
         if audio_only:
             ydl_opts.update({
@@ -2853,40 +2868,56 @@ async def start_ytdlp_download(app: Application, chat_id: int, url: str, audio_o
 
             return title, filepath
 
-    try:
-        title, filepath = await loop.run_in_executor(None, run_download)
+    async def finish_download():
+        try:
+            title, filepath = await loop.run_in_executor(None, run_download)
 
-        job["status"] = "completed"
-        job["name"] = title
-        job["progress"] = 100.0
-        job["finished_at"] = now_ts()
+            job["status"] = "completed"
+            job["name"] = title
+            job["progress"] = 100.0
+            if filepath and os.path.exists(filepath):
+                size = os.path.getsize(filepath)
+                job["completed_length"] = size
+                job["total_length"] = size
+            job["download_speed"] = 0
+            job["finished_at"] = now_ts()
 
-        await app.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"{ICON_OK} {'MP3' if audio_only else 'Video'} download completed.\n\n"
-                f"Job #{job_id}\n"
-                f"Title: {title}"
-            ),
-            reply_markup=build_reply_menu(),
-        )
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_OK} {'MP3' if audio_only else 'Video'} download completed.\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Platform: {platform}\n"
+                    f"Title:\n{shorten(title, 140)}\n"
+                    f"Folder:\n{output_dir}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
 
-    except Exception as e:
-        logger.exception("yt-dlp download failed")
+        except Exception as e:
+            logger.exception("yt-dlp download failed")
 
-        job["status"] = "failed"
-        job["finished_at"] = now_ts()
-        job["last_line"] = str(e)
+            job["status"] = "failed"
+            job["finished_at"] = now_ts()
+            job["last_line"] = str(e)
 
-        await app.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"{ICON_FAIL} Video download failed.\n\n"
-                f"Job #{job_id}\n"
-                f"Reason: {e}"
-            ),
-            reply_markup=build_reply_menu(),
-        )
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_FAIL} Video download failed.\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Platform: {platform}\n"
+                    f"Reason:\n{shorten(str(e), 900)}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+
+    if run_in_background:
+        asyncio.create_task(finish_download())
+    else:
+        await finish_download()
 
     return job
 
@@ -2916,7 +2947,29 @@ async def handle_ytdlp_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pending["chat_id"],
         pending["url"],
         audio_only=audio_only,
+        user_id=user_id,
     )
+
+
+async def start_download_from_source(
+    app: Application,
+    chat_id: int,
+    source: str,
+    user_id: int = None,
+):
+    """Mini-app download entrypoint that chooses the right backend for pasted links."""
+    source = source.strip()
+    http_url = extract_http_url(source)
+    if is_video_url(http_url):
+        return await start_ytdlp_download(
+            app,
+            chat_id,
+            http_url,
+            audio_only=False,
+            user_id=user_id,
+            run_in_background=True,
+        )
+    return await start_aria2_download(app, chat_id, source, user_id)
 
 
 # =========================================================
@@ -4676,10 +4729,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "url": video_url,
                 "chat_id": chat_id,
             }
+            platform = video_platform_label(video_url)
+            target_folder = (
+                ADULT_VIDEO_DIR / video_platform_slug(video_url)
+                if is_adult_video_url(video_url)
+                else DOWNLOAD_DIR
+            )
 
             await update.message.reply_text(
-                f"{ICON_DOWNLOAD} {video_platform_label(video_url)} link detected\n\n"
-                "Choose download format:",
+                f"{ICON_DOWNLOAD} {platform} link detected\n\n"
+                "Choose download format:\n\n"
+                f"Folder:\n{target_folder}",
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("🎬 Video", callback_data="ytdlp_video"),
@@ -6122,7 +6182,7 @@ def main():
                 zip_jobs=mini_app_zip_jobs,
                 bot_loop=asyncio.get_event_loop(),
                 bot_app=app,
-                start_download=start_aria2_download,
+                start_download=start_download_from_source,
                 pause_download=pause_job,
                 resume_download=resume_job,
                 cancel_download=cancel_job,
