@@ -1,12 +1,11 @@
 # Telegram Downloader Bot
 
-Async Telegram downloader bot for torrents, Spotify links, Hanime videos, manga galleries, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
+Async Telegram downloader bot for torrents, Spotify links, manga galleries, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
 
 ## Features
 
 - Magnet and `.torrent` downloads through `aria2c`
 - Spotify track/album/playlist downloads through `spotDL`
-- Hanime.tv HLS downloads with selectable resolution
 - Manga/gallery image downloads with optional PDF conversion
 - The Pirate Bay search integration
 - yt-dlp video/audio downloads
@@ -72,8 +71,6 @@ Useful optional variables:
 - `ARIA2_RPC_HOST`, `ARIA2_RPC_PORT`, `ARIA2_RPC_SECRET`: local aria2 JSON-RPC daemon settings. The bot starts aria2 with RPC enabled when needed and stores resume state in `Download/.aria2.session`.
 - `FFMPEG_BIN`: path to `ffmpeg`.
 - `SPOTDL_BIN`: path to the `spotdl` executable. Spotify downloads are saved under `Download/Spotify`.
-- Hanime downloads are saved under `Download/Hanime` and use `pycryptodomex` for AES HLS decryption.
-- `HANIME_API_URLS`: optional comma-separated Hanime API base URLs. Defaults to `hanime.tv`, `www.hanime.tv`, and `hanime1.com` API hosts.
 - `TPB_API_URL`: optional API Bay mirror.
 - `AUTO_CLEANUP_DAYS`: cleanup threshold for old temporary files.
 - `WEB_DASHBOARD_ENABLE`: `true` or `false` to enable the local web dashboard.

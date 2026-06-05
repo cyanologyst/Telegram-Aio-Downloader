@@ -6,7 +6,6 @@ spotdl
 Pillow
 pyzipper
 py7zr
-pycryptodomex>=3.23.0
 opencv-python
 numpy
 httpx>=0.24.0
