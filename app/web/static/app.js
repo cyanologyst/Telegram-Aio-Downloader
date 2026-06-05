@@ -10,6 +10,7 @@ let cachedSettings = {};
 
 document.addEventListener("DOMContentLoaded", () => {
     initTelegramApp();
+    updateNavIndex(document.querySelector(".nav-item.active"));
     loadFiles();
     loadDownloads();
     loadStats();
@@ -68,12 +69,20 @@ function switchTab(tabId, element) {
     next.classList.add("active");
     element.classList.add("active");
     element.classList.add("animating");
+    updateNavIndex(element);
     setTimeout(() => element.classList.remove("animating"), 340);
     document.getElementById("header-title").innerText = element.getAttribute("data-title");
 
     if (tabId === "downloads") loadDownloads();
     if (tabId === "info") loadStats();
     if (tabId === "settings") loadSettings();
+}
+
+function updateNavIndex(element) {
+    if (!element) return;
+    const items = Array.from(document.querySelectorAll(".nav-item"));
+    const index = Math.max(0, items.indexOf(element));
+    document.documentElement.style.setProperty("--nav-index", index);
 }
 
 async function loadFiles() {
@@ -113,8 +122,9 @@ function renderFiles() {
             const size = isFolder ? "Folder" : item.size_readable || formatBytes(item.size || 0);
             const modified = item.modified ? new Date(item.modified).toLocaleDateString() : "";
             const checked = selectedPaths.has(item.path) ? "checked" : "";
+            const selectedClass = checked ? " is-selected" : "";
             return `
-                <div class="file-item neu-out" onclick="handleRowClick('${jsString(item.path)}', ${isFolder})">
+                <div class="file-item neu-out${selectedClass}" onclick="handleRowClick('${jsString(item.path)}', ${isFolder})">
                     <div class="file-info">
                         <div class="file-icon neu-in ${isFolder ? "folder-icon" : ""}">
                             <i class="fas ${icon}"></i>
@@ -374,17 +384,21 @@ function renderDownloads(downloads) {
             const toggleAction = isPaused ? "resume" : "pause";
             const toggleIcon = isPaused ? "fa-play" : "fa-pause";
             const toggleText = isPaused ? "Resume" : "Pause";
+            const sourceLabel = sourceTypeLabel(dl.source_type || dl.kind || "download");
             return `
                 <div class="download-item neu-out">
                     <div class="dl-header">
                         <span>${escapeHtml(dl.name || "Unknown download")}</span>
                         <span>${progress.toFixed(1)}%</span>
                     </div>
+                    <div class="dl-meta-row">
+                        <span class="source-badge">${escapeHtml(sourceLabel)}</span>
+                        <span>${escapeHtml(titleCase(dl.status || "unknown"))}</span>
+                    </div>
                     <div class="progress-track neu-in">
                         <div class="progress-bar" style="width: ${progress}%"></div>
                     </div>
                     <div class="dl-status">
-                        ${escapeHtml(titleCase(dl.status || "unknown"))} &bull;
                         ${escapeHtml(dl.completed_readable || "0 B")} / ${escapeHtml(dl.total_readable || "0 B")}<br>
                         Down ${formatSpeed(dl.download_speed || 0)} &bull; Up ${formatSpeed(dl.upload_speed || 0)} &bull;
                         ETA ${escapeHtml(dl.eta || "Unknown")}
@@ -426,6 +440,17 @@ function renderZipJob(job) {
             </div>
         </div>
     `;
+}
+
+function sourceTypeLabel(type) {
+    const value = String(type || "").toLowerCase();
+    if (value === "http" || value === "uri") return "Direct";
+    if (value === "magnet") return "Magnet";
+    if (value === "torrent") return "Torrent";
+    if (value.includes("spotify")) return "Spotify";
+    if (value.includes("manga")) return "Manga";
+    if (value.includes("video") || value.includes("ytdlp")) return "Video";
+    return titleCase(value || "download");
 }
 
 async function loadZipJobs() {
