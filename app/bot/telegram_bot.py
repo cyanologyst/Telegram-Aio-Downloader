@@ -735,6 +735,8 @@ ICON_REFRESH = "\U0001F504"     # 🔄
 ICON_HELP = "\u2753"            # ❓
 ICON_BROOM = "\U0001F9F9"       # 🧹
 ICON_STOP = "\U0001F6D1"        # 🛑
+ICON_SETTINGS = "\u2699"        # ⚙
+ICON_LANGUAGE = "\U0001F310"    # 🌐
 
 
 EMOJI_PREFIX_RE = re.compile(r"^[\W_]*[\U0001F300-\U0001FAFF\u2600-\u27BF\u2139\uFE0F]+\s*")
@@ -1443,14 +1445,13 @@ async def safe_edit_message(message, text, reply_markup=None):
 def build_reply_menu(user_id: int = None):
     u = user_id or 0
     rows = [
-        [get_lang(u, 'status')],
-        [f"{ICON_FOLDER} File Browser", f"{ICON_BROOM} {clean_emoji_prefix(get_lang(u, 'clear'))}"],
-        [clean_emoji_prefix(get_lang(u, 'zip_menu')), "Manga Settings", get_lang(u, 'settings'), get_lang(u, 'help')],
-        [get_lang(u, 'tpb_search')],
-        [get_lang(u, 'toggle_language')],
+        [f"{ICON_STATUS} Status"],
+        [f"{ICON_DOWNLOAD} Downloads", f"{ICON_FOLDER} Files"],
+        [f"{ICON_ARCHIVE} Tools", f"{ICON_SETTINGS} Settings"],
+        [f"{ICON_HELP} Help"],
     ]
     if WEB_APP_ENABLE and WEB_APP_URL:
-        rows.insert(0, [KeyboardButton("Mini-App", web_app=WebAppInfo(url=WEB_APP_URL))])
+        rows.insert(0, [KeyboardButton("📱 Mini-App", web_app=WebAppInfo(url=WEB_APP_URL))])
 
     return ReplyKeyboardMarkup(
         rows,
@@ -1458,6 +1459,80 @@ def build_reply_menu(user_id: int = None):
         is_persistent=True,
         input_field_placeholder=get_lang(u, 'magnet_help'),
     )
+
+def build_downloads_menu_text(user_id: int = None) -> str:
+    return (
+        f"{ICON_DOWNLOAD} Downloads\n\n"
+        "Send a magnet, torrent file, direct URL, Spotify link, manga/gallery link, "
+        "or supported video link to start a download.\n\n"
+        "Use the buttons below for status, search, and cleanup."
+    )
+
+
+def build_downloads_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{ICON_STATUS} Live Status", callback_data="menu:status")],
+        [InlineKeyboardButton(f"{ICON_MAGNET} TPB Search", callback_data="menu:tpb")],
+        [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
+        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
+    ])
+
+
+def build_files_menu_text(user_id: int = None) -> str:
+    return (
+        f"{ICON_FOLDER} Files\n\n"
+        "Browse downloads, upload selected files to Telegram, delete files, or open "
+        "the Mini-App for the cleanest file manager experience."
+    )
+
+
+def build_files_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
+    rows = []
+    if WEB_APP_ENABLE and WEB_APP_URL:
+        rows.append([InlineKeyboardButton("📱 Open Mini-App", web_app=WebAppInfo(url=WEB_APP_URL))])
+    rows.extend([
+        [InlineKeyboardButton(f"{ICON_FOLDER} Chat File Browser", callback_data="menu:file_browser")],
+        [InlineKeyboardButton(f"{ICON_ARCHIVE} Archive / Zip Menu", callback_data="menu:zip")],
+        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_tools_menu_text(user_id: int = None) -> str:
+    return (
+        f"{ICON_ARCHIVE} Tools\n\n"
+        "Archive files, search torrents, adjust manga PDF behavior, or manage finished jobs."
+    )
+
+
+def build_tools_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{ICON_ARCHIVE} Zip Menu", callback_data="menu:zip")],
+        [InlineKeyboardButton(f"{ICON_MAGNET} TPB Search", callback_data="menu:tpb")],
+        [InlineKeyboardButton(f"{ICON_IMAGE} Manga Settings", callback_data="menu:manga_settings")],
+        [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
+        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
+    ])
+
+
+def build_settings_menu_text(user_id: int = None) -> str:
+    return (
+        f"{ICON_SETTINGS} Settings\n\n"
+        "Tune archive behavior, manga PDF automation, forwarded-post downloads, "
+        "and language from one place."
+    )
+
+
+def build_settings_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
+    settings = get_user_settings(user_id or 0)
+    forwarded = "ON" if settings.get("auto_download_forwarded_posts") else "OFF"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{ICON_SETTINGS} Archive Settings", callback_data="menu:zip_settings")],
+        [InlineKeyboardButton(f"{ICON_IMAGE} Manga Settings", callback_data="menu:manga_settings")],
+        [InlineKeyboardButton(f"{ICON_DOWNLOAD} Forwarded Posts: {forwarded}", callback_data="menu:forwarded_posts")],
+        [InlineKeyboardButton(f"{ICON_LANGUAGE} Language", callback_data="menu:language")],
+        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
+    ])
 
 
 # =========================================================
@@ -4460,13 +4535,12 @@ async def forwarded_posts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def build_zip_menu_text(user_id: int) -> str:
     """Build text for zip menu."""
-    u = user_id or 0
     files_count = len(filter_files_for_archiving(collect_download_files()))
     
     return (
-        f"{clean_emoji_prefix(get_lang(u, 'zip_menu'))}\n\n"
+        f"{ICON_ARCHIVE} Archive / Zip Menu\n\n"
         f"Available files: {files_count}\n\n"
-        f"Choose an option below:"
+        "Create archives, choose files, or adjust archive defaults."
     )
 
 
@@ -4474,10 +4548,11 @@ def build_zip_menu_markup(user_id: int) -> InlineKeyboardMarkup:
     """Build buttons for zip menu."""
     u = user_id or 0
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'list_files'))}", callback_data="zip_menu:list")],
-        [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'select_files'))}", callback_data="zip_menu:select")],
-        [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'zip_all'))}", callback_data="zip_menu:zip_all")],
-        [InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'zip_settings'))}", callback_data="zip_menu:settings")],
+        [InlineKeyboardButton(f"{ICON_FILE} {clean_emoji_prefix(get_lang(u, 'list_files'))}", callback_data="zip_menu:list")],
+        [InlineKeyboardButton(f"{ICON_OK} {clean_emoji_prefix(get_lang(u, 'select_files'))}", callback_data="zip_menu:select")],
+        [InlineKeyboardButton(f"{ICON_ARCHIVE} {clean_emoji_prefix(get_lang(u, 'zip_all'))}", callback_data="zip_menu:zip_all")],
+        [InlineKeyboardButton(f"{ICON_SETTINGS} {clean_emoji_prefix(get_lang(u, 'zip_settings'))}", callback_data="zip_menu:settings")],
+        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
     ])
 
 
@@ -4780,13 +4855,41 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "user_id": user_id,
             }
 
+        elif normalized in ("downloads", "download"):
+            await update.message.reply_text(
+                build_downloads_menu_text(user_id),
+                reply_markup=build_downloads_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized in ("tools", "tool"):
+            await update.message.reply_text(
+                build_tools_menu_text(user_id),
+                reply_markup=build_tools_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized in ("settings", "setting"):
+            await update.message.reply_text(
+                build_settings_menu_text(user_id),
+                reply_markup=build_settings_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
         elif normalized in ("queue", "صف"):
             await update.message.reply_text(
                 build_queue_text(user_id), 
                 reply_markup=build_reply_menu(user_id)
             )
 
-        elif normalized in ("files", "file browser", "مرورگر فایل"):
+        elif normalized in ("files",):
+            await update.message.reply_text(
+                build_files_menu_text(user_id),
+                reply_markup=build_files_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized in ("file browser", "مرورگر فایل"):
             await update.message.reply_text(
                 build_files_text("", 0),
                 reply_markup=build_files_markup("", 0),
@@ -5191,6 +5294,113 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif data == "refresh_dashboard":
             await update_live_dashboard(context.application, chat_id, user_id)
+
+        elif data == "menu:downloads":
+            await safe_edit_message(
+                query.message,
+                build_downloads_menu_text(user_id),
+                build_downloads_menu_markup(user_id),
+            )
+
+        elif data == "menu:files":
+            await safe_edit_message(
+                query.message,
+                build_files_menu_text(user_id),
+                build_files_menu_markup(user_id),
+            )
+
+        elif data == "menu:tools":
+            await safe_edit_message(
+                query.message,
+                build_tools_menu_text(user_id),
+                build_tools_menu_markup(user_id),
+            )
+
+        elif data == "menu:settings":
+            await safe_edit_message(
+                query.message,
+                build_settings_menu_text(user_id),
+                build_settings_menu_markup(user_id),
+            )
+
+        elif data == "menu:status":
+            await safe_edit_message(
+                query.message,
+                build_status_text(user_id),
+                build_status_controls_markup(),
+            )
+            status_messages[chat_id] = {
+                "message_id": query.message.message_id,
+                "last_update": time.time(),
+                "user_id": user_id,
+            }
+
+        elif data == "menu:file_browser":
+            await safe_edit_message(
+                query.message,
+                build_files_text("", 0),
+                build_files_markup("", 0),
+            )
+
+        elif data == "menu:zip":
+            await safe_edit_message(
+                query.message,
+                build_zip_menu_text(user_id),
+                build_zip_menu_markup(user_id),
+            )
+
+        elif data == "menu:zip_settings":
+            await safe_edit_message(
+                query.message,
+                build_zip_settings_text(user_id),
+                build_zip_settings_markup(user_id),
+            )
+
+        elif data == "menu:manga_settings":
+            await safe_edit_message(
+                query.message,
+                build_manga_settings_text(user_id),
+                build_manga_settings_markup(user_id),
+            )
+
+        elif data == "menu:language":
+            await safe_edit_message(
+                query.message,
+                f"{ICON_LANGUAGE} {get_lang(user_id, 'language')}\n\n{get_lang(user_id, 'select_language')}",
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton(get_lang_for_all("en", "en"), callback_data="set_lang:en"),
+                    InlineKeyboardButton(get_lang_for_all("fa", "fa"), callback_data="set_lang:fa"),
+                ]]),
+            )
+
+        elif data == "menu:forwarded_posts":
+            settings = get_user_settings(user_id)
+            enabled = not bool(settings.get("auto_download_forwarded_posts"))
+            await update_setting(user_id, "auto_download_forwarded_posts", enabled)
+            await safe_edit_message(
+                query.message,
+                build_settings_menu_text(user_id),
+                build_settings_menu_markup(user_id),
+            )
+            await query.answer(f"Forwarded posts: {'ON' if enabled else 'OFF'}")
+
+        elif data == "menu:clear":
+            await safe_edit_message(
+                query.message,
+                f"{ICON_WARN} Clear finished jobs from memory?",
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton(f"{ICON_BROOM} Yes, Clear", callback_data="clear_confirm"),
+                    InlineKeyboardButton(f"{ICON_BACK} Back", callback_data="menu:downloads"),
+                ]]),
+            )
+
+        elif data == "menu:tpb":
+            context.user_data["tpb_waiting_for_query"] = True
+            await safe_edit_message(
+                query.message,
+                f"{ICON_MAGNET} {get_lang(user_id, 'tpb_welcome')}\n\n"
+                f"{get_lang(user_id, 'tpb_send_query')}",
+            )
         
         elif data.startswith("set_lang:"):
             lang = data.split(":")[1]
