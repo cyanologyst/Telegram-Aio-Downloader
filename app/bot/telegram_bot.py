@@ -63,6 +63,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 from app.downloaders.base import DownloadRequest
+from app.downloaders.hanime import HanimeDownloader, is_hanime_url
 from app.downloaders.spotify import SpotifyDownloader, is_spotify_url
 
 # Import TPB crawler subsystem
@@ -128,6 +129,8 @@ TELEGRAM_DIR = BASE_DIR / "Download" / "Telegram"
 TELEGRAM_DIR.mkdir(parents=True, exist_ok=True)
 SPOTIFY_DIR = BASE_DIR / "Download" / "Spotify"
 SPOTIFY_DIR.mkdir(parents=True, exist_ok=True)
+HANIME_DIR = BASE_DIR / "Download" / "Hanime"
+HANIME_DIR.mkdir(parents=True, exist_ok=True)
 MANGA_DIR = BASE_DIR / "Download" / "Manga"
 MANGA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -205,6 +208,9 @@ pending_ytdlp_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
 # Pending Spotify confirmations
 pending_spotify_requests = {}  # {user_id: {"url": str, "chat_id": int}}
+
+# Pending Hanime resolution selections
+pending_hanime_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
 # Pending manga gallery confirmations
 pending_manga_requests = {}  # {user_id: {"url": str, "chat_id": int}}
@@ -1488,7 +1494,7 @@ def build_status_controls_markup():
     rows = []
     for job in active:
         jid = job["id"]
-        if job.get("provider") in {"spotify", "manga"}:
+        if job.get("provider") in {"spotify", "manga", "hanime"}:
             rows.append([
                 InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
             ])
@@ -2400,6 +2406,143 @@ def build_spotify_completed_text(job: dict) -> str:
         lines.append(f"Files: {count}")
     lines.append(f"Folder:\n{SPOTIFY_DIR}")
     return "\n".join(lines)
+
+
+def build_hanime_prompt_text(url: str) -> str:
+    return (
+        f"{ICON_VIDEO} Hanime link detected\n\n"
+        "Choose a download resolution.\n\n"
+        f"Folder:\n{HANIME_DIR}\n\n"
+        f"Link:\n{shorten(url, 160)}"
+    )
+
+
+def build_hanime_started_text(job: dict) -> str:
+    return (
+        f"{ICON_VIDEO} Hanime download started\n\n"
+        f"Job: #{job['id']}\n"
+        f"Resolution: {job.get('resolution', '720p')}\n"
+        "Engine: Hanime HLS downloader\n"
+        f"Folder:\n{HANIME_DIR}"
+    )
+
+
+def build_hanime_completed_text(job: dict) -> str:
+    title = shorten(clean_download_name(job.get("name", "Hanime video")), 90)
+    lines = [
+        f"{ICON_OK} Hanime download completed",
+        "",
+        f"Job: #{job['id']}",
+        f"Title:\n{title}",
+    ]
+    if job.get("filepath"):
+        lines.append(f"File:\n{job['filepath']}")
+    lines.append(f"Folder:\n{HANIME_DIR}")
+    return "\n".join(lines)
+
+
+async def start_hanime_download(
+    app: Application,
+    chat_id: int,
+    url: str,
+    user_id: int = None,
+    resolution: str = "720p",
+):
+    global job_counter, download_jobs
+
+    async with jobs_lock:
+        job_counter += 1
+        job_id = job_counter
+
+    job = {
+        "id": job_id,
+        "provider": "hanime",
+        "name": "Hanime video",
+        "url": url,
+        "chat_id": chat_id,
+        "user_id": user_id or 0,
+        "pid": None,
+        "process": None,
+        "task": None,
+        "status": "starting",
+        "progress": 0.0,
+        "completed_length": 0,
+        "total_length": 0,
+        "download_speed": 0,
+        "upload_speed": 0,
+        "eta": "Unknown",
+        "started_at": now_ts(),
+        "finished_at": None,
+        "last_line": "Fetching Hanime stream...",
+        "resolution": resolution,
+        "filepath": "",
+    }
+    download_jobs[job_id] = job
+
+    def update_progress(completed: int, total: int):
+        job["status"] = "downloading"
+        job["progress"] = (completed / total * 100) if total else 0.0
+        job["last_line"] = f"Segments: {completed}/{total}"
+
+    async def run_job():
+        provider = HanimeDownloader()
+        try:
+            result = await provider.download(
+                DownloadRequest(
+                    url=url,
+                    destination=HANIME_DIR,
+                    options={
+                        "resolution": resolution,
+                        "progress_callback": update_progress,
+                    },
+                )
+            )
+            if job.get("status") == "cancelled":
+                return
+            artifact = result.artifacts[0] if result.artifacts else None
+            job["status"] = "completed"
+            job["name"] = result.title
+            job["progress"] = 100.0
+            job["completed_length"] = artifact.size_bytes if artifact else 0
+            job["total_length"] = artifact.size_bytes if artifact else 0
+            job["filepath"] = str(artifact.path) if artifact else ""
+            job["finished_at"] = now_ts()
+            job["last_line"] = "Completed"
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=build_hanime_completed_text(job),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+        except asyncio.CancelledError:
+            job["status"] = "cancelled"
+            job["finished_at"] = now_ts()
+            job["last_line"] = "Cancelled by user"
+            await maybe_auto_update_status_message(app, job, force=True)
+            raise
+        except Exception as e:
+            logger.exception("Hanime download failed")
+            job["status"] = "failed"
+            job["finished_at"] = now_ts()
+            job["last_line"] = str(e)
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_FAIL} Hanime download failed.\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Reason:\n{shorten(str(e), 900)}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+        finally:
+            job["task"] = None
+
+    task = asyncio.create_task(run_job())
+    job["task"] = task
+    return job
 
 
 def build_manga_prompt_text(url: str) -> str:
@@ -3720,6 +3863,15 @@ async def cancel_job(job_id: int):
         job["last_line"] = "Cancelled by user"
         return True, f"Cancelled job #{job_id}: {job['name']}"
 
+    if job.get("provider") == "hanime":
+        task = job.get("task")
+        if task is not None:
+            task.cancel()
+        job["status"] = "cancelled"
+        job["finished_at"] = now_ts()
+        job["last_line"] = "Cancelled by user"
+        return True, f"Cancelled job #{job_id}: {job['name']}"
+
     errors = []
     for gid in dict.fromkeys([job.get("gid"), job.get("metadata_gid")]):
         if not gid:
@@ -4579,6 +4731,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True,
             )
 
+        elif is_hanime_url(text):
+            hanime_url = extract_manga_url(text)
+            pending_hanime_requests[user_id] = {
+                "url": hanime_url,
+                "chat_id": chat_id,
+            }
+            await update.message.reply_text(
+                build_hanime_prompt_text(hanime_url),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("720p", callback_data="hanime_resolution:720p"),
+                        InlineKeyboardButton("480p", callback_data="hanime_resolution:480p"),
+                        InlineKeyboardButton("360p", callback_data="hanime_resolution:360p"),
+                    ],
+                    [InlineKeyboardButton("Cancel", callback_data="hanime_cancel")],
+                ]),
+                disable_web_page_preview=True,
+            )
+
         elif is_video_url(text):
             pending_ytdlp_requests[user_id] = {
                 "url": text,
@@ -4855,6 +5026,33 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 query.message,
                 build_manga_settings_text(user_id),
                 build_manga_settings_markup(user_id),
+            )
+
+        elif data.startswith("hanime_resolution:"):
+            resolution = data.split(":", 1)[1]
+            pending = pending_hanime_requests.pop(user_id, None)
+            if not pending:
+                await safe_edit_message(query.message, f"{ICON_WARN} No pending Hanime link found.")
+                return
+
+            job = await start_hanime_download(
+                context.application,
+                pending["chat_id"],
+                pending["url"],
+                user_id,
+                resolution=resolution,
+            )
+            await safe_edit_message(
+                query.message,
+                build_hanime_started_text(job),
+            )
+            await update_status_message(context.application, chat_id, user_id)
+
+        elif data == "hanime_cancel":
+            pending_hanime_requests.pop(user_id, None)
+            await safe_edit_message(
+                query.message,
+                f"{ICON_STOP} Hanime download cancelled.",
             )
 
         elif data == "spotify_confirm":
