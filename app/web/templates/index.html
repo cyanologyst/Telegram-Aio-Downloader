@@ -8,7 +8,26 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <header id="header-title">File Manager</header>
+    <div class="app-shell">
+        <header class="app-header">
+            <div class="brand">
+                <div class="brand-mark">
+                    <i class="fas fa-download"></i>
+                </div>
+                <div>
+                    <strong>MakeBot</strong>
+                    <span id="header-title">Files</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="neu-btn icon-btn" type="button" aria-label="Menu">
+                    <i class="fas fa-bars"></i>
+                </button>
+                <button class="neu-btn icon-btn" type="button" onclick="window.Telegram?.WebApp?.close?.()" aria-label="Close">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        </header>
 
     <main>
         <section id="tab-files" class="tab-content active">
@@ -21,23 +40,39 @@
                 </div>
 
                 <div class="toolbar">
-                    <button class="neu-btn text-accent" onclick="uploadSelectedFiles()">
-                        <i class="fas fa-cloud-arrow-up"></i> Upload
-                    </button>
-                    <button class="neu-btn" onclick="zipFiles()">
-                        <i class="fas fa-file-zipper"></i> Zip
-                    </button>
-                    <button class="neu-btn text-danger" onclick="deleteFiles()">
-                        <i class="fas fa-trash"></i> Delete
-                    </button>
+                    <h1>Files</h1>
+                    <div class="toolbar-actions">
+                        <button class="neu-btn icon-btn text-accent" onclick="uploadSelectedFiles()" aria-label="Upload selected">
+                            <i class="fas fa-cloud-arrow-up"></i>
+                        </button>
+                        <button class="neu-btn icon-btn text-success" onclick="zipFiles()" aria-label="Zip selected">
+                            <i class="fas fa-box-archive"></i>
+                        </button>
+                        <button class="neu-btn icon-btn text-danger" onclick="deleteFiles()" aria-label="Delete selected">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
                 </div>
 
                 <div id="selection-summary" class="selection-summary neu-out hidden">
+                    <button class="neu-btn icon-btn clear-selection" onclick="clearSelection()" aria-label="Clear selection">
+                        <i class="fas fa-times"></i>
+                    </button>
                     <div>
                         <strong id="selected-count">0 files</strong>
                         <span id="selected-size">0 B selected</span>
                     </div>
-                    <button class="neu-btn clear-selection" onclick="clearSelection()">Clear</button>
+                    <div class="selection-actions">
+                        <button class="neu-btn icon-btn text-accent" onclick="uploadSelectedFiles()" aria-label="Upload selected">
+                            <i class="fas fa-cloud-arrow-up"></i>
+                        </button>
+                        <button class="neu-btn icon-btn text-success" onclick="zipFiles()" aria-label="Zip selected">
+                            <i class="fas fa-box-archive"></i>
+                        </button>
+                        <button class="neu-btn icon-btn text-danger" onclick="deleteFiles()" aria-label="Delete selected">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -45,55 +80,94 @@
         </section>
 
         <section id="tab-downloads" class="tab-content">
-            <button class="neu-btn wide-action text-accent" onclick="showDownloadDialog()">
-                <i class="fas fa-plus"></i> New URL or Magnet
-            </button>
+            <div class="tab-sticky">
+                <h1>Downloads</h1>
+                <div class="download-input-card neu-out">
+                    <label class="download-input neu-in">
+                        <i class="fas fa-link"></i>
+                        <input id="download-source-inline" type="text" placeholder="Paste Magnet, HTTP, YT link..." autocomplete="off">
+                    </label>
+                    <button class="start-btn" onclick="startInlineDownload()">Start</button>
+                </div>
+            </div>
             <div id="download-list"></div>
         </section>
 
         <section id="tab-info" class="tab-content">
-            <div class="info-grid">
-                <div class="info-card neu-out">
-                    <i class="fas fa-tachometer-alt"></i>
-                    <h3 id="dl-speed">0 B/s</h3>
-                    <p>Current down speed</p>
+            <div class="tab-sticky simple">
+                <h1>Storage Space</h1>
+            </div>
+            <div class="storage-card neu-out">
+                <div class="storage-ring" style="--storage-progress: 0deg">
+                    <div class="circle-inner">
+                        <h2 id="storage-used-value">0</h2>
+                        <span id="storage-used-label">GB Used</span>
+                    </div>
                 </div>
-                <div class="info-card neu-out">
-                    <i class="fas fa-folder-open"></i>
-                    <h3 id="total-count">0</h3>
-                    <p>Total items</p>
+                <div class="storage-split">
+                    <div>
+                        <span>Capacity</span>
+                        <strong id="storage-capacity">100 GB</strong>
+                    </div>
+                    <i></i>
+                    <div>
+                        <span>Free</span>
+                        <strong id="storage-free">100 GB</strong>
+                    </div>
                 </div>
             </div>
 
-            <div class="disk-usage neu-out">
-                <h3>Storage Usage</h3>
-                <div class="circle-wrap">
-                    <div class="circle-inner">
-                        <h2 id="storage-percentage">0%</h2>
-                        <span id="storage-ratio">0 B</span>
-                    </div>
+            <section class="usage-section">
+                <div class="section-title">
+                    <i class="fas fa-chart-pie"></i>
+                    <h2>Usage Breakdown</h2>
                 </div>
-                <p id="storage-summary">Calculated from the download folder.</p>
-            </div>
+                <div id="usage-breakdown" class="usage-breakdown"></div>
+            </section>
+
+            <section class="cleanup-section">
+                <h2>Cleanup Actions</h2>
+                <button class="cleanup-card neu-out" onclick="toast('Cleanup actions are managed from the bot file tools.')">
+                    <span><i class="fas fa-trash"></i></span>
+                    <div>
+                        <strong>Delete Completed</strong>
+                        <small>Clear finished download records</small>
+                    </div>
+                </button>
+                <button class="cleanup-card neu-out" onclick="toast('Select temp files from Files to delete them safely.')">
+                    <span class="danger-icon"><i class="fas fa-triangle-exclamation"></i></span>
+                    <div>
+                        <strong>Clear Temp Files</strong>
+                        <small>Remove cached Telegram uploads</small>
+                    </div>
+                </button>
+            </section>
         </section>
 
         <section id="tab-settings" class="tab-content">
+            <div class="tab-sticky simple">
+                <h1>Settings</h1>
+            </div>
             <div id="settings-list" class="settings-list"></div>
         </section>
     </main>
 
     <nav>
-        <div class="nav-item active" onclick="switchTab('files', this)" data-title="File Manager">
+        <div class="nav-item active" onclick="switchTab('files', this)" data-title="Files">
             <i class="fas fa-folder"></i>
+            <span>Files</span>
         </div>
-        <div class="nav-item" onclick="switchTab('downloads', this)" data-title="Active Downloads">
+        <div class="nav-item" onclick="switchTab('downloads', this)" data-title="Downloads">
             <i class="fas fa-cloud-arrow-down"></i>
+            <span>Downloads</span>
         </div>
-        <div class="nav-item" onclick="switchTab('info', this)" data-title="System Monitor">
-            <i class="fas fa-chart-pie"></i>
+        <div class="nav-item" onclick="switchTab('info', this)" data-title="Space">
+            <i class="fas fa-hard-drive"></i>
+            <span>Space</span>
         </div>
         <div class="nav-item" onclick="switchTab('settings', this)" data-title="Settings">
             <i class="fas fa-sliders"></i>
+            <span>Settings</span>
         </div>
     </nav>
 
@@ -113,6 +187,7 @@
     </div>
 
     <div id="toast" class="toast hidden"></div>
+    </div>
 
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="/static/app.js"></script>

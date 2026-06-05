@@ -741,6 +741,8 @@ def create_web_app(
                 "auto_delete_zips_after_send",
                 "auto_delete_files_after_upload",
                 "auto_download_forwarded_posts",
+                "manga_auto_convert_pdf",
+                "manga_remove_images_after_conversion",
             }:
                 value = bool(value)
             elif key == "password":
@@ -795,16 +797,61 @@ def create_web_app(
             total_size = 0
             file_count = 0
             folder_count = 0
+            categories = {
+                "videos": {"label": "Videos", "size_bytes": 0},
+                "archives": {"label": "Archives (Zip/Rar)", "size_bytes": 0},
+                "manga": {"label": "Manga & Images", "size_bytes": 0},
+                "audio": {"label": "Audio (Spotify)", "size_bytes": 0},
+                "telegram": {"label": "Telegram Temp", "size_bytes": 0},
+                "other": {"label": "Other", "size_bytes": 0},
+            }
+            video_exts = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv"}
+            archive_exts = {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz"}
+            image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".pdf", ".cbz"}
+            audio_exts = {".mp3", ".m4a", ".flac", ".wav", ".aac", ".ogg", ".opus"}
+
+            def category_for(path: Path) -> str:
+                rel_parts = {part.lower() for part in path.relative_to(app.download_dir).parts}
+                suffix = path.suffix.lower()
+                if "telegram" in rel_parts or "_torrents" in rel_parts:
+                    return "telegram"
+                if "spotify" in rel_parts or suffix in audio_exts:
+                    return "audio"
+                if "manga" in rel_parts or suffix in image_exts:
+                    return "manga"
+                if suffix in video_exts:
+                    return "videos"
+                if suffix in archive_exts:
+                    return "archives"
+                return "other"
 
             for item in app.download_dir.rglob("*"):
                 try:
                     if item.is_file():
-                        total_size += item.stat().st_size
+                        size = item.stat().st_size
+                        total_size += size
                         file_count += 1
+                        categories[category_for(item)]["size_bytes"] += size
                     elif item.is_dir():
                         folder_count += 1
                 except (OSError, PermissionError):
                     continue
+
+            category_payload = []
+            for key, data in categories.items():
+                size_bytes = int(data["size_bytes"])
+                if size_bytes or key != "other":
+                    category_payload.append(
+                        {
+                            "key": key,
+                            "label": data["label"],
+                            "size_bytes": size_bytes,
+                            "size": format_size(size_bytes),
+                            "percent": (
+                                round((size_bytes / total_size * 100), 1) if total_size else 0
+                            ),
+                        }
+                    )
 
             return jsonify(
                 {
@@ -813,6 +860,7 @@ def create_web_app(
                     "file_count": file_count,
                     "folder_count": folder_count,
                     "download_count": len(app.download_jobs),
+                    "categories": category_payload,
                 }
             )
 

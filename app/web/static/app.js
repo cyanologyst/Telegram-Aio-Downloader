@@ -11,6 +11,12 @@ let cachedSettings = {};
 document.addEventListener("DOMContentLoaded", () => {
     initTelegramApp();
     updateNavIndex(document.querySelector(".nav-item.active"));
+    document.getElementById("download-source-inline")?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            startInlineDownload();
+        }
+    });
     loadFiles();
     loadDownloads();
     loadStats();
@@ -18,6 +24,7 @@ document.addEventListener("DOMContentLoaded", () => {
     loadZipJobs();
     setInterval(loadDownloads, 3000);
     setInterval(loadStats, 10000);
+    openInitialTabFromHash();
 });
 
 function initTelegramApp() {
@@ -25,8 +32,8 @@ function initTelegramApp() {
     tg.ready();
     tg.expand();
     tg.enableClosingConfirmation();
-    tg.setHeaderColor("#e0e5ec");
-    tg.setBackgroundColor("#e0e5ec");
+    tg.setHeaderColor("#e6eef4");
+    tg.setBackgroundColor("#e6eef4");
 }
 
 function apiHeaders(extra = {}) {
@@ -76,6 +83,9 @@ function switchTab(tabId, element) {
     if (tabId === "downloads") loadDownloads();
     if (tabId === "info") loadStats();
     if (tabId === "settings") loadSettings();
+    if (window.location.hash !== `#${tabId}`) {
+        history.replaceState(null, "", `#${tabId}`);
+    }
 }
 
 function updateNavIndex(element) {
@@ -83,6 +93,14 @@ function updateNavIndex(element) {
     const items = Array.from(document.querySelectorAll(".nav-item"));
     const index = Math.max(0, items.indexOf(element));
     document.documentElement.style.setProperty("--nav-index", index);
+}
+
+function openInitialTabFromHash() {
+    const tabId = (window.location.hash || "").replace("#", "");
+    if (!tabId || tabId === activeTab) return;
+    const nav = document.querySelector(`.nav-item[onclick*="'${tabId}'"]`);
+    const tab = document.getElementById(`tab-${tabId}`);
+    if (nav && tab) switchTab(tabId, nav);
 }
 
 async function loadFiles() {
@@ -131,7 +149,11 @@ function renderFiles() {
                         </div>
                         <div class="file-details">
                             <h4>${escapeHtml(item.name)}</h4>
-                            <p>${escapeHtml(size)} &bull; ${escapeHtml(modified)}</p>
+                            <p>
+                                <span>${escapeHtml(isFolder ? "Folder" : fileTypeLabel(item.name))}</span>
+                                <span>${escapeHtml(size)}</span>
+                                <span>${escapeHtml(modified)}</span>
+                            </p>
                         </div>
                     </div>
                     <label class="checkbox-wrapper" onclick="event.stopPropagation()">
@@ -322,6 +344,17 @@ function closeDownloadDialog() {
     document.getElementById("download-modal").classList.add("hidden");
 }
 
+function startInlineDownload() {
+    const input = document.getElementById("download-source-inline");
+    const value = input?.value.trim();
+    if (!value) {
+        toast("Paste a URL or magnet link first");
+        return;
+    }
+    input.value = "";
+    startDownloadsFromSources([value]);
+}
+
 async function startDownloads() {
     const sources = document
         .getElementById("download-source")
@@ -329,12 +362,16 @@ async function startDownloads() {
         .map((line) => line.trim())
         .filter(Boolean);
 
+    await startDownloadsFromSources(sources, true);
+}
+
+async function startDownloadsFromSources(sources, closeModal = false) {
     if (sources.length === 0) {
         toast("Paste at least one URL or magnet link");
         return;
     }
 
-    closeDownloadDialog();
+    if (closeModal) closeDownloadDialog();
     toast(`Starting ${sources.length} download(s)...`);
     try {
         const response = await fetch("/api/downloads/start", {
@@ -359,7 +396,6 @@ async function loadDownloads() {
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || "Downloads unavailable");
         renderDownloads(data.jobs || []);
-        document.getElementById("dl-speed").innerText = formatSpeed(data.total_down_speed || 0);
         loadZipJobs();
     } catch (error) {
         document.getElementById("download-list").innerHTML =
@@ -375,51 +411,72 @@ function renderDownloads(downloads) {
         return;
     }
 
-    const zipHtml = zipJobs.map(renderZipJob).join("");
-    const downloadHtml = downloads
-        .map((dl) => {
-            const progress = Math.max(0, Math.min(100, Number(dl.progress || 0)));
-            const isPaused = dl.status === "paused";
-            const isFinished = ["completed", "failed", "cancelled"].includes(dl.status);
-            const toggleAction = isPaused ? "resume" : "pause";
-            const toggleIcon = isPaused ? "fa-play" : "fa-pause";
-            const toggleText = isPaused ? "Resume" : "Pause";
-            const sourceLabel = sourceTypeLabel(dl.source_type || dl.kind || "download");
-            return `
-                <div class="download-item neu-out">
-                    <div class="dl-header">
-                        <span>${escapeHtml(dl.name || "Unknown download")}</span>
-                        <span>${progress.toFixed(1)}%</span>
+    const isDone = (job) => ["completed", "failed", "cancelled"].includes(job.status);
+    const activeJobs = downloads.filter((dl) => !isDone(dl));
+    const recentJobs = downloads.filter(isDone).slice(0, 8);
+    const activeZipJobs = zipJobs.filter((job) => !["completed", "failed"].includes(job.status));
+    const recentZipJobs = zipJobs.filter((job) => ["completed", "failed"].includes(job.status)).slice(0, 4);
+    const activeHtml = [...activeZipJobs.map(renderZipJob), ...activeJobs.map(renderDownloadJob)].join("");
+    const recentHtml = [...recentZipJobs.map(renderZipJob), ...recentJobs.map(renderDownloadJob)].join("");
+
+    list.innerHTML = `
+        <div class="dl-section-label">
+            <span>Active (${activeJobs.length + activeZipJobs.length})</span>
+        </div>
+        ${activeHtml || `<div class="empty-state">No active downloads</div>`}
+        <div class="dl-section-label">
+            <span>Recent</span>
+            <span class="text-accent">Clear</span>
+        </div>
+        ${recentHtml || `<div class="empty-state">No recent downloads</div>`}
+    `;
+}
+
+function renderDownloadJob(dl) {
+    const progress = Math.max(0, Math.min(100, Number(dl.progress || 0)));
+    const isPaused = dl.status === "paused";
+    const isFinished = ["completed", "failed", "cancelled"].includes(dl.status);
+    const toggleAction = isPaused ? "resume" : "pause";
+    const toggleIcon = isPaused ? "fa-play" : "fa-pause";
+    const toggleText = isPaused ? "Resume" : "Pause";
+    const sourceLabel = sourceTypeLabel(dl.source_type || dl.kind || "download");
+    const icon = sourceIcon(dl.source_type || sourceLabel);
+    const etaText = isPaused ? "Paused" : `${escapeHtml(dl.eta || "Unknown")} left`;
+    return `
+        <div class="download-item neu-out">
+            <div class="dl-header">
+                <div class="dl-title-block">
+                    <div class="dl-icon"><i class="fas ${icon}"></i></div>
+                    <div class="file-details">
+                        <h3>${escapeHtml(dl.name || "Unknown download")}</h3>
+                        <div class="dl-meta-row">
+                            <span class="source-badge">${escapeHtml(sourceLabel)}</span>
+                            <span>${etaText}</span>
+                        </div>
                     </div>
-                    <div class="dl-meta-row">
-                        <span class="source-badge">${escapeHtml(sourceLabel)}</span>
-                        <span>${escapeHtml(titleCase(dl.status || "unknown"))}</span>
-                    </div>
-                    <div class="progress-track neu-in">
-                        <div class="progress-bar" style="width: ${progress}%"></div>
-                    </div>
-                    <div class="dl-status">
-                        ${escapeHtml(dl.completed_readable || "0 B")} / ${escapeHtml(dl.total_readable || "0 B")}<br>
-                        Down ${formatSpeed(dl.download_speed || 0)} &bull; Up ${formatSpeed(dl.upload_speed || 0)} &bull;
-                        ETA ${escapeHtml(dl.eta || "Unknown")}
-                    </div>
-                    ${
-                        isFinished
-                            ? ""
-                            : `<div class="download-controls">
-                                <button class="neu-btn text-accent" onclick="controlDownload(${dl.id}, '${toggleAction}')">
-                                    <i class="fas ${toggleIcon}"></i> ${toggleText}
-                                </button>
-                                <button class="neu-btn text-danger" onclick="controlDownload(${dl.id}, 'cancel')">
-                                    <i class="fas fa-stop"></i> Cancel
-                                </button>
-                            </div>`
-                    }
                 </div>
-            `;
-        })
-        .join("");
-    list.innerHTML = zipHtml + downloadHtml;
+                ${
+                    isFinished
+                        ? ""
+                        : `<div class="dl-actions">
+                            <button class="neu-btn icon-btn" title="${toggleText}" onclick="controlDownload(${dl.id}, '${toggleAction}')">
+                                <i class="fas ${toggleIcon}"></i>
+                            </button>
+                            <button class="neu-btn icon-btn text-danger" title="Cancel" onclick="controlDownload(${dl.id}, 'cancel')">
+                                <i class="fas fa-xmark"></i>
+                            </button>
+                        </div>`
+                }
+            </div>
+            <div class="progress-track neu-in">
+                <div class="progress-bar" style="width: ${progress}%"></div>
+            </div>
+            <div class="dl-status">
+                <span>${escapeHtml(dl.completed_readable || "0 B")} / ${escapeHtml(dl.total_readable || "0 B")} (${progress.toFixed(0)}%)</span>
+                <span class="speeds">Down ${formatSpeed(dl.download_speed || 0)}${Number(dl.upload_speed || 0) ? ` / Up ${formatSpeed(dl.upload_speed || 0)}` : ""}</span>
+            </div>
+        </div>
+    `;
 }
 
 function renderZipJob(job) {
@@ -428,15 +485,23 @@ function renderZipJob(job) {
     return `
         <div class="download-item neu-out">
             <div class="dl-header">
-                <span><i class="fas ${icon}"></i> ZIP Upload</span>
-                <span>${escapeHtml(titleCase(job.phase || job.status || "queued"))}</span>
+                <div class="dl-title-block">
+                    <div class="dl-icon"><i class="fas ${icon}"></i></div>
+                    <div class="file-details">
+                        <h3>ZIP Upload</h3>
+                        <div class="dl-meta-row">
+                            <span class="source-badge">Archive</span>
+                            <span>${escapeHtml(titleCase(job.phase || job.status || "queued"))}</span>
+                        </div>
+                    </div>
+                </div>
             </div>
             <div class="progress-track neu-in">
                 <div class="progress-bar zip-pulse" style="width: ${done ? 100 : 55}%"></div>
             </div>
             <div class="dl-status">
-                ${escapeHtml(job.progress_text || "Queued...")}<br>
-                ${Number(job.file_count || 0)} file(s) &bull; ${escapeHtml(job.total_size || "0 B")}
+                <span>${escapeHtml(job.progress_text || "Queued...")}</span>
+                <span class="speeds">${Number(job.file_count || 0)} file(s) / ${escapeHtml(job.total_size || "0 B")}</span>
             </div>
         </div>
     `;
@@ -451,6 +516,17 @@ function sourceTypeLabel(type) {
     if (value.includes("manga")) return "Manga";
     if (value.includes("video") || value.includes("ytdlp")) return "Video";
     return titleCase(value || "download");
+}
+
+function sourceIcon(type) {
+    const value = String(type || "").toLowerCase();
+    if (value.includes("magnet")) return "fa-magnet";
+    if (value.includes("torrent")) return "fa-box-archive";
+    if (value.includes("http") || value.includes("direct") || value.includes("uri")) return "fa-link";
+    if (value.includes("spotify") || value.includes("audio")) return "fa-music";
+    if (value.includes("manga")) return "fa-book-open";
+    if (value.includes("video") || value.includes("youtube")) return "fa-play";
+    return "fa-download";
 }
 
 async function loadZipJobs() {
@@ -491,28 +567,61 @@ async function controlDownload(jobId, action) {
 
 async function loadStats() {
     try {
-        const [statsResponse, downloadsResponse] = await Promise.all([
-            fetch("/api/stats", { headers: apiHeaders() }),
-            fetch("/api/downloads", { headers: apiHeaders() }),
-        ]);
+        const statsResponse = await fetch("/api/stats", { headers: apiHeaders() });
         const stats = await statsResponse.json();
-        const downloads = await downloadsResponse.json();
         if (!statsResponse.ok || stats.error) throw new Error(stats.error || "Stats failed");
 
-        const totalItems = (stats.file_count || 0) + (stats.folder_count || 0);
         const totalBytes = stats.total_size_bytes || 0;
-        const displayLimit = Math.max(totalBytes, 1 * 1024 * 1024 * 1024);
-        const percentage = Math.min(100, Math.round((totalBytes / displayLimit) * 100));
+        const capacityBytes = Math.max(totalBytes, 100 * 1024 ** 3);
+        const freeBytes = Math.max(0, capacityBytes - totalBytes);
+        const percentage = Math.min(100, totalBytes / capacityBytes * 100);
+        const used = formatStorageNumber(totalBytes);
+        const capacity = formatStorageNumber(capacityBytes);
+        const free = formatStorageNumber(freeBytes);
 
-        document.getElementById("total-count").innerText = totalItems.toLocaleString();
-        document.getElementById("storage-percentage").innerText = `${percentage}%`;
-        document.getElementById("storage-ratio").innerText = stats.total_size || "0 B";
-        document.getElementById("storage-summary").innerText =
-            `${stats.file_count || 0} files, ${stats.folder_count || 0} folders in the download tree.`;
-        document.getElementById("dl-speed").innerText = formatSpeed(downloads.total_down_speed || 0);
+        document.getElementById("storage-used-value").innerText = used.value;
+        document.getElementById("storage-used-label").innerText = `${used.unit} Used`;
+        document.getElementById("storage-capacity").innerText = `${capacity.value} ${capacity.unit}`;
+        document.getElementById("storage-free").innerText = `${free.value} ${free.unit}`;
+        document.querySelector(".storage-ring")?.style.setProperty("--storage-progress", `${percentage * 3.6}deg`);
+        renderUsageBreakdown(stats.categories || [], totalBytes);
     } catch (error) {
         console.error(error);
     }
+}
+
+function renderUsageBreakdown(categories, totalBytes) {
+    const colors = {
+        videos: "#2f83ff",
+        archives: "#12c990",
+        manga: "#b669ff",
+        audio: "#f6a609",
+        telegram: "#ff5a7d",
+        other: "#8fa4be",
+    };
+    const container = document.getElementById("usage-breakdown");
+    if (!container) return;
+    const rows = categories.length ? categories : [
+        { key: "videos", label: "Videos", size: "0 B", percent: 0 },
+        { key: "archives", label: "Archives (Zip/Rar)", size: "0 B", percent: 0 },
+        { key: "manga", label: "Manga & Images", size: "0 B", percent: 0 },
+        { key: "audio", label: "Audio (Spotify)", size: "0 B", percent: 0 },
+        { key: "telegram", label: "Telegram Temp", size: "0 B", percent: 0 },
+    ];
+    container.innerHTML = rows.map((item) => {
+        const percent = totalBytes ? Math.max(0, Math.min(100, Number(item.percent || 0))) : 0;
+        return `
+            <div class="usage-row">
+                <div>
+                    <span>${escapeHtml(item.label)}</span>
+                    <small>${escapeHtml(item.size || "0 B")}</small>
+                </div>
+                <div class="usage-track">
+                    <div class="usage-fill" style="width: ${percent}%; background: ${colors[item.key] || colors.other}"></div>
+                </div>
+            </div>
+        `;
+    }).join("");
 }
 
 async function loadSettings() {
@@ -534,36 +643,60 @@ function renderSettings() {
     const settings = cachedSettings;
     const partSizeMb = Number(settings.zip_part_size || 0) / (1024 * 1024);
     document.getElementById("settings-list").innerHTML = `
-        ${settingSelect("Archive Part Size", "Split archives into Telegram-friendly volumes.", "zip_part_size", [
-            [268435456, "256 MB"],
-            [536870912, "512 MB"],
-            [1073741824, "1 GB"],
-            [2147483648, "2 GB"],
-        ], settings.zip_part_size || 1073741824, `${partSizeMb || 1024} MB`)}
-        ${settingSelect("Archive Method", "Choose ZIP for speed or 7Z for stronger compression.", "zip_method", [
-            ["zip", "ZIP"],
-            ["7z", "7Z"],
-        ], settings.zip_method || "zip")}
-        ${settingSelect("Compression Level", "Higher levels are smaller but slower.", "compression_level", [
-            [1, "1"],
-            [3, "3"],
-            [5, "5"],
-            [7, "7"],
-            [9, "9"],
-        ], settings.compression_level || 3)}
-        ${settingPassword(settings.password || "")}
-        ${settingToggle("Auto-delete after ZIP", "Delete source files after ZIP/upload finishes.", "auto_delete_files_after_zip", settings.auto_delete_files_after_zip)}
-        ${settingToggle("Delete ZIPs after send", "Remove generated archives after Telegram upload.", "auto_delete_zips_after_send", settings.auto_delete_zips_after_send)}
-        ${settingToggle("Auto-delete after upload", "Delete selected source files after direct upload.", "auto_delete_files_after_upload", settings.auto_delete_files_after_upload)}
-        ${settingToggle("Forwarded posts", "Automatically download forwarded Telegram media.", "auto_download_forwarded_posts", settings.auto_download_forwarded_posts)}
-        ${settingToggle("Manga auto PDF", "Convert downloaded manga image folders to PDF automatically.", "manga_auto_convert_pdf", settings.manga_auto_convert_pdf)}
-        ${settingToggle("Remove manga images", "Delete manga images after PDF conversion finishes.", "manga_remove_images_after_conversion", settings.manga_remove_images_after_conversion)}
+        ${settingsSection("Upload Target", "fa-cloud-arrow-up", `
+            ${settingStatic("Destination", "Where files are sent in Telegram", "Saved Messages")}
+        `)}
+        ${settingsSection("Manga & Galleries", "fa-book-open", `
+            ${settingToggle("Auto-Convert to PDF", "Convert downloaded image folders to PDF automatically.", "manga_auto_convert_pdf", settings.manga_auto_convert_pdf)}
+            ${settingToggle("Clean Source Images", "Delete original images after successful PDF conversion.", "manga_remove_images_after_conversion", settings.manga_remove_images_after_conversion)}
+        `)}
+        ${settingsSection("Archive (Zip) Defaults", "fa-box-archive", `
+            ${settingSegmented("Format", "zip_method", [["zip", ".zip"], ["7z", ".7z"]], settings.zip_method || "zip")}
+            ${settingSelect("Part Size", "Split archives into Telegram-friendly volumes.", "zip_part_size", [
+                [268435456, "256 MB"],
+                [536870912, "512 MB"],
+                [1073741824, "1 GB"],
+                [2147483648, "2 GB"],
+            ], settings.zip_part_size || 1073741824, `${partSizeMb || 1024} MB`)}
+            ${settingRange("Compression Level", "1 (Fastest) to 9 (Smallest)", "compression_level", settings.compression_level || 3)}
+            ${settingPassword(settings.password || "")}
+            ${settingToggle("Delete ZIPs After Send", "Remove generated archive parts after Telegram upload.", "auto_delete_zips_after_send", settings.auto_delete_zips_after_send)}
+            ${settingToggle("Auto-Delete Original", "Remove source files after zipping.", "auto_delete_files_after_zip", settings.auto_delete_files_after_zip)}
+        `)}
+        ${settingsSection("Mini-App Preferences", "fa-mobile-screen", `
+            ${settingToggle("Forwarded Posts", "Automatically download forwarded Telegram media.", "auto_download_forwarded_posts", settings.auto_download_forwarded_posts)}
+            ${settingToggle("Delete After Upload", "Delete selected source files after direct upload.", "auto_delete_files_after_upload", settings.auto_delete_files_after_upload)}
+        `)}
+    `;
+}
+
+function settingsSection(title, icon, content) {
+    return `
+        <section>
+            <div class="settings-section-title">
+                <i class="fas ${icon}"></i>
+                <h2>${escapeHtml(title)}</h2>
+            </div>
+            <div class="settings-section neu-out">${content}</div>
+        </section>
+    `;
+}
+
+function settingStatic(title, description, value) {
+    return `
+        <div class="setting-item">
+            <div class="setting-copy">
+                <h4>${escapeHtml(title)}</h4>
+                <p>${escapeHtml(description)}</p>
+            </div>
+            <div class="setting-select neu-in">${escapeHtml(value)}</div>
+        </div>
     `;
 }
 
 function settingSelect(title, description, key, options, value, fallbackLabel = "") {
     return `
-        <div class="setting-item neu-out">
+        <div class="setting-item">
             <div class="setting-copy">
                 <h4>${escapeHtml(title)}</h4>
                 <p>${escapeHtml(description)}</p>
@@ -578,9 +711,36 @@ function settingSelect(title, description, key, options, value, fallbackLabel = 
     `;
 }
 
+function settingSegmented(title, key, options, value) {
+    return `
+        <div class="setting-item">
+            <div class="setting-copy">
+                <h4>${escapeHtml(title)}</h4>
+            </div>
+            <div class="segmented neu-in">
+                ${options.map(([optionValue, label]) => `
+                    <button class="${String(optionValue) === String(value) ? "active" : ""}" onclick="saveSetting('${key}', '${optionValue}')">${escapeHtml(label)}</button>
+                `).join("")}
+            </div>
+        </div>
+    `;
+}
+
+function settingRange(title, description, key, value) {
+    return `
+        <div class="setting-item">
+            <div class="setting-copy">
+                <h4>${escapeHtml(title)}</h4>
+                <p>${escapeHtml(description)}</p>
+            </div>
+            <input class="range-control" type="range" min="1" max="9" value="${escapeHtml(value)}" oninput="saveSetting('${key}', this.value)">
+        </div>
+    `;
+}
+
 function settingToggle(title, description, key, value) {
     return `
-        <div class="setting-item neu-out">
+        <div class="setting-item">
             <div class="setting-copy">
                 <h4>${escapeHtml(title)}</h4>
                 <p>${escapeHtml(description)}</p>
@@ -592,7 +752,7 @@ function settingToggle(title, description, key, value) {
 
 function settingPassword(value) {
     return `
-        <div class="setting-item neu-out">
+        <div class="setting-item">
             <div class="setting-copy">
                 <h4>Archive Password</h4>
                 <p>${value ? "Password is set." : "Leave empty for no password."}</p>
@@ -649,12 +809,34 @@ function iconForFile(name) {
     return "fa-file";
 }
 
+function fileTypeLabel(name) {
+    if (/\.(jpg|jpeg|png|gif|webp)$/i.test(name)) return "Image";
+    if (/\.(zip|rar|tar|gz|7z)$/i.test(name)) return "Archive";
+    if (/\.(mp4|mkv|mov|avi|webm)$/i.test(name)) return "Video";
+    if (/\.(mp3|wav|flac|aac|ogg)$/i.test(name)) return "Audio";
+    if (/\.(pdf|doc|docx)$/i.test(name)) return "Document";
+    if (/\.(json|txt|py|html|css|js|ts|md)$/i.test(name)) return "Code";
+    return "File";
+}
+
 function formatBytes(bytes) {
     const value = Number(bytes || 0);
     if (!value) return "0 B";
     const units = ["B", "KB", "MB", "GB", "TB"];
     const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
     return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function formatStorageNumber(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return { value: "0", unit: "GB" };
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+    const amount = value / 1024 ** index;
+    return {
+        value: amount >= 10 ? amount.toFixed(1).replace(/\.0$/, "") : amount.toFixed(2).replace(/0$/, "").replace(/\.$/, ""),
+        unit: units[index],
+    };
 }
 
 function formatSpeed(bytesPerSecond) {
