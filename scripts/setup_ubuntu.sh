@@ -172,6 +172,7 @@ ARIA2_RPC_PORT=${aria2_port}
 # Optional. Leave empty to let the bot generate a local daemon token.
 ARIA2_RPC_SECRET=${aria2_secret}
 FFMPEG_BIN=ffmpeg
+SPOTDL_BIN=spotdl
 
 # The Pirate Bay API mirror
 # TPB_API_URL=https://apibay.org

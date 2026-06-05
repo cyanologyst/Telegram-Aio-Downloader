@@ -62,6 +62,9 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
+from app.downloaders.base import DownloadRequest
+from app.downloaders.spotify import SpotifyDownloader, is_spotify_url
+
 # Import TPB crawler subsystem
 from app.downloaders.torrents.tpb import TPBCrawler, TPBHandlers
 from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
@@ -115,6 +118,8 @@ DOWNLOAD_DIR = BASE_DIR / "Download"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 TELEGRAM_DIR = BASE_DIR / "Download" / "Telegram"
 TELEGRAM_DIR.mkdir(parents=True, exist_ok=True)
+SPOTIFY_DIR = BASE_DIR / "Download" / "Spotify"
+SPOTIFY_DIR.mkdir(parents=True, exist_ok=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 API_ID = int(os.getenv("API_ID", "0") or "0")
@@ -123,6 +128,7 @@ API_HASH = os.getenv("API_HASH", "").strip()
 PYRO_SESSION_NAME = os.getenv("PYRO_SESSION_NAME", "pyrogram_uploader")
 ARIA2_BIN = os.getenv("ARIA2_BIN", "aria2c")
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
+SPOTDL_BIN = os.getenv("SPOTDL_BIN", "spotdl")
 ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
 ARIA2_RPC_PORT = int(os.getenv("ARIA2_RPC_PORT", "6800") or "6800")
 ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
@@ -186,6 +192,9 @@ pinned_dashboard_messages = {}  # {chat_id: message_id}
 
 # Pending yt-dlp conversion selections
 pending_ytdlp_requests = {}  # {user_id: {"url": str, "chat_id": int}}
+
+# Pending Spotify confirmations
+pending_spotify_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
 # Dedicated executors for CPU-intensive operations
 # Using ProcessPoolExecutor for py7zr since it's CPU-bound
@@ -1433,15 +1442,25 @@ def format_download_status_lines(job: dict) -> list[str]:
     )
     peers = int(job.get("connections", 0) or 0)
     seeders = int(job.get("num_seeders", 0) or 0)
+    provider = str(job.get("provider") or "aria2")
 
     lines = [
         f"{ICON_DOWNLOAD} #{job['id']}  {title}",
         f"State: {state}  |  {progress:.1f}%",
-        bar,
-        f"{ICON_BOX} {human_size(done)} / {human_size(total)}",
-        f"{ICON_SPEED} {speed}",
-        f"Peers: {peers}  |  Seeders: {seeders}",
+        f"Engine: {provider}",
     ]
+    if total:
+        lines.extend([
+            bar,
+            f"{ICON_BOX} {human_size(done)} / {human_size(total)}",
+        ])
+    if provider == "aria2":
+        lines.extend([
+            f"{ICON_SPEED} {speed}",
+            f"Peers: {peers}  |  Seeders: {seeders}",
+        ])
+    elif job.get("last_line"):
+        lines.append(f"Last: {shorten(str(job['last_line']), 120)}")
     if upload_done:
         lines.append(f"{ICON_UPLOAD} Uploaded: {human_size(upload_done)}")
     lines.extend([
@@ -1456,14 +1475,19 @@ def build_status_controls_markup():
     rows = []
     for job in active:
         jid = job["id"]
-        if job.get("status") == "paused":
-            toggle = InlineKeyboardButton(f"Resume #{jid}", callback_data=f"job_resume:{jid}")
+        if job.get("provider") == "spotify":
+            rows.append([
+                InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
+            ])
         else:
-            toggle = InlineKeyboardButton(f"Pause #{jid}", callback_data=f"job_pause:{jid}")
-        rows.append([
-            toggle,
-            InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
-        ])
+            if job.get("status") == "paused":
+                toggle = InlineKeyboardButton(f"Resume #{jid}", callback_data=f"job_resume:{jid}")
+            else:
+                toggle = InlineKeyboardButton(f"Pause #{jid}", callback_data=f"job_pause:{jid}")
+            rows.append([
+                toggle,
+                InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
+            ])
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -2305,6 +2329,149 @@ def is_video_url(text: str) -> bool:
         return False
 
     return any(site in text for site in SUPPORTED_VIDEO_SITES)
+
+
+def extract_spotify_url(text: str) -> str:
+    match = re.search(
+        r"https?://open\.spotify\.com/(?:intl-[a-z]{2}/)?"
+        r"(?:track|album|playlist|artist|episode|show)/[A-Za-z0-9]+(?:\?[^\s]+)?",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    return match.group(0) if match else text.strip()
+
+
+def build_spotify_prompt_text(url: str) -> str:
+    return (
+        f"{ICON_AUDIO} Spotify link detected\n\n"
+        "Download this with spotDL?\n\n"
+        f"Folder:\n{SPOTIFY_DIR}\n\n"
+        f"Link:\n{shorten(url, 160)}"
+    )
+
+
+def build_spotify_started_text(job: dict) -> str:
+    return (
+        f"{ICON_AUDIO} Spotify download started\n\n"
+        f"Job: #{job['id']}\n"
+        "Engine: spotDL\n"
+        f"Folder:\n{SPOTIFY_DIR}"
+    )
+
+
+def build_spotify_completed_text(job: dict) -> str:
+    title = shorten(clean_download_name(job.get("name", "Spotify download")), 90)
+    count = int(job.get("artifact_count", 0) or 0)
+    lines = [
+        f"{ICON_OK} Spotify download completed",
+        "",
+        f"Job: #{job['id']}",
+        f"Title:\n{title}",
+    ]
+    if count:
+        lines.append(f"Files: {count}")
+    lines.append(f"Folder:\n{SPOTIFY_DIR}")
+    return "\n".join(lines)
+
+
+async def start_spotify_download(app: Application, chat_id: int, url: str, user_id: int = None):
+    global job_counter, download_jobs
+
+    async with jobs_lock:
+        job_counter += 1
+        job_id = job_counter
+
+    job = {
+        "id": job_id,
+        "provider": "spotify",
+        "name": "Spotify download",
+        "url": url,
+        "chat_id": chat_id,
+        "user_id": user_id or 0,
+        "pid": None,
+        "process": None,
+        "status": "starting",
+        "progress": 0.0,
+        "completed_length": 0,
+        "total_length": 0,
+        "download_speed": 0,
+        "upload_speed": 0,
+        "eta": "Unknown",
+        "started_at": now_ts(),
+        "finished_at": None,
+        "last_line": "Waiting for spotDL...",
+        "artifact_count": 0,
+    }
+    download_jobs[job_id] = job
+
+    def set_process(process):
+        job["process"] = process
+        job["pid"] = getattr(process, "pid", None)
+
+    def update_progress(line: str, percent: float | None):
+        job["status"] = "downloading"
+        job["last_line"] = shorten(line, 220)
+        if percent is not None:
+            job["progress"] = percent
+
+    async def run_job():
+        provider = SpotifyDownloader(spotdl_bin=SPOTDL_BIN, ffmpeg_bin=FFMPEG_BIN)
+        try:
+            result = await provider.download(
+                DownloadRequest(
+                    url=url,
+                    destination=SPOTIFY_DIR,
+                    options={
+                        "process_callback": set_process,
+                        "progress_callback": update_progress,
+                    },
+                )
+            )
+            if job.get("status") == "cancelled":
+                return
+            total_size = sum(
+                artifact.size_bytes or 0
+                for artifact in result.artifacts
+                if artifact.media_type == "audio"
+            )
+            job["status"] = "completed"
+            job["name"] = result.title
+            job["progress"] = 100.0
+            job["completed_length"] = total_size
+            job["total_length"] = total_size
+            job["artifact_count"] = len(result.artifacts)
+            job["finished_at"] = now_ts()
+            job["last_line"] = "Completed"
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=build_spotify_completed_text(job),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            if job.get("status") == "cancelled":
+                return
+            logger.exception("spotDL download failed")
+            job["status"] = "failed"
+            job["finished_at"] = now_ts()
+            job["last_line"] = str(e)
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_FAIL} Spotify download failed.\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Reason:\n{shorten(str(e), 900)}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+        finally:
+            job["process"] = None
+
+    asyncio.create_task(run_job())
+    return job
 
 
 async def start_ytdlp_download(app: Application, chat_id: int, url: str, audio_only: bool = False):
@@ -3340,6 +3507,25 @@ async def cancel_job(job_id: int):
     if job["status"] in ("completed", "failed", "cancelled"):
         return False, f"Job #{job_id} is already {job['status']}."
 
+    process = job.get("process")
+    if process is not None and job.get("provider") == "spotify":
+        try:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            return False, f"Could not cancel job #{job_id}: {exc}"
+
+        job["status"] = "cancelled"
+        job["finished_at"] = now_ts()
+        job["last_line"] = "Cancelled by user"
+        return True, f"Cancelled job #{job_id}: {job['name']}"
+
     errors = []
     for gid in dict.fromkeys([job.get("gid"), job.get("metadata_gid")]):
         if not gid:
@@ -4144,6 +4330,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update_status_message(context.application, chat_id, user_id)
 
+        elif is_spotify_url(text):
+            spotify_url = extract_spotify_url(text)
+            pending_spotify_requests[user_id] = {
+                "url": spotify_url,
+                "chat_id": chat_id,
+            }
+            await update.message.reply_text(
+                build_spotify_prompt_text(spotify_url),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("Continue", callback_data="spotify_confirm"),
+                        InlineKeyboardButton("Cancel", callback_data="spotify_cancel"),
+                    ],
+                ]),
+                disable_web_page_preview=True,
+            )
+
         elif is_video_url(text):
             pending_ytdlp_requests[user_id] = {
                 "url": text,
@@ -4379,6 +4582,31 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ok, msg = await resume_job(jid)
             await update_status_message(context.application, chat_id, user_id)
             await query.answer(msg, show_alert=not ok)
+
+        elif data == "spotify_confirm":
+            pending = pending_spotify_requests.pop(user_id, None)
+            if not pending:
+                await safe_edit_message(query.message, f"{ICON_WARN} No pending Spotify link found.")
+                return
+
+            job = await start_spotify_download(
+                context.application,
+                pending["chat_id"],
+                pending["url"],
+                user_id,
+            )
+            await safe_edit_message(
+                query.message,
+                build_spotify_started_text(job),
+            )
+            await update_status_message(context.application, chat_id, user_id)
+
+        elif data == "spotify_cancel":
+            pending_spotify_requests.pop(user_id, None)
+            await safe_edit_message(
+                query.message,
+                f"{ICON_STOP} Spotify download cancelled.",
+            )
         
         elif data == "clear_confirm":
             removed = clear_finished_jobs()

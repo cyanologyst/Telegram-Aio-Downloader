@@ -1,10 +1,11 @@
 # Telegram Downloader Bot
 
-Async Telegram downloader bot for torrents, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
+Async Telegram downloader bot for torrents, Spotify links, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
 
 ## Features
 
 - Magnet and `.torrent` downloads through `aria2c`
+- Spotify track/album/playlist downloads through `spotDL`
 - The Pirate Bay search integration
 - yt-dlp video/audio downloads
 - Telegram Bot API interaction with Pyrogram user-session uploads for large files
@@ -68,6 +69,7 @@ Useful optional variables:
 - `ARIA2_BIN`: path to `aria2c`.
 - `ARIA2_RPC_HOST`, `ARIA2_RPC_PORT`, `ARIA2_RPC_SECRET`: local aria2 JSON-RPC daemon settings. The bot starts aria2 with RPC enabled when needed and stores resume state in `Download/.aria2.session`.
 - `FFMPEG_BIN`: path to `ffmpeg`.
+- `SPOTDL_BIN`: path to the `spotdl` executable. Spotify downloads are saved under `Download/Spotify`.
 - `TPB_API_URL`: optional API Bay mirror.
 - `AUTO_CLEANUP_DAYS`: cleanup threshold for old temporary files.
 - `WEB_DASHBOARD_ENABLE`: `true` or `false` to enable the local web dashboard.

@@ -2,6 +2,7 @@ python-telegram-bot>=20.0
 pyrogram>=2.0
 tgcrypto
 yt-dlp
+spotdl
 Pillow
 pyzipper
 py7zr
