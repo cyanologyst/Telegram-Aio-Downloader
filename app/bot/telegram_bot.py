@@ -89,6 +89,11 @@ from app.services.archive import (
     render_progress_bar,
 )
 from app.services.archive import sanitize_filename as zip_sanitize
+from app.services.hentai_playlist import (
+    HentaiPlaylist,
+    is_hentai_playlist_url,
+    resolve_hentai_playlist,
+)
 from app.services.manga import (
     convert_images_to_pdf,
     download_manga_gallery,
@@ -221,6 +226,9 @@ pending_spotify_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
 # Pending manga gallery confirmations
 pending_manga_requests = {}  # {user_id: {"url": str, "chat_id": int}}
+
+# Pending hentai playlist confirmations
+pending_hentai_playlist_requests = {}  # {user_id: {"playlist": HentaiPlaylist, "chat_id": int}}
 
 # Dedicated executors for CPU-intensive operations
 # Using ProcessPoolExecutor for py7zr since it's CPU-bound
@@ -1532,6 +1540,18 @@ def format_download_status_lines(job: dict) -> list[str]:
     seeders = int(job.get("num_seeders", 0) or 0)
     provider = str(job.get("provider") or "aria2")
 
+    if provider == "hentai-playlist":
+        done_items = int(job.get("completed_items", 0) or 0)
+        total_items = int(job.get("episode_count", 0) or 0)
+        return [
+            f"{ICON_DOWNLOAD} #{job['id']}  {title}",
+            f"State: {state}  |  {progress:.1f}%",
+            "Engine: yt-dlp playlist",
+            f"Episodes: {done_items} / {total_items}",
+            f"Current: {shorten(str(job.get('last_line') or 'Waiting...'), 100)}",
+            "",
+        ]
+
     lines = [
         f"{ICON_DOWNLOAD} #{job['id']}  {title}",
         f"State: {state}  |  {progress:.1f}%",
@@ -1568,7 +1588,7 @@ def build_status_controls_markup():
     rows = []
     for job in active:
         jid = job["id"]
-        if job.get("provider") in {"spotify", "manga"}:
+        if job.get("provider") in {"spotify", "manga", "yt-dlp", "hentai-playlist"}:
             rows.append([
                 InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
             ])
@@ -2421,6 +2441,26 @@ def is_video_url(text: str) -> bool:
     return is_supported_video_url(text)
 
 
+def build_hentai_playlist_prompt_text(playlist: HentaiPlaylist) -> str:
+    return (
+        f"{ICON_DOWNLOAD} Hentai playlist detected\n\n"
+        f"Site: {playlist.site}\n"
+        f"Title:\n{shorten(clean_download_name(playlist.title), 100)}\n"
+        f"Episodes: {len(playlist.urls)}\n\n"
+        f"Folder:\n{HENTAI_VIDEO_DIR / video_platform_slug(playlist.urls[0])}"
+    )
+
+
+def build_hentai_playlist_started_text(job: dict) -> str:
+    return (
+        f"{ICON_DOWNLOAD} Playlist download started\n\n"
+        f"Job: #{job['id']}\n"
+        f"Site: {job.get('platform', 'Hentai')}\n"
+        f"Title:\n{shorten(clean_download_name(job.get('name', 'Playlist')), 100)}\n"
+        f"Episodes: {job.get('episode_count', 0)}"
+    )
+
+
 def extract_spotify_url(text: str) -> str:
     match = re.search(
         r"https?://open\.spotify\.com/(?:intl-[a-z]{2}/)?"
@@ -2891,6 +2931,9 @@ async def start_ytdlp_download(
         refresh_task = asyncio.create_task(refresh_ytdlp_status())
         try:
             title, filepath = await loop.run_in_executor(None, run_download)
+            if job.get("status") == "cancelled":
+                await maybe_auto_update_status_message(app, job, force=True)
+                return
 
             job["status"] = "completed"
             job["name"] = title
@@ -2951,6 +2994,110 @@ async def start_ytdlp_download(
     return job
 
 
+async def start_hentai_playlist_download(
+    app: Application,
+    chat_id: int,
+    playlist: HentaiPlaylist,
+    user_id: int = None,
+):
+    global job_counter, download_jobs
+
+    async with jobs_lock:
+        job_counter += 1
+        job_id = job_counter
+
+    episode_count = len(playlist.urls)
+    job = {
+        "id": job_id,
+        "name": playlist.title,
+        "url": playlist.urls[0] if playlist.urls else "",
+        "chat_id": chat_id,
+        "user_id": user_id or 0,
+        "provider": "hentai-playlist",
+        "source_type": "hentai_playlist",
+        "platform": playlist.site,
+        "pid": None,
+        "process": None,
+        "status": "starting",
+        "progress": 0.0,
+        "completed_length": 0,
+        "total_length": 0,
+        "download_speed": 0,
+        "upload_speed": 0,
+        "eta": "Unknown",
+        "started_at": now_ts(),
+        "finished_at": None,
+        "last_line": "Preparing playlist...",
+        "episode_count": episode_count,
+        "completed_items": 0,
+        "folder": str(HENTAI_VIDEO_DIR),
+    }
+    download_jobs[job_id] = job
+
+    async def run_playlist():
+        try:
+            job["status"] = "downloading"
+            await maybe_auto_update_status_message(app, job, force=True)
+            for index, episode_url in enumerate(playlist.urls, start=1):
+                if job.get("status") == "cancelled":
+                    return
+                job["last_line"] = f"Episode {index}/{episode_count}"
+                job["progress"] = ((index - 1) / episode_count * 100) if episode_count else 0.0
+                await maybe_auto_update_status_message(app, job, force=True)
+                child = await start_ytdlp_download(
+                    app,
+                    chat_id,
+                    episode_url,
+                    audio_only=False,
+                    user_id=user_id,
+                )
+                if child.get("status") == "failed":
+                    job["last_line"] = f"Episode {index} failed: {child.get('last_line', 'Unknown')}"
+                    raise RuntimeError(job["last_line"])
+                job["completed_items"] = index
+                job["progress"] = (index / episode_count * 100) if episode_count else 100.0
+
+            job["status"] = "completed"
+            job["progress"] = 100.0
+            job["finished_at"] = now_ts()
+            job["last_line"] = "Completed"
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_OK} Playlist download completed\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Title:\n{shorten(clean_download_name(playlist.title), 100)}\n"
+                    f"Episodes: {episode_count}\n"
+                    f"Folder:\n{HENTAI_VIDEO_DIR}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            if job.get("status") == "cancelled":
+                return
+            logger.exception("Hentai playlist download failed")
+            job["status"] = "failed"
+            job["finished_at"] = now_ts()
+            job["last_line"] = str(exc)
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_FAIL} Playlist download failed.\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Reason:\n{shorten(str(exc), 900)}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+
+    await update_status_message(app, chat_id, user_id)
+    asyncio.create_task(run_playlist())
+    return job
+
+
 async def handle_ytdlp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle yt-dlp download format selection."""
     query = update.callback_query
@@ -2980,6 +3127,36 @@ async def handle_ytdlp_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def handle_hentai_playlist_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    pending = pending_hentai_playlist_requests.pop(user_id, None)
+
+    if query.data == "hentai_playlist_cancel":
+        await query.edit_message_text(f"{ICON_WARN} Playlist download cancelled.")
+        return
+
+    if not pending:
+        await query.edit_message_text(f"{ICON_WARN} No pending playlist request found.")
+        return
+
+    playlist = pending["playlist"]
+    await query.edit_message_text(build_hentai_playlist_started_text({
+        "id": "new",
+        "platform": playlist.site,
+        "name": playlist.title,
+        "episode_count": len(playlist.urls),
+    }))
+    await start_hentai_playlist_download(
+        context.application,
+        pending["chat_id"],
+        playlist,
+        user_id=user_id,
+    )
+
+
 async def start_download_from_source(
     app: Application,
     chat_id: int,
@@ -2989,6 +3166,11 @@ async def start_download_from_source(
     """Mini-app download entrypoint that chooses the right backend for pasted links."""
     source = source.strip()
     http_url = extract_http_url(source)
+    if is_hentai_playlist_url(http_url):
+        playlist = await resolve_hentai_playlist(http_url)
+        if not playlist.urls:
+            raise RuntimeError("No episode links found on this playlist page.")
+        return await start_hentai_playlist_download(app, chat_id, playlist, user_id=user_id)
     if is_video_url(http_url):
         return await start_ytdlp_download(
             app,
@@ -3887,7 +4069,7 @@ async def cancel_job(job_id: int):
         job["last_line"] = "Cancelled by user"
         return True, f"Cancelled job #{job_id}: {job['name']}"
 
-    if job.get("provider") == "manga":
+    if job.get("provider") in {"manga", "yt-dlp", "hentai-playlist"}:
         job["status"] = "cancelled"
         job["finished_at"] = now_ts()
         job["last_line"] = "Cancelled by user"
@@ -4747,6 +4929,38 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [
                         InlineKeyboardButton("Continue", callback_data="spotify_confirm"),
                         InlineKeyboardButton("Cancel", callback_data="spotify_cancel"),
+                    ],
+                ]),
+                disable_web_page_preview=True,
+            )
+
+        elif is_hentai_playlist_url(extract_http_url(text)):
+            playlist_url = extract_http_url(text)
+            try:
+                playlist = await resolve_hentai_playlist(playlist_url)
+                if not playlist.urls:
+                    raise RuntimeError("No episode links found on this playlist page.")
+            except Exception as exc:
+                await update.message.reply_text(
+                    (
+                        f"{ICON_FAIL} Playlist detection failed.\n\n"
+                        f"Reason:\n{shorten(str(exc), 900)}"
+                    ),
+                    reply_markup=build_reply_menu(user_id),
+                    disable_web_page_preview=True,
+                )
+                return
+
+            pending_hentai_playlist_requests[user_id] = {
+                "playlist": playlist,
+                "chat_id": chat_id,
+            }
+            await update.message.reply_text(
+                build_hentai_playlist_prompt_text(playlist),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("Download all", callback_data="hentai_playlist_confirm"),
+                        InlineKeyboardButton("Cancel", callback_data="hentai_playlist_cancel"),
                     ],
                 ]),
                 disable_web_page_preview=True,
@@ -6192,6 +6406,7 @@ def main():
 
     # Legacy handlers
     app.add_handler(CallbackQueryHandler(handle_ytdlp_callback, pattern=r"^ytdlp_"))
+    app.add_handler(CallbackQueryHandler(handle_hentai_playlist_callback, pattern=r"^hentai_playlist_"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.Document.FileExtension("torrent"), on_torrent_file))
 

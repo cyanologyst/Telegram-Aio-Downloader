@@ -1,97 +1,233 @@
-# Telegram Downloader Bot
+# Telegram AIO Downloader Bot 🚀
 
-Async Telegram downloader bot for torrents, direct HTTP/HTTPS file links, Spotify links, manga galleries, yt-dlp-supported video links, archive creation, and Telegram file upload workflows.
+An async Telegram bot and Telegram Mini App for managing downloads, files, archives, uploads, torrents, music, manga galleries, social videos, adult videos, and hentai videos from one clean control surface.
 
-## Features
+The bot is designed around a VPS workflow: send a link in Telegram, let the server download it, manage files from the chat or Mini App, then upload selected files back to your Telegram Saved Messages with a Pyrogram user session.
 
-- Magnet, `.torrent`, and direct HTTP/HTTPS file downloads through `aria2c`
-- Spotify track/album/playlist downloads through `spotDL`
-- Manga/gallery image downloads with optional PDF conversion
-- The Pirate Bay search integration
-- yt-dlp video/audio downloads, including Instagram, X/Twitter, TikTok, YouTube, adult video sites inspired by Porn_Fetch coverage, hentai video sites through `hanime-plugin`, and similar supported sites
-- Telegram Bot API interaction with Pyrogram user-session uploads for large files
-- File browser, batch upload/delete, archive creation, password-protected archives
-- Per-user settings, including forwarded-post auto-download control
+> ⚠️ Use this project only for content you are allowed to access and download. The bot does not bypass DRM, paid access, private content restrictions, or copyright law.
 
-## Project Status
+## ✨ Main Features
 
-The project has been reorganized into a public-repository-ready package layout. The Telegram runtime is preserved in `app.bot.telegram_bot` while reusable services and new provider interfaces are extracted under `app/`.
+| Area | What It Can Do | Engine |
+|---|---|---|
+| 🧲 Torrents | Magnet links, `.torrent` files, metadata resolution, resume, pause, cancel, speed/ETA tracking | `aria2c` daemon |
+| 🌐 Direct links | Direct HTTP/HTTPS file downloads with aria2 resume and live status | `aria2c` daemon |
+| 🎬 Video sites | Download video or MP3 from supported `yt-dlp` sites | `yt-dlp` |
+| 🔞 Adult video sites | Download supported public adult video pages into a separate folder | `yt-dlp` |
+| 🎞️ Hentai video sites | Download supported hentai episodes and selected site playlists | `yt-dlp` + `hanime-plugin` |
+| 🎵 Spotify | Download Spotify tracks, albums, playlists, artists, shows, and episodes | `spotDL` |
+| 🖼️ Manga/gallery | Download image galleries and optionally convert them to PDF | gallery scraper + Pillow |
+| 📦 Archives | Create ZIP/TAR/7Z archives, split large archives, optional passwords | archive services |
+| 📤 Telegram upload | Upload selected files/folders/archives to Saved Messages or your account target | Pyrogram |
+| 📱 Mini App | Neumorphic file manager, downloads tab, storage tab, settings tab, upload/delete/zip actions | Flask + Telegram Web App |
+| 🏴‍☠️ TPB search | Search The Pirate Bay/API Bay mirrors and start magnet downloads | TPB crawler |
 
-## Quick Start
+## 📥 Supported Input Types
 
-1. Install Python 3.11+.
-2. Install external binaries: `aria2c` and `ffmpeg`.
-3. Create a virtual environment.
-4. Install dependencies:
+| Input You Send | Result | Default Folder |
+|---|---|---|
+| `magnet:?xt=...` | Torrent download with live aria2 status | `Download/` |
+| `.torrent` file | Torrent download | `Download/` |
+| Direct file URL | Server-side HTTP/HTTPS download | `Download/` |
+| Spotify URL | Audio download via spotDL | `Download/Spotify/` |
+| Manga/gallery URL | Gallery image download | `Download/Manga/<gallery>/` |
+| Supported video URL | Video/MP3 prompt, then `yt-dlp` download | `Download/` |
+| Adult video URL | Video/MP3 prompt, separated by site | `Download/Adult/<site>/` |
+| Hentai episode URL | Video/MP3 prompt, separated by site | `Download/Hentai/<site>/` |
+| Hentai playlist/series URL | Download all detected episodes | `Download/Hentai/<site>/` |
 
-```bash
-pip install -r requirements/dev.txt
-```
+## 🌍 Website Support Matrix
 
-5. Copy `.env.example` to `.env` and fill in Telegram credentials.
-6. Run:
+### General Video / Social Sites
 
-```bash
-python main.py
-```
+These are routed through `yt-dlp`. Support depends on the installed `yt-dlp` version and the site’s current extractor status.
+
+| Site | Video | MP3 | Notes |
+|---|---:|---:|---|
+| YouTube / `youtu.be` | ✅ | ✅ | Videos and audio extraction |
+| TikTok | ✅ | ✅ | Public videos |
+| Instagram | ✅ | ✅ | Public/reachable posts and reels |
+| X / Twitter | ✅ | ✅ | Public/reachable posts |
+| Facebook | ✅ | ✅ | Public/reachable videos |
+| Vimeo | ✅ | ✅ | Public videos |
+| Dailymotion | ✅ | ✅ | Public videos |
+| Twitch | ✅ | ✅ | Public videos supported by `yt-dlp` |
+
+### Adult Video Sites
+
+These are routed into `Download/Adult/<site>/`.
+
+| Site | Status | Notes |
+|---|---:|---|
+| PornHub | ✅ | Public video pages |
+| Eporner | ✅ | Public video pages |
+| XVideos | ✅ | Public video pages |
+| XHamster | ✅ | Public video pages |
+| XNXX | ✅ | Public video pages |
+| SpankBang | ✅ | Public video pages |
+| MissAV | ✅ | Public video pages where `yt-dlp` supports them |
+| YouPorn | ✅ | Public video pages |
+| Porntrex | ✅ | Public video pages |
+| HQPorner | ✅ | Public video pages |
+| RedTube | ✅ | Public video pages |
+| Tube8 | ✅ | Public video pages |
+| TNAFlix | ✅ | Public video pages |
+| DrTuber | ✅ | Public video pages |
+| Motherless | ✅ | Public video pages |
+| ThisVid | ✅ | Public video pages |
+| Rule34Video | ✅ | Public video pages |
+| Txxx | ✅ | Public video pages |
+| SunPorno | ✅ | Public video pages |
+| YouJizz | ✅ | Public video pages |
+| Empflix | ✅ | Public video pages |
+
+### Hentai Video Sites
+
+These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<site>/`.
+
+| Site | Single Episode | Playlist / Series | Tested Behavior |
+|---|---:|---:|---|
+| `hstream.moe` | ✅ | ✅ | Series pages are scraped for episode URLs, then each episode downloads with `yt-dlp` |
+| `hentaihaven.com` | ✅ | ✅ | Series pages are scraped for `/episode-N` URLs |
+| `hentaimama.io` | ✅ | ❌ | Tested as single episode only; no stable playlist page shape wired yet |
+| `hanime.red` | ✅ | ❌ | Some pages return direct MP4 URLs; treated as single episode and marked more brittle |
+| `hanime.tv` | ❌ | ❌ | Disabled: requires Deno and previously failed server/CDN checks |
+| `ohentai.org` | ❌ | ❌ | Disabled: returned 403/timeout during local tests |
+| `oppai.stream` | ❌ | ❌ | Disabled: plugin extractor currently fails request handling |
+
+## 📊 Live Download Management
+
+| Download Type | Live Progress | Speed | Pause/Resume | Cancel |
+|---|---:|---:|---:|---:|
+| aria2 torrents | ✅ | ✅ down/up | ✅ | ✅ |
+| aria2 direct links | ✅ | ✅ down | ✅ | ✅ |
+| yt-dlp videos | ✅ | ✅ down | ❌ | ✅ best-effort |
+| Spotify | ✅ limited | ✅ when available | ❌ | ✅ |
+| Manga/gallery | ✅ stage-based | ❌ | ❌ | ✅ |
+| Hentai playlists | ✅ episode count + child jobs | ✅ per episode | ❌ | ✅ best-effort |
+
+`yt-dlp` progress depends on what the extractor reports. Some sites provide exact file size and percentage; others only provide downloaded bytes and speed until the file finishes.
+
+## 📱 Telegram Mini App
+
+The Mini App gives you a phone-friendly file manager and download dashboard.
+
+| Tab | Features |
+|---|---|
+| 📁 Files | Browse folders, persistent multi-select, selected-size counter, upload selected files, delete, zip |
+| ⬇️ Downloads | Paste URLs/magnets, start downloads, view active/recent jobs, cancel supported jobs |
+| 💽 Space | Storage summary, usage breakdown, cleanup actions |
+| ⚙️ Settings | Upload destination, manga PDF settings, archive defaults, mini-app preferences |
+
+Telegram Mini Apps require HTTPS. If you do not own a domain, use the included Cloudflare Quick Tunnel script.
+
+## 📦 Archive / ZIP Features
+
+| Feature | Support |
+|---|---:|
+| ZIP archives | ✅ |
+| TAR archives | ✅ |
+| 7Z archives | ✅ |
+| Password-protected ZIP | ✅ |
+| Split large archives | ✅ |
+| Zip selected files across folders | ✅ |
+| Auto-upload archive after zip | ✅ from Mini App |
+| Auto-delete source files after zip | ✅ configurable |
+
+## 🖼️ Manga / Gallery Features
+
+| Feature | Support |
+|---|---:|
+| Download gallery images | ✅ |
+| Save each gallery in its own folder | ✅ |
+| Manual “Convert to PDF” from file browser | ✅ |
+| Auto-convert downloaded manga to PDF | ✅ setting |
+| Remove source images after PDF conversion | ✅ setting |
+| Put generated PDFs in parent `Download/` folder | ✅ |
+
+## 🎵 Spotify Features
+
+Spotify links are handled through `spotDL`.
+
+| Spotify Link Type | Support |
+|---|---:|
+| Track | ✅ |
+| Album | ✅ |
+| Playlist | ✅ |
+| Artist | ✅ |
+| Episode | ✅ |
+| Show | ✅ |
+
+Spotify files are saved under `Download/Spotify/`.
+
+## 🛠️ Quick Start
 
 ### Ubuntu One-Command Setup
-
-On Ubuntu/Debian, you can let the setup script install system packages, create `.venv`, install Python requirements, and write `.env` interactively:
 
 ```bash
 bash scripts/setup_ubuntu.sh
 ```
 
-The script asks for BotFather token, Telegram `API_ID`/`API_HASH`, allowed user IDs, and whether to use automatic local ports or manually configure aria2 RPC, dashboard, and mini-app host/port settings.
+The setup script can:
 
-### Telegram Mini-App Without a Domain
+| Step | What It Does |
+|---|---|
+| 1 | Creates/activates `.venv` |
+| 2 | Installs Python requirements |
+| 3 | Installs system dependencies like `aria2c`, `ffmpeg`, and helper packages |
+| 4 | Asks for BotFather token, `API_ID`, `API_HASH`, allowed user IDs |
+| 5 | Lets you choose automatic or manual ports/IP settings |
 
-Telegram Mini Apps require a public HTTPS URL. If you do not own a domain, keep the mini-app on your VPS and expose it with a free Cloudflare Quick Tunnel:
+### Start With Mini App Tunnel
 
 ```bash
 bash scripts/start_with_cloudflare_tunnel.sh
 ```
 
-The script starts `cloudflared`, writes the generated `https://....trycloudflare.com` URL to `WEB_APP_URL` in `.env`, then starts the bot. The generated URL changes when the tunnel restarts, so use this script whenever you start the bot without a domain.
+This starts a Cloudflare Quick Tunnel, writes the generated HTTPS URL to `.env`, and starts the bot. Use this every time you restart the Mini App without a permanent domain.
 
-## Configuration
+### Manual Development Start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements/dev.txt
+python main.py
+```
+
+## ⚙️ Configuration
 
 Required environment variables:
 
-- `BOT_TOKEN`: Telegram bot token from BotFather.
-- `API_ID`: Telegram API ID from my.telegram.org.
-- `API_HASH`: Telegram API hash from my.telegram.org.
+| Variable | Description |
+|---|---|
+| `BOT_TOKEN` | Telegram bot token from BotFather |
+| `API_ID` | Telegram API ID from `my.telegram.org` |
+| `API_HASH` | Telegram API hash from `my.telegram.org` |
 
 Useful optional variables:
 
-- `ALLOWED_USER_IDS`: comma-separated user IDs allowed to use the bot.
-- `PYRO_SESSION_NAME`: Pyrogram session name for large file uploads.
-- `ARIA2_BIN`: path to `aria2c`.
-- `ARIA2_RPC_HOST`, `ARIA2_RPC_PORT`, `ARIA2_RPC_SECRET`: local aria2 JSON-RPC daemon settings. The bot starts aria2 with RPC enabled when needed and stores resume state in `Download/.aria2.session`.
-- `FFMPEG_BIN`: path to `ffmpeg`.
-- `SPOTDL_BIN`: path to the `spotdl` executable. Spotify downloads are saved under `Download/Spotify`.
-- `YTDLP_COOKIES_FILE`: optional path to a Netscape cookies file for yt-dlp. Useful for sites that require login, consent, or age confirmation.
-- `YTDLP_PROXY`: optional proxy URL passed to yt-dlp for video sites that are blocked or unreliable from your server network.
-- `TPB_API_URL`: optional API Bay mirror.
-- `AUTO_CLEANUP_DAYS`: cleanup threshold for old temporary files.
-- `WEB_DASHBOARD_ENABLE`: `true` or `false` to enable the local web dashboard.
-- `WEB_DASHBOARD_HOST`: dashboard bind host (default `127.0.0.1`).
-- `WEB_DASHBOARD_PORT`: dashboard port (default `8080`).
-- `WEB_APP_ENABLE`: `true` or `false` to enable the Telegram mini-app.
-- `WEB_APP_HOST`, `WEB_APP_PORT`, `WEB_APP_URL`: mini-app bind settings and public URL.
-- `MINI_APP_DEFAULT_CHAT_ID`: optional private Telegram user ID fallback for mini-app settings, zip, and upload actions when Telegram does not send WebApp init data.
+| Variable | Description |
+|---|---|
+| `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs allowed to use the bot |
+| `PYRO_SESSION_NAME` | Pyrogram session name for uploads |
+| `ARIA2_BIN` | Path to `aria2c` |
+| `ARIA2_RPC_HOST` / `ARIA2_RPC_PORT` / `ARIA2_RPC_SECRET` | aria2 daemon RPC settings |
+| `FFMPEG_BIN` | Path to `ffmpeg` |
+| `SPOTDL_BIN` | Path to `spotdl` |
+| `YTDLP_COOKIES_FILE` | Optional Netscape cookies file for sites needing login/consent |
+| `YTDLP_PROXY` | Optional proxy URL for `yt-dlp` |
+| `TPB_API_URL` | Optional API Bay mirror |
+| `AUTO_CLEANUP_DAYS` | Cleanup threshold for old temporary files |
+| `WEB_DASHBOARD_ENABLE` | Enable local web dashboard |
+| `WEB_DASHBOARD_HOST` / `WEB_DASHBOARD_PORT` | Dashboard bind settings |
+| `WEB_APP_ENABLE` | Enable Telegram Mini App |
+| `WEB_APP_HOST` / `WEB_APP_PORT` / `WEB_APP_URL` | Mini App bind and public URL |
+| `MINI_APP_DEFAULT_CHAT_ID` | Fallback user/chat ID for Mini App actions when Telegram init data is missing |
 
-Manga downloads are stored under `Download/Manga/<gallery name>`. Use `Manga Settings` or `/mangasettings` to auto-convert downloaded galleries to PDF and optionally remove source images after conversion. Manual conversion is available from a manga folder's file-browser details.
-
-Adult video links supported by yt-dlp are saved under `Download/Adult/<site>`. Use this only for content you are allowed to access and download; the bot does not bypass paywalls, DRM, or private content restrictions.
-
-Hentai video links are saved under `Download/Hentai/<site>`. The actively routed sites are the ones verified with `hanime-plugin`: `hstream.moe`, `hentaihaven.com`, `hentaimama.io`, and `hanime.red`. `hanime.tv`, `ohentai.org`, and `oppai.stream` are intentionally not active because they failed local extractor checks or need extra runtime fixes.
-
-## Development
+## 🧪 Development Checks
 
 ```bash
-pip install -r requirements/dev.txt
 ruff check app tests
 black --check app tests
 isort --check-only app tests
@@ -99,10 +235,16 @@ mypy app
 pytest
 ```
 
-## Architecture
+## 🧭 Architecture
 
-See [docs/architecture.md](docs/architecture.md) and [docs/extension-guide.md](docs/extension-guide.md).
+The legacy Telegram runtime still lives in `app.bot.telegram_bot`, while reusable logic is split into services and downloader/provider modules under `app/`.
 
-## License
+Helpful docs:
+
+- [Architecture](docs/architecture.md)
+- [Extension Guide](docs/extension-guide.md)
+- [Mini App Guide](docs/miniapp-guide.md)
+
+## 📄 License
 
 License is intentionally left as `TBD` until the maintainer chooses one.
