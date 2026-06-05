@@ -97,6 +97,13 @@ These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<s
 
 ## 📊 Live Download Management
 
+### Torrent Search
+
+| Provider | Search | Instant Download | Notes |
+|---|---:|---:|---|
+| The Pirate Bay / API Bay | ✅ | ✅ | Uses the configurable `TPB_API_URL` JSON API |
+| RARBG-style mirrors | ✅ | ✅ | Defaults to `https://rargb.to`; refuses CAPTCHA/human-verification pages instead of bypassing them |
+
 | Download Type | Live Progress | Speed | Pause/Resume | Cancel |
 |---|---:|---:|---:|---:|
 | aria2 torrents | ✅ | ✅ down/up | ✅ | ✅ |
@@ -218,6 +225,7 @@ Useful optional variables:
 | `YTDLP_COOKIES_FILE` | Optional Netscape cookies file for sites needing login/consent |
 | `YTDLP_PROXY` | Optional proxy URL for `yt-dlp` |
 | `TPB_API_URL` | Optional API Bay mirror |
+| `RARBG_BASE_URL` | Optional RARBG-style mirror base URL; useful when the default mirror challenges your VPS |
 | `AUTO_CLEANUP_DAYS` | Cleanup threshold for old temporary files |
 | `WEB_DASHBOARD_ENABLE` | Enable local web dashboard |
 | `WEB_DASHBOARD_HOST` / `WEB_DASHBOARD_PORT` | Dashboard bind settings |
