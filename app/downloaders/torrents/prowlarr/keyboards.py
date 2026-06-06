@@ -25,15 +25,19 @@ def prowlarr_result_keyboard(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("📥 All", callback_data=f"prowlarr_dl_{token}"),
-                InlineKeyboardButton("☑️ Select", callback_data=f"prowlarr_select_{token}"),
-                InlineKeyboardButton("ℹ️", callback_data=f"prowlarr_info_{token}"),
+                InlineKeyboardButton("Download", callback_data=f"prowlarr_dl_{token}"),
+                InlineKeyboardButton("Select Files", callback_data=f"prowlarr_select_{token}"),
+                InlineKeyboardButton("Info", callback_data=f"prowlarr_info_{token}"),
             ]
         ]
     )
 
 
-def prowlarr_header_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔍 New Search", callback_data="prowlarr_newsearch")]]
-    )
+def prowlarr_header_keyboard(page: int = 0, total_pages: int = 1) -> InlineKeyboardMarkup:
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("Prev", callback_data=f"prowlarr_page_{page - 1}"))
+    nav.append(InlineKeyboardButton("New Search", callback_data="prowlarr_newsearch"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("Next", callback_data=f"prowlarr_page_{page + 1}"))
+    return InlineKeyboardMarkup([nav])

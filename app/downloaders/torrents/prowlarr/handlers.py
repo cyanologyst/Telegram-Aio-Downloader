@@ -23,6 +23,8 @@ from app.downloaders.torrents.prowlarr.keyboards import (
 
 logger = logging.getLogger(__name__)
 
+RESULTS_PER_PAGE = 10
+
 
 class ProwlarrHandlers:
     """Container for Prowlarr Telegram handlers."""
@@ -49,16 +51,26 @@ class ProwlarrHandlers:
             with suppress(Exception):
                 await context.bot.delete_message(chat_id, message_id)
 
+    def _clear_search_cache(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        for key in (
+            "prowlarr_results",
+            "prowlarr_results_list",
+            "prowlarr_search_query",
+            "prowlarr_category",
+            "prowlarr_page",
+        ):
+            context.user_data.pop(key, None)
+
     async def prowlarr_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         if not self.client.enabled:
             await update.message.reply_text(self._lang(user_id, "prowlarr_not_configured"))
             return
         context.user_data["prowlarr_waiting_for_query"] = True
-        context.user_data.pop("prowlarr_results", None)
+        self._clear_search_cache(context)
         await self._cleanup_results(context, update.effective_chat.id)
         await update.message.reply_text(
-            f"🧭 <b>{self._lang(user_id, 'prowlarr_welcome')}</b>\n\n"
+            f"<b>{self._lang(user_id, 'prowlarr_welcome')}</b>\n\n"
             f"{self._lang(user_id, 'prowlarr_send_query')}",
             reply_markup=InlineKeyboardMarkup(
                 [
@@ -82,19 +94,30 @@ class ProwlarrHandlers:
             await query.edit_message_text(self._lang(user_id, "error_occurred"))
             return
         await self._cleanup_results(context, chat_id)
-        await query.edit_message_text(
-            f"⏳ {self._lang(user_id, 'searching_query').format(search_query)}"
-        )
+        await query.edit_message_text(self._lang(user_id, "searching_query").format(search_query))
         await self._render_results(context, chat_id, user_id, query.message, search_query, category)
+
+    async def page_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        try:
+            page = int(query.data.removeprefix("prowlarr_page_"))
+        except ValueError:
+            page = 0
+        await self._cleanup_results(context, chat_id)
+        await self._render_stored_results_page(context, chat_id, user_id, query.message, page)
 
     async def newsearch_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         await query.answer()
         user_id = update.effective_user.id
         await self._cleanup_results(context, update.effective_chat.id)
+        self._clear_search_cache(context)
         context.user_data["prowlarr_waiting_for_query"] = True
         await query.edit_message_text(
-            f"🧭 <b>{self._lang(user_id, 'prowlarr_welcome')}</b>\n\n"
+            f"<b>{self._lang(user_id, 'prowlarr_welcome')}</b>\n\n"
             f"{self._lang(user_id, 'prowlarr_send_query')}"
         )
 
@@ -120,46 +143,43 @@ class ProwlarrHandlers:
             await query.answer("Search result expired. Run a new Prowlarr search.", show_alert=True)
             return
         await query.edit_message_reply_markup(reply_markup=None)
-        await query.edit_message_text(f"⏳ Resolving {release.get('title', 'release')}...")
+        await query.edit_message_text(f"Resolving {release.get('title', 'release')}...")
         try:
             source, _ = await self.client.resolve_download_source(release, self.torrent_dir)
             job = await self.download_func(update, context, source)
             await query.edit_message_text(
-                f"✅ {self._lang(user_id, 'prowlarr_download_started')}\n\n"
+                f"{self._lang(user_id, 'prowlarr_download_started')}\n\n"
                 f"Job #{job['id']}\n{release.get('title', 'Unknown')}"
             )
         except Exception as exc:
             logger.error("Prowlarr download error: %s", exc)
-            await query.edit_message_text(f"❌ {self._lang(user_id, 'error_occurred')}: {exc}")
+            await query.edit_message_text(f"{self._lang(user_id, 'error_occurred')}: {exc}")
 
     async def select_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         await query.answer()
-        user_id = update.effective_user.id
         release = self._release_from_callback(context, query.data, "prowlarr_select_")
         if not release:
             await query.answer("Search result expired. Run a new Prowlarr search.", show_alert=True)
             return
         await query.edit_message_reply_markup(reply_markup=None)
         await query.edit_message_text(
-            f"⏳ Fetching torrent file for selection...\n{release.get('title', 'Unknown')}"
+            f"Fetching torrent file for selection...\n{release.get('title', 'Unknown')}"
         )
         try:
-            source, torrent_path = await self.client.resolve_download_source(
-                release, self.torrent_dir
-            )
+            _, torrent_path = await self.client.resolve_download_source(release, self.torrent_dir)
             if not torrent_path:
                 await query.edit_message_text(
-                    "⚠️ This Prowlarr result resolved to a magnet link. "
-                    "File selection is available when the indexer returns a .torrent file."
+                    "This result resolved to a magnet link. File selection needs a .torrent file."
                 )
                 return
             await self.select_torrent_func(
                 update, context, torrent_path, release.get("title") or torrent_path.name
             )
         except Exception as exc:
+            user_id = update.effective_user.id
             logger.error("Prowlarr select error: %s", exc)
-            await query.edit_message_text(f"❌ {self._lang(user_id, 'error_occurred')}: {exc}")
+            await query.edit_message_text(f"{self._lang(user_id, 'error_occurred')}: {exc}")
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         user_id = update.effective_user.id
@@ -172,7 +192,7 @@ class ProwlarrHandlers:
             context.user_data["prowlarr_waiting_for_query"] = True
             return True
         await update.message.reply_text(
-            f"🔍 {self._lang(user_id, 'select_category').format(text)}",
+            f"{self._lang(user_id, 'select_category').format(text)}",
             reply_markup=prowlarr_categories_keyboard(text),
             disable_web_page_preview=True,
         )
@@ -194,25 +214,53 @@ class ProwlarrHandlers:
             return
         except Exception as exc:
             logger.error("Prowlarr search error: %s", exc)
-            await header_message.edit_text(f"❌ {self._lang(user_id, 'error_occurred')}: {exc}")
+            await header_message.edit_text(f"{self._lang(user_id, 'error_occurred')}: {exc}")
             return
         if not results:
             await header_message.edit_text(
-                f"❌ {self._lang(user_id, 'no_results')}",
+                self._lang(user_id, "no_results"),
                 reply_markup=prowlarr_header_keyboard(),
             )
             return
 
-        result_map = {item["token"]: item for item in results}
-        context.user_data["prowlarr_results"] = result_map
+        context.user_data["prowlarr_results"] = {item["token"]: item for item in results}
+        context.user_data["prowlarr_results_list"] = results
+        context.user_data["prowlarr_search_query"] = search_query
+        context.user_data["prowlarr_category"] = category
+        await self._render_stored_results_page(context, chat_id, user_id, header_message, 0)
+
+    async def _render_stored_results_page(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        user_id: int,
+        header_message,
+        page: int,
+    ) -> None:
+        results = context.user_data.get("prowlarr_results_list") or []
+        if not results:
+            await header_message.edit_text(
+                "Search result expired. Run a new Prowlarr search.",
+                reply_markup=prowlarr_header_keyboard(),
+            )
+            return
+
+        total_pages = max(1, (len(results) + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)
+        page = max(0, min(page, total_pages - 1))
+        context.user_data["prowlarr_page"] = page
+        search_query = context.user_data.get("prowlarr_search_query", "")
+        category = context.user_data.get("prowlarr_category", "all")
         label = ProwlarrClient.CATEGORY_LABELS.get(category, category)
         await header_message.edit_text(
-            f"🧭 <b>Prowlarr</b> · <b>{search_query}</b> · {label}\n"
+            f"<b>Prowlarr</b> - <b>{search_query}</b> - {label}\n"
+            f"Page {page + 1}/{total_pages} - Results {len(results)}\n"
             f"<i>{self._lang(user_id, 'prowlarr_tap_download')}</i>",
-            reply_markup=prowlarr_header_keyboard(),
+            reply_markup=prowlarr_header_keyboard(page, total_pages),
         )
+
         message_ids = []
-        for index, item in enumerate(results[:10], start=1):
+        start = page * RESULTS_PER_PAGE
+        for index, item in enumerate(results[start : start + RESULTS_PER_PAGE], start=start + 1):
             message = await context.bot.send_message(
                 chat_id=chat_id,
                 text=format_prowlarr_result(item, index),

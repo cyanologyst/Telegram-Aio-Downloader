@@ -236,6 +236,7 @@ DEFAULT_LANGUAGE = "en"
 
 # Status refresh tracking - one dashboard per chat
 status_messages = {}  # {chat_id: {"message_id": int, "last_update": float}}
+status_message_locks = {}  # {chat_id: asyncio.Lock}
 STATUS_AUTO_UPDATE_SECONDS = 5
 dashboard_messages = {}  # {chat_id: {"message_id": int, "last_update": float}}
 
@@ -1311,6 +1312,14 @@ def format_eta(seconds):
 async def update_status_message(app: Application, chat_id: int, user_id: int = None):
     """Update existing status message or create a new one."""
     u = user_id or 0
+    lock = status_message_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        await _update_status_message_unlocked(app, chat_id, u)
+
+
+async def _update_status_message_unlocked(app: Application, chat_id: int, user_id: int):
+    """Update the chat status dashboard while the per-chat lock is held."""
+    u = user_id or 0
     try:
         if chat_id in status_messages:
             msg_data = status_messages[chat_id]
@@ -1346,6 +1355,9 @@ async def update_status_message(app: Application, chat_id: int, user_id: int = N
 
 
 async def maybe_auto_update_status_message(app: Application, job: dict, force: bool = False):
+    if not job.get("status_visible", True):
+        return
+
     msg_data = status_messages.get(job["chat_id"])
     if not msg_data:
         return
@@ -1634,7 +1646,11 @@ def format_forwarded_posts_setting(user_id: int) -> str:
 
 def build_status_text(user_id: int = None):
     u = user_id or 0
-    active = [j for j in download_jobs.values() if j["status"] in JOB_ACTIVE_STATES]
+    active = [
+        j
+        for j in download_jobs.values()
+        if j["status"] in JOB_ACTIVE_STATES and j.get("status_visible", True)
+    ]
 
     if not active:
         return (
@@ -1718,7 +1734,11 @@ def format_download_status_lines(job: dict) -> list[str]:
 
 
 def build_status_controls_markup():
-    active = [j for j in sorted(download_jobs.values(), key=lambda x: x["id"]) if j["status"] in JOB_ACTIVE_STATES]
+    active = [
+        j
+        for j in sorted(download_jobs.values(), key=lambda x: x["id"])
+        if j["status"] in JOB_ACTIVE_STATES and j.get("status_visible", True)
+    ]
     rows = []
     for job in active:
         jid = job["id"]
@@ -2905,6 +2925,7 @@ async def start_ytdlp_download(
     audio_only: bool = False,
     user_id: int = None,
     run_in_background: bool = False,
+    notify: bool = True,
 ):
     global job_counter, download_jobs
 
@@ -2935,6 +2956,7 @@ async def start_ytdlp_download(
         "pid": None,
         "process": None,
         "status": "starting",
+        "status_visible": notify,
         "progress": 0.0,
         "completed_length": 0,
         "total_length": 0,
@@ -2983,6 +3005,8 @@ async def start_ytdlp_download(
             logger.exception(f"yt-dlp progress hook error: {e}")
 
     async def refresh_ytdlp_status():
+        if not notify:
+            return
         while job["status"] in JOB_ACTIVE_STATES:
             await maybe_auto_update_status_message(app, job)
             await asyncio.sleep(1)
@@ -3066,7 +3090,8 @@ async def start_ytdlp_download(
         try:
             title, filepath = await loop.run_in_executor(None, run_download)
             if job.get("status") == "cancelled":
-                await maybe_auto_update_status_message(app, job, force=True)
+                if notify:
+                    await maybe_auto_update_status_message(app, job, force=True)
                 return
 
             job["status"] = "completed"
@@ -3078,20 +3103,22 @@ async def start_ytdlp_download(
                 job["total_length"] = size
             job["download_speed"] = 0
             job["finished_at"] = now_ts()
-            await maybe_auto_update_status_message(app, job, force=True)
+            if notify:
+                await maybe_auto_update_status_message(app, job, force=True)
 
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"{ICON_OK} {'MP3' if audio_only else 'Video'} download completed.\n\n"
-                    f"Job: #{job_id}\n"
-                    f"Platform: {platform}\n"
-                    f"Title:\n{shorten(title, 140)}\n"
-                    f"Folder:\n{output_dir}"
-                ),
-                reply_markup=build_reply_menu(user_id),
-                disable_web_page_preview=True,
-            )
+            if notify:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"{ICON_OK} {'MP3' if audio_only else 'Video'} download completed.\n\n"
+                        f"Job: #{job_id}\n"
+                        f"Platform: {platform}\n"
+                        f"Title:\n{shorten(title, 140)}\n"
+                        f"Folder:\n{output_dir}"
+                    ),
+                    reply_markup=build_reply_menu(user_id),
+                    disable_web_page_preview=True,
+                )
 
         except Exception as e:
             logger.exception("yt-dlp download failed")
@@ -3099,19 +3126,21 @@ async def start_ytdlp_download(
             job["status"] = "failed"
             job["finished_at"] = now_ts()
             job["last_line"] = str(e)
-            await maybe_auto_update_status_message(app, job, force=True)
+            if notify:
+                await maybe_auto_update_status_message(app, job, force=True)
 
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"{ICON_FAIL} Video download failed.\n\n"
-                    f"Job: #{job_id}\n"
-                    f"Platform: {platform}\n"
-                    f"Reason:\n{shorten(str(e), 900)}"
-                ),
-                reply_markup=build_reply_menu(user_id),
-                disable_web_page_preview=True,
-            )
+            if notify:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"{ICON_FAIL} Video download failed.\n\n"
+                        f"Job: #{job_id}\n"
+                        f"Platform: {platform}\n"
+                        f"Reason:\n{shorten(str(e), 900)}"
+                    ),
+                    reply_markup=build_reply_menu(user_id),
+                    disable_web_page_preview=True,
+                )
         finally:
             refresh_task.cancel()
             try:
@@ -3119,7 +3148,8 @@ async def start_ytdlp_download(
             except asyncio.CancelledError:
                 pass
 
-    await update_status_message(app, chat_id, user_id)
+    if notify:
+        await update_status_message(app, chat_id, user_id)
     if run_in_background:
         asyncio.create_task(finish_download())
     else:
@@ -3184,6 +3214,7 @@ async def start_hentai_playlist_download(
                     episode_url,
                     audio_only=False,
                     user_id=user_id,
+                    notify=False,
                 )
                 if child.get("status") == "failed":
                     job["last_line"] = f"Episode {index} failed: {child.get('last_line', 'Unknown')}"
@@ -4473,16 +4504,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    msg = await update.message.reply_text(
-        build_status_text(user_id), 
-        reply_markup=build_status_controls_markup(),
-        disable_web_page_preview=True,
-    )
-    status_messages[chat_id] = {
-        "message_id": msg.message_id,
-        "last_update": time.time(),
-        "user_id": user_id,
-    }
+    await update_status_message(context.application, chat_id, user_id)
 
 
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4903,16 +4925,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif normalized in ("status", "?????"):
-            msg = await update.message.reply_text(
-                build_status_text(user_id),
-                reply_markup=build_status_controls_markup(),
-                disable_web_page_preview=True,
-            )
-            status_messages[chat_id] = {
-                "message_id": msg.message_id,
-                "last_update": time.time(),
-                "user_id": user_id,
-            }
+            await update_status_message(context.application, chat_id, user_id)
 
         elif normalized in ("downloads", "download"):
             await update.message.reply_text(
@@ -6800,6 +6813,7 @@ def main():
     )
     app.add_handler(CommandHandler("prowlarr", prowlarr_handlers.prowlarr_cmd))
     app.add_handler(CallbackQueryHandler(prowlarr_handlers.category_callback, pattern=r"^prowlarr_cat_"))
+    app.add_handler(CallbackQueryHandler(prowlarr_handlers.page_callback, pattern=r"^prowlarr_page_"))
     app.add_handler(CallbackQueryHandler(prowlarr_handlers.newsearch_callback, pattern=r"^prowlarr_newsearch$"))
     app.add_handler(CallbackQueryHandler(prowlarr_handlers.info_callback, pattern=r"^prowlarr_info_"))
     app.add_handler(CallbackQueryHandler(prowlarr_handlers.download_callback, pattern=r"^prowlarr_dl_"))
