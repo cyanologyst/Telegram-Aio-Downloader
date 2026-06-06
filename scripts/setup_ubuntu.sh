@@ -5,6 +5,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
 ENV_FILE="${PROJECT_ROOT}/.env"
 ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"
+PROWLARR_AUTO_API_KEY=""
+PROWLARR_AUTO_URL=""
 
 log() {
   printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*"
@@ -110,6 +112,29 @@ install_python_requirements() {
   pip install -r "${PROJECT_ROOT}/requirements.txt"
 }
 
+read_prowlarr_api_key() {
+  local config_file="$1"
+  if [[ ! -f "${config_file}" ]]; then
+    return 1
+  fi
+
+  python3 - "${config_file}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+config_file = sys.argv[1]
+try:
+    root = ET.parse(config_file).getroot()
+except Exception:
+    raise SystemExit(1)
+
+api_key = (root.findtext("ApiKey") or "").strip()
+if not api_key:
+    raise SystemExit(1)
+print(api_key)
+PY
+}
+
 install_prowlarr_optional() {
   if ! ask_yes_no "Install Prowlarr with Docker if Docker is already available?" "n"; then
     return
@@ -122,6 +147,7 @@ install_prowlarr_optional() {
   fi
 
   local config_dir="${PROJECT_ROOT}/.prowlarr"
+  local config_file="${config_dir}/config.xml"
   mkdir -p "${config_dir}"
   log "Starting Prowlarr on http://127.0.0.1:9696"
 
@@ -139,7 +165,20 @@ install_prowlarr_optional() {
       lscr.io/linuxserver/prowlarr:latest >/dev/null
   fi
 
-  log "Prowlarr is starting. Open http://127.0.0.1:9696, add indexers, then copy Settings > General > API Key into .env."
+  log "Waiting for Prowlarr to generate its API key"
+  for _ in $(seq 1 60); do
+    if PROWLARR_AUTO_API_KEY="$(read_prowlarr_api_key "${config_file}" 2>/dev/null)"; then
+      PROWLARR_AUTO_URL="http://127.0.0.1:9696"
+      log "Captured Prowlarr API key automatically."
+      log "Open http://127.0.0.1:9696 later to add indexers."
+      return
+    fi
+    sleep 2
+  done
+
+  PROWLARR_AUTO_API_KEY=""
+  log "Prowlarr started, but the API key was not available yet."
+  log "Open http://127.0.0.1:9696, finish first-run setup if needed, then paste the API key when prompted."
 }
 
 write_env() {
@@ -173,8 +212,8 @@ write_env() {
     web_app_host="127.0.0.1"
     web_app_port="5000"
     web_app_url="http://127.0.0.1:5000"
-    prowlarr_url="http://127.0.0.1:9696"
-    prowlarr_api_key=""
+    prowlarr_url="${PROWLARR_AUTO_URL:-http://127.0.0.1:9696}"
+    prowlarr_api_key="${PROWLARR_AUTO_API_KEY:-}"
     prowlarr_limit="20"
   else
     aria2_host="$(ask "aria2 RPC host" "127.0.0.1")"
@@ -194,6 +233,8 @@ write_env() {
 
   if [[ -z "${prowlarr_api_key}" ]]; then
     prowlarr_api_key="$(ask_secret "Prowlarr API key. Leave empty to configure later")"
+  else
+    log "Using automatically captured Prowlarr API key."
   fi
 
   cp "${ENV_EXAMPLE}" "${ENV_FILE}"

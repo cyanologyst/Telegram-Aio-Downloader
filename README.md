@@ -187,6 +187,9 @@ The setup script can:
 | 3 | Installs system dependencies like `aria2c`, `ffmpeg`, and helper packages |
 | 4 | Asks for BotFather token, `API_ID`, `API_HASH`, allowed user IDs |
 | 5 | Lets you choose automatic or manual ports/IP settings |
+| 6 | Optionally starts Prowlarr with Docker and auto-captures its generated API key when available |
+
+If Prowlarr is installed by the script, it reads `.prowlarr/config.xml` and writes `PROWLARR_API_KEY` automatically. You only need to open Prowlarr later to add indexers.
 
 ### Start With Mini App Tunnel
 
