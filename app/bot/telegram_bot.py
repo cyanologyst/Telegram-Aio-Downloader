@@ -151,8 +151,22 @@ ADULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 HENTAI_VIDEO_DIR = BASE_DIR / "Download" / "Hentai"
 HENTAI_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def parse_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return int(raw or default)
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Invalid integer for %s=%r; using %s",
+            name,
+            raw,
+            default,
+        )
+        return default
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-API_ID = int(os.getenv("API_ID", "0") or "0")
+API_ID = parse_env_int("API_ID", 0)
 API_HASH = os.getenv("API_HASH", "").strip()
 
 PYRO_SESSION_NAME = os.getenv("PYRO_SESSION_NAME", "pyrogram_uploader")
@@ -162,7 +176,7 @@ SPOTDL_BIN = os.getenv("SPOTDL_BIN", "spotdl")
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
-ARIA2_RPC_PORT = int(os.getenv("ARIA2_RPC_PORT", "6800") or "6800")
+ARIA2_RPC_PORT = parse_env_int("ARIA2_RPC_PORT", 6800)
 ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
 
 # TPB crawler config
@@ -275,19 +289,19 @@ ALLOWED_USER_IDS = {
 }
 
 # Auto cleanup
-AUTO_CLEANUP_DAYS = int(os.getenv("AUTO_CLEANUP_DAYS", "7") or "7")
+AUTO_CLEANUP_DAYS = parse_env_int("AUTO_CLEANUP_DAYS", 7)
 
 # Web dashboard configuration
 WEB_DASHBOARD_ENABLE = os.getenv("WEB_DASHBOARD_ENABLE", "false").strip().lower() in {"1", "true", "yes", "on"}
 WEB_DASHBOARD_HOST = os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1").strip()
-WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080") or "8080")
+WEB_DASHBOARD_PORT = parse_env_int("WEB_DASHBOARD_PORT", 8080)
 
 # Web App Mini-App configuration
 WEB_APP_ENABLE = os.getenv("WEB_APP_ENABLE", "true").strip().lower() in {"1", "true", "yes", "on"}
 WEB_APP_HOST = os.getenv("WEB_APP_HOST", "127.0.0.1").strip()
-WEB_APP_PORT = int(os.getenv("WEB_APP_PORT", "5000") or "5000")
+WEB_APP_PORT = parse_env_int("WEB_APP_PORT", 5000)
 WEB_APP_URL = os.getenv("WEB_APP_URL", f"http://{WEB_APP_HOST}:{WEB_APP_PORT}").strip()
-MINI_APP_DEFAULT_CHAT_ID = int(os.getenv("MINI_APP_DEFAULT_CHAT_ID", "0") or "0")
+MINI_APP_DEFAULT_CHAT_ID = parse_env_int("MINI_APP_DEFAULT_CHAT_ID", 0)
 
 # =========================================================
 # Language Support
