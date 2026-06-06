@@ -101,6 +101,7 @@ These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<s
 
 | Provider | Search | Instant Download | Notes |
 |---|---:|---:|---|
+| Prowlarr | ✅ | ✅ | Searches all configured Prowlarr indexers through `PROWLARR_URL` / `PROWLARR_API_KEY` |
 | The Pirate Bay / API Bay | ✅ | ✅ | Uses the configurable `TPB_API_URL` JSON API |
 | RARBG-style mirrors | ✅ | ✅ | Defaults to `https://rargb.to`; refuses CAPTCHA/human-verification pages instead of bypassing them |
 
@@ -114,6 +115,8 @@ These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<s
 | Hentai playlists | ✅ episode count + child jobs | ✅ per episode | ❌ | ✅ best-effort |
 
 `yt-dlp` progress depends on what the extractor reports. Some sites provide exact file size and percentage; others only provide downloaded bytes and speed until the file finishes.
+
+`.torrent` files support file selection before starting the download. Prowlarr results also offer a select flow when the indexer returns a torrent file; magnet-only results start normally because file lists are not available until metadata resolves.
 
 ## 📱 Telegram Mini App
 
@@ -226,6 +229,7 @@ Useful optional variables:
 | `YTDLP_PROXY` | Optional proxy URL for `yt-dlp` |
 | `TPB_API_URL` | Optional API Bay mirror |
 | `RARBG_BASE_URL` | Optional RARBG-style mirror base URL; useful when the default mirror challenges your VPS |
+| `PROWLARR_URL` / `PROWLARR_API_KEY` / `PROWLARR_SEARCH_LIMIT` | Prowlarr multi-indexer torrent search |
 | `AUTO_CLEANUP_DAYS` | Cleanup threshold for old temporary files |
 | `WEB_DASHBOARD_ENABLE` | Enable local web dashboard |
 | `WEB_DASHBOARD_HOST` / `WEB_DASHBOARD_PORT` | Dashboard bind settings |

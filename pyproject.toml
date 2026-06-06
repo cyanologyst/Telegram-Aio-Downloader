@@ -79,6 +79,7 @@ exclude = ["app/bot/telegram_bot.py"]
 [[tool.mypy.overrides]]
 module = [
   "app.bot.dashboard",
+  "app.downloaders.torrents.prowlarr.*",
   "app.downloaders.torrents.rarbg.*",
   "app.downloaders.torrents.tpb.*",
   "app.services.archive",

@@ -14,6 +14,9 @@ def test_load_settings_parses_user_ids(tmp_path, monkeypatch):
                 "ARIA2_RPC_HOST=127.0.0.2",
                 "ARIA2_RPC_PORT=6801",
                 "ARIA2_RPC_SECRET=test-secret",
+                "PROWLARR_URL=http://127.0.0.1:9696",
+                "PROWLARR_API_KEY=abc123",
+                "PROWLARR_SEARCH_LIMIT=25",
             ]
         ),
         encoding="utf-8",
@@ -30,3 +33,6 @@ def test_load_settings_parses_user_ids(tmp_path, monkeypatch):
     assert settings.aria2_rpc_host == "127.0.0.2"
     assert settings.aria2_rpc_port == 6801
     assert settings.aria2_rpc_secret == "test-secret"
+    assert settings.prowlarr_url == "http://127.0.0.1:9696"
+    assert settings.prowlarr_api_key == "abc123"
+    assert settings.prowlarr_search_limit == 25

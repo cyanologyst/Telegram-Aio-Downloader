@@ -63,6 +63,7 @@ install_system_packages() {
   local packages=(
     aria2
     build-essential
+    curl
     ffmpeg
     git
     libgl1
@@ -109,6 +110,38 @@ install_python_requirements() {
   pip install -r "${PROJECT_ROOT}/requirements.txt"
 }
 
+install_prowlarr_optional() {
+  if ! ask_yes_no "Install Prowlarr with Docker if Docker is already available?" "n"; then
+    return
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    log "Docker was not found. Skipping Prowlarr install."
+    log "Install Prowlarr manually, then set PROWLARR_URL and PROWLARR_API_KEY in .env."
+    return
+  fi
+
+  local config_dir="${PROJECT_ROOT}/.prowlarr"
+  mkdir -p "${config_dir}"
+  log "Starting Prowlarr on http://127.0.0.1:9696"
+
+  if docker ps -a --format '{{.Names}}' | grep -qx 'telegram-aio-prowlarr'; then
+    docker start telegram-aio-prowlarr >/dev/null
+  else
+    docker run -d \
+      --name telegram-aio-prowlarr \
+      --restart unless-stopped \
+      -p 127.0.0.1:9696:9696 \
+      -e PUID="$(id -u)" \
+      -e PGID="$(id -g)" \
+      -e TZ="${TZ:-UTC}" \
+      -v "${config_dir}:/config" \
+      lscr.io/linuxserver/prowlarr:latest >/dev/null
+  fi
+
+  log "Prowlarr is starting. Open http://127.0.0.1:9696, add indexers, then copy Settings > General > API Key into .env."
+}
+
 write_env() {
   if [[ -f "${ENV_FILE}" ]] && ! ask_yes_no ".env already exists. Replace it?" "n"; then
     log "Keeping existing .env"
@@ -127,6 +160,7 @@ write_env() {
   log "Network and port settings"
   local aria2_host aria2_port aria2_secret dashboard_enable dashboard_host dashboard_port
   local web_app_enable web_app_host web_app_port web_app_url
+  local prowlarr_url prowlarr_api_key prowlarr_limit
 
   if ask_yes_no "Use automatic local-only ports and hosts?" "y"; then
     aria2_host="127.0.0.1"
@@ -139,6 +173,9 @@ write_env() {
     web_app_host="127.0.0.1"
     web_app_port="5000"
     web_app_url="http://127.0.0.1:5000"
+    prowlarr_url="http://127.0.0.1:9696"
+    prowlarr_api_key=""
+    prowlarr_limit="20"
   else
     aria2_host="$(ask "aria2 RPC host" "127.0.0.1")"
     aria2_port="$(ask "aria2 RPC port" "6800")"
@@ -150,6 +187,13 @@ write_env() {
     web_app_host="$(ask "Mini-app host" "127.0.0.1")"
     web_app_port="$(ask "Mini-app port" "5000")"
     web_app_url="$(ask "Mini-app public URL. Use HTTPS/ngrok/domain for Telegram production" "http://${web_app_host}:${web_app_port}")"
+    prowlarr_url="$(ask "Prowlarr URL" "http://127.0.0.1:9696")"
+    prowlarr_api_key="$(ask_secret "Prowlarr API key. Leave empty to configure later")"
+    prowlarr_limit="$(ask "Prowlarr search result limit" "20")"
+  fi
+
+  if [[ -z "${prowlarr_api_key}" ]]; then
+    prowlarr_api_key="$(ask_secret "Prowlarr API key. Leave empty to configure later")"
   fi
 
   cp "${ENV_EXAMPLE}" "${ENV_FILE}"
@@ -176,6 +220,13 @@ SPOTDL_BIN=spotdl
 
 # The Pirate Bay API mirror
 # TPB_API_URL=https://apibay.org
+# Optional RARBG-style clone base URL. Default: https://rargb.to
+# RARBG_BASE_URL=https://rargb.to
+
+# Prowlarr multi-indexer search
+PROWLARR_URL=${prowlarr_url}
+PROWLARR_API_KEY=${prowlarr_api_key}
+PROWLARR_SEARCH_LIMIT=${prowlarr_limit}
 
 # Runtime
 APP_ENV=development
@@ -203,6 +254,7 @@ main() {
   cd "${PROJECT_ROOT}"
   require_ubuntu
   install_system_packages
+  install_prowlarr_optional
   create_venv
   install_python_requirements
   write_env
