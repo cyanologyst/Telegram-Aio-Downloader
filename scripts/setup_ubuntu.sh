@@ -43,6 +43,41 @@ ask_yes_no() {
   [[ "${answer,,}" =~ ^(y|yes)$ ]]
 }
 
+ask_user_ids() {
+  local value sanitized chunk
+  while true; do
+    value="$(ask "Allowed Telegram numeric user IDs, comma-separated. Do NOT paste bot token. Leave empty to allow all" "")"
+    value="${value// /}"
+    if [[ -z "${value}" ]]; then
+      printf ''
+      return
+    fi
+
+    sanitized=""
+    IFS=',' read -ra chunks <<< "${value}"
+    for chunk in "${chunks[@]}"; do
+      if [[ -z "${chunk}" ]]; then
+        continue
+      fi
+      if [[ ! "${chunk}" =~ ^[0-9]+$ ]]; then
+        log "Invalid user ID '${chunk}'. Telegram user IDs are numbers only, for example 123456789."
+        log "Bot tokens contain a colon and must only be entered at the BotFather token prompt."
+        sanitized=""
+        break
+      fi
+      if [[ -n "${sanitized}" ]]; then
+        sanitized+=","
+      fi
+      sanitized+="${chunk}"
+    done
+
+    if [[ -n "${sanitized}" ]]; then
+      printf '%s' "${sanitized}"
+      return
+    fi
+  done
+}
+
 generate_secret() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 24
@@ -192,7 +227,7 @@ write_env() {
   bot_token="$(ask_secret "BotFather bot token")"
   api_id="$(ask "Telegram API_ID from my.telegram.org")"
   api_hash="$(ask_secret "Telegram API_HASH from my.telegram.org")"
-  allowed_user_ids="$(ask "Allowed Telegram user IDs, comma-separated. Leave empty to allow all" "")"
+  allowed_user_ids="$(ask_user_ids)"
   local mini_app_default_chat_id="${allowed_user_ids%%,*}"
   pyro_session="$(ask "Pyrogram session name" "pyrogram_uploader")"
 

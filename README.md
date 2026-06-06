@@ -189,6 +189,8 @@ The setup script can:
 | 5 | Lets you choose automatic or manual ports/IP settings |
 | 6 | Optionally starts Prowlarr with Docker and auto-captures its generated API key when available |
 
+`ALLOWED_USER_IDS` and `MINI_APP_DEFAULT_CHAT_ID` must be numeric Telegram user IDs only. Bot tokens contain a colon and belong only in `BOT_TOKEN`.
+
 If Prowlarr is installed by the script, it reads `.prowlarr/config.xml` and writes `PROWLARR_API_KEY` automatically. You only need to open Prowlarr later to add indexers.
 
 ### Start With Mini App Tunnel
