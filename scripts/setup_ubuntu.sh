@@ -4,7 +4,6 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
 ENV_FILE="${PROJECT_ROOT}/.env"
-ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"
 PROWLARR_AUTO_API_KEY=""
 PROWLARR_AUTO_URL=""
 
@@ -32,6 +31,29 @@ ask_secret() {
   read -r -s -p "${prompt}: " value
   printf '\n' >&2
   printf '%s' "$value"
+}
+
+dotenv_value() {
+  local value="${1:-}"
+  if [[ -z "${value}" ]]; then
+    printf ''
+    return
+  fi
+
+  if [[ "${value}" =~ ^[A-Za-z0-9_./:@,%+-]+$ ]]; then
+    printf '%s' "${value}"
+    return
+  fi
+
+  value="${value//\\/\\\\}"
+  value="${value//\'/\\\'}"
+  printf "'%s'" "${value}"
+}
+
+write_env_line() {
+  local key="$1"
+  local value="${2:-}"
+  printf '%s=%s\n' "${key}" "$(dotenv_value "${value}")"
 }
 
 ask_yes_no() {
@@ -272,25 +294,39 @@ write_env() {
     log "Using automatically captured Prowlarr API key."
   fi
 
-  cp "${ENV_EXAMPLE}" "${ENV_FILE}"
-  cat > "${ENV_FILE}" <<EOF
+  {
+    cat <<'EOF'
 # Telegram Bot Configuration
-BOT_TOKEN=${bot_token}
-API_ID=${api_id}
-API_HASH=${api_hash}
+EOF
+    write_env_line "BOT_TOKEN" "${bot_token}"
+    write_env_line "API_ID" "${api_id}"
+    write_env_line "API_HASH" "${api_hash}"
+
+    cat <<'EOF'
 
 # Pyrogram user session used for large uploads
-PYRO_SESSION_NAME=${pyro_session}
+EOF
+    write_env_line "PYRO_SESSION_NAME" "${pyro_session}"
+
+    cat <<'EOF'
 
 # Security: comma-separated Telegram user IDs. Empty means allow all users.
-ALLOWED_USER_IDS=${allowed_user_ids}
+EOF
+    write_env_line "ALLOWED_USER_IDS" "${allowed_user_ids}"
 
+    cat <<'EOF'
 # External tools
 ARIA2_BIN=aria2c
-ARIA2_RPC_HOST=${aria2_host}
-ARIA2_RPC_PORT=${aria2_port}
+EOF
+    write_env_line "ARIA2_RPC_HOST" "${aria2_host}"
+    write_env_line "ARIA2_RPC_PORT" "${aria2_port}"
+
+    cat <<'EOF'
 # Optional. Leave empty to let the bot generate a local daemon token.
-ARIA2_RPC_SECRET=${aria2_secret}
+EOF
+    write_env_line "ARIA2_RPC_SECRET" "${aria2_secret}"
+
+    cat <<'EOF'
 FFMPEG_BIN=ffmpeg
 SPOTDL_BIN=spotdl
 
@@ -300,27 +336,35 @@ SPOTDL_BIN=spotdl
 # RARBG_BASE_URL=https://rargb.to
 
 # Prowlarr multi-indexer search
-PROWLARR_URL=${prowlarr_url}
-PROWLARR_API_KEY=${prowlarr_api_key}
-PROWLARR_SEARCH_LIMIT=${prowlarr_limit}
+EOF
+    write_env_line "PROWLARR_URL" "${prowlarr_url}"
+    write_env_line "PROWLARR_API_KEY" "${prowlarr_api_key}"
+    write_env_line "PROWLARR_SEARCH_LIMIT" "${prowlarr_limit}"
 
+    cat <<'EOF'
 # Runtime
 APP_ENV=development
 AUTO_CLEANUP_DAYS=7
 
 # Web dashboard
-WEB_DASHBOARD_ENABLE=${dashboard_enable}
-WEB_DASHBOARD_HOST=${dashboard_host}
-WEB_DASHBOARD_PORT=${dashboard_port}
-
-# Telegram mini-app
-WEB_APP_ENABLE=${web_app_enable}
-WEB_APP_HOST=${web_app_host}
-WEB_APP_PORT=${web_app_port}
-WEB_APP_URL=${web_app_url}
-# Optional fallback for mini-app upload/zip if Telegram WebApp initData is missing.
-MINI_APP_DEFAULT_CHAT_ID=${mini_app_default_chat_id}
 EOF
+    write_env_line "WEB_DASHBOARD_ENABLE" "${dashboard_enable}"
+    write_env_line "WEB_DASHBOARD_HOST" "${dashboard_host}"
+    write_env_line "WEB_DASHBOARD_PORT" "${dashboard_port}"
+
+    cat <<'EOF'
+# Telegram mini-app
+EOF
+    write_env_line "WEB_APP_ENABLE" "${web_app_enable}"
+    write_env_line "WEB_APP_HOST" "${web_app_host}"
+    write_env_line "WEB_APP_PORT" "${web_app_port}"
+    write_env_line "WEB_APP_URL" "${web_app_url}"
+
+    cat <<'EOF'
+# Optional fallback for mini-app upload/zip if Telegram WebApp initData is missing.
+EOF
+    write_env_line "MINI_APP_DEFAULT_CHAT_ID" "${mini_app_default_chat_id}"
+  } > "${ENV_FILE}"
 
   chmod 600 "${ENV_FILE}"
   log "Wrote ${ENV_FILE}"
@@ -343,4 +387,6 @@ main() {
   printf '  bash scripts/start_with_cloudflare_tunnel.sh\n'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

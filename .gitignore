@@ -6,6 +6,7 @@
 # Runtime data
 Download/
 logs/
+.cloudflared.log
 zip_settings/
 *.session
 *.session-journal

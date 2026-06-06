@@ -111,7 +111,6 @@ class ProwlarrClient:
         categories = self.CATEGORY_PRESETS.get(category, [])
         params: dict[str, str | int] = {
             "query": query,
-            "indexerIds": "-1",
             "type": "search",
             "limit": self.limit,
         }

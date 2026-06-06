@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${PROJECT_ROOT}/.env"
 VENV_DIR="${PROJECT_ROOT}/.venv"
 LOG_FILE="${PROJECT_ROOT}/.cloudflared.log"
+TUNNEL_PID=""
 
 log() {
   printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"
@@ -92,18 +93,18 @@ main() {
 
   install_cloudflared
 
-  local web_host web_port tunnel_pid tunnel_url
+  local web_host web_port tunnel_url
   web_host="$(env_value WEB_APP_HOST 127.0.0.1)"
   web_port="$(env_value WEB_APP_PORT 5000)"
 
   : > "${LOG_FILE}"
   log "Starting Cloudflare Quick Tunnel to http://${web_host}:${web_port}"
   cloudflared tunnel --url "http://${web_host}:${web_port}" > "${LOG_FILE}" 2>&1 &
-  tunnel_pid="$!"
+  TUNNEL_PID="$!"
 
   cleanup() {
-    if kill -0 "${tunnel_pid}" >/dev/null 2>&1; then
-      kill "${tunnel_pid}" >/dev/null 2>&1 || true
+    if [[ -n "${TUNNEL_PID}" ]] && kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+      kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
     fi
   }
   trap cleanup EXIT
