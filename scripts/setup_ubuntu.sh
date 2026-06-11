@@ -4,8 +4,6 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
 ENV_FILE="${PROJECT_ROOT}/.env"
-PROWLARR_AUTO_API_KEY=""
-PROWLARR_AUTO_URL=""
 
 log() {
   printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*"
@@ -169,75 +167,6 @@ install_python_requirements() {
   pip install -r "${PROJECT_ROOT}/requirements.txt"
 }
 
-read_prowlarr_api_key() {
-  local config_file="$1"
-  if [[ ! -f "${config_file}" ]]; then
-    return 1
-  fi
-
-  python3 - "${config_file}" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-config_file = sys.argv[1]
-try:
-    root = ET.parse(config_file).getroot()
-except Exception:
-    raise SystemExit(1)
-
-api_key = (root.findtext("ApiKey") or "").strip()
-if not api_key:
-    raise SystemExit(1)
-print(api_key)
-PY
-}
-
-install_prowlarr_optional() {
-  if ! ask_yes_no "Install Prowlarr with Docker if Docker is already available?" "n"; then
-    return
-  fi
-
-  if ! command -v docker >/dev/null 2>&1; then
-    log "Docker was not found. Skipping Prowlarr install."
-    log "Install Prowlarr manually, then set PROWLARR_URL and PROWLARR_API_KEY in .env."
-    return
-  fi
-
-  local config_dir="${PROJECT_ROOT}/.prowlarr"
-  local config_file="${config_dir}/config.xml"
-  mkdir -p "${config_dir}"
-  log "Starting Prowlarr on http://127.0.0.1:9696"
-
-  if docker ps -a --format '{{.Names}}' | grep -qx 'telegram-aio-prowlarr'; then
-    docker start telegram-aio-prowlarr >/dev/null
-  else
-    docker run -d \
-      --name telegram-aio-prowlarr \
-      --restart unless-stopped \
-      -p 127.0.0.1:9696:9696 \
-      -e PUID="$(id -u)" \
-      -e PGID="$(id -g)" \
-      -e TZ="${TZ:-UTC}" \
-      -v "${config_dir}:/config" \
-      lscr.io/linuxserver/prowlarr:latest >/dev/null
-  fi
-
-  log "Waiting for Prowlarr to generate its API key"
-  for _ in $(seq 1 60); do
-    if PROWLARR_AUTO_API_KEY="$(read_prowlarr_api_key "${config_file}" 2>/dev/null)"; then
-      PROWLARR_AUTO_URL="http://127.0.0.1:9696"
-      log "Captured Prowlarr API key automatically."
-      log "Open http://127.0.0.1:9696 later to add indexers."
-      return
-    fi
-    sleep 2
-  done
-
-  PROWLARR_AUTO_API_KEY=""
-  log "Prowlarr started, but the API key was not available yet."
-  log "Open http://127.0.0.1:9696, finish first-run setup if needed, then paste the API key when prompted."
-}
-
 write_env() {
   if [[ -f "${ENV_FILE}" ]] && ! ask_yes_no ".env already exists. Replace it?" "n"; then
     log "Keeping existing .env"
@@ -256,7 +185,8 @@ write_env() {
   log "Network and port settings"
   local aria2_host aria2_port aria2_secret dashboard_enable dashboard_host dashboard_port
   local web_app_enable web_app_host web_app_port web_app_url
-  local prowlarr_url prowlarr_api_key prowlarr_limit
+  local gallery_dl_bin rclone_bin jdownloader_api_url jdownloader_api_token
+  local file_link_secret file_link_base_url rss_poll_interval
 
   if ask_yes_no "Use automatic local-only ports and hosts?" "y"; then
     aria2_host="127.0.0.1"
@@ -269,9 +199,13 @@ write_env() {
     web_app_host="127.0.0.1"
     web_app_port="5000"
     web_app_url="http://127.0.0.1:5000"
-    prowlarr_url="${PROWLARR_AUTO_URL:-http://127.0.0.1:9696}"
-    prowlarr_api_key="${PROWLARR_AUTO_API_KEY:-}"
-    prowlarr_limit="20"
+    gallery_dl_bin="gallery-dl"
+    rclone_bin="rclone"
+    jdownloader_api_url=""
+    jdownloader_api_token=""
+    file_link_secret="$(generate_secret)"
+    file_link_base_url=""
+    rss_poll_interval="900"
   else
     aria2_host="$(ask "aria2 RPC host" "127.0.0.1")"
     aria2_port="$(ask "aria2 RPC port" "6800")"
@@ -283,15 +217,17 @@ write_env() {
     web_app_host="$(ask "Mini-app host" "127.0.0.1")"
     web_app_port="$(ask "Mini-app port" "5000")"
     web_app_url="$(ask "Mini-app public URL. Use HTTPS/ngrok/domain for Telegram production" "http://${web_app_host}:${web_app_port}")"
-    prowlarr_url="$(ask "Prowlarr URL" "http://127.0.0.1:9696")"
-    prowlarr_api_key="$(ask_secret "Prowlarr API key. Leave empty to configure later")"
-    prowlarr_limit="$(ask "Prowlarr search result limit" "20")"
+    gallery_dl_bin="$(ask "gallery-dl binary" "gallery-dl")"
+    rclone_bin="$(ask "rclone binary" "rclone")"
+    jdownloader_api_url="$(ask "JDownloader bridge API URL. Leave empty to disable" "")"
+    jdownloader_api_token="$(ask_secret "JDownloader bridge token. Leave empty to disable")"
+    file_link_secret="$(ask_secret "Signed file-link secret. Leave empty for generated token")"
+    file_link_base_url="$(ask "Signed file-link base URL. Leave empty to disable" "")"
+    rss_poll_interval="$(ask "RSS poll interval seconds" "900")"
   fi
 
-  if [[ -z "${prowlarr_api_key}" ]]; then
-    prowlarr_api_key="$(ask_secret "Prowlarr API key. Leave empty to configure later")"
-  else
-    log "Using automatically captured Prowlarr API key."
+  if [[ -z "${file_link_secret}" ]]; then
+    file_link_secret="$(generate_secret)"
   fi
 
   {
@@ -329,17 +265,21 @@ EOF
     cat <<'EOF'
 FFMPEG_BIN=ffmpeg
 SPOTDL_BIN=spotdl
+EOF
+    write_env_line "GALLERY_DL_BIN" "${gallery_dl_bin}"
+    write_env_line "RCLONE_BIN" "${rclone_bin}"
 
+    cat <<'EOF'
 # The Pirate Bay API mirror
 # TPB_API_URL=https://apibay.org
-# Optional RARBG-style clone base URL. Default: https://rargb.to
-# RARBG_BASE_URL=https://rargb.to
 
-# Prowlarr multi-indexer search
+# Optional integrations
 EOF
-    write_env_line "PROWLARR_URL" "${prowlarr_url}"
-    write_env_line "PROWLARR_API_KEY" "${prowlarr_api_key}"
-    write_env_line "PROWLARR_SEARCH_LIMIT" "${prowlarr_limit}"
+    write_env_line "JDOWNLOADER_API_URL" "${jdownloader_api_url}"
+    write_env_line "JDOWNLOADER_API_TOKEN" "${jdownloader_api_token}"
+    write_env_line "FILE_LINK_SECRET" "${file_link_secret}"
+    write_env_line "FILE_LINK_BASE_URL" "${file_link_base_url}"
+    write_env_line "RSS_POLL_INTERVAL_SECONDS" "${rss_poll_interval}"
 
     cat <<'EOF'
 # Runtime
@@ -374,7 +314,6 @@ main() {
   cd "${PROJECT_ROOT}"
   require_ubuntu
   install_system_packages
-  install_prowlarr_optional
   create_venv
   install_python_requirements
   write_env

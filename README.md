@@ -101,9 +101,7 @@ These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<s
 
 | Provider | Search | Instant Download | Notes |
 |---|---:|---:|---|
-| Prowlarr | ✅ | ✅ | Searches all configured Prowlarr indexers through `PROWLARR_URL` / `PROWLARR_API_KEY` |
 | The Pirate Bay / API Bay | ✅ | ✅ | Uses the configurable `TPB_API_URL` JSON API |
-| RARBG-style mirrors | ✅ | ✅ | Defaults to `https://rargb.to`; refuses CAPTCHA/human-verification pages instead of bypassing them |
 
 | Download Type | Live Progress | Speed | Pause/Resume | Cancel |
 |---|---:|---:|---:|---:|
@@ -116,7 +114,6 @@ These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<s
 
 `yt-dlp` progress depends on what the extractor reports. Some sites provide exact file size and percentage; others only provide downloaded bytes and speed until the file finishes.
 
-`.torrent` files support file selection before starting the download. Prowlarr results also offer a select flow when the indexer returns a torrent file; magnet-only results start normally because file lists are not available until metadata resolves.
 
 ## 📱 Telegram Mini App
 
@@ -187,11 +184,10 @@ The setup script can:
 | 3 | Installs system dependencies like `aria2c`, `ffmpeg`, and helper packages |
 | 4 | Asks for BotFather token, `API_ID`, `API_HASH`, allowed user IDs |
 | 5 | Lets you choose automatic or manual ports/IP settings |
-| 6 | Optionally starts Prowlarr with Docker and auto-captures its generated API key when available |
 
 `ALLOWED_USER_IDS` and `MINI_APP_DEFAULT_CHAT_ID` must be numeric Telegram user IDs only. Bot tokens contain a colon and belong only in `BOT_TOKEN`.
 
-If Prowlarr is installed by the script, it reads `.prowlarr/config.xml` and writes `PROWLARR_API_KEY` automatically. You only need to open Prowlarr later to add indexers.
+
 
 ### Start With Mini App Tunnel
 
@@ -230,11 +226,14 @@ Useful optional variables:
 | `ARIA2_RPC_HOST` / `ARIA2_RPC_PORT` / `ARIA2_RPC_SECRET` | aria2 daemon RPC settings |
 | `FFMPEG_BIN` | Path to `ffmpeg` |
 | `SPOTDL_BIN` | Path to `spotdl` |
+| `GALLERY_DL_BIN` | Path to `gallery-dl` |
+| `RCLONE_BIN` | Path to `rclone` for optional cloud mirroring |
+| `JDOWNLOADER_API_URL` / `JDOWNLOADER_API_TOKEN` | Optional bridge API for JDownloader delegation |
+| `FILE_LINK_SECRET` / `FILE_LINK_BASE_URL` | Optional signed direct file-link support |
+| `RSS_POLL_INTERVAL_SECONDS` | RSS automation polling interval for future scheduled workers |
 | `YTDLP_COOKIES_FILE` | Optional Netscape cookies file for sites needing login/consent |
 | `YTDLP_PROXY` | Optional proxy URL for `yt-dlp` |
 | `TPB_API_URL` | Optional API Bay mirror |
-| `RARBG_BASE_URL` | Optional RARBG-style mirror base URL; useful when the default mirror challenges your VPS |
-| `PROWLARR_URL` / `PROWLARR_API_KEY` / `PROWLARR_SEARCH_LIMIT` | Prowlarr multi-indexer torrent search |
 | `AUTO_CLEANUP_DAYS` | Cleanup threshold for old temporary files |
 | `WEB_DASHBOARD_ENABLE` | Enable local web dashboard |
 | `WEB_DASHBOARD_HOST` / `WEB_DASHBOARD_PORT` | Dashboard bind settings |
