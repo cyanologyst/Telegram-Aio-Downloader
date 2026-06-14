@@ -43,9 +43,8 @@ class JDownloaderProvider(BaseDownloader):
         if not self.api_url:
             raise RuntimeError("JDOWNLOADER_API_URL is not configured")
 
-        download_url = request.url.removeprefix("jd:")
         payload = {
-            "url": download_url,
+            "url": request.url.removeprefix("jd:"),
             "destination": str(request.destination),
             "options": dict(request.options),
         }
@@ -57,7 +56,7 @@ class JDownloaderProvider(BaseDownloader):
 
         return DownloadResult(
             provider=self.provider_name,
-            title=str(data.get("title") or Path(download_url).name or "JDownloader task"),
+            title=str(data.get("title") or Path(payload["url"]).name or "JDownloader task"),
             artifacts=(),
             metadata=self._metadata(data),
         )
