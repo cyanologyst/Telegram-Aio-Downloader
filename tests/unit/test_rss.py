@@ -2,7 +2,8 @@ from app.services.rss import parse_feed
 
 
 def test_parse_rss_feed():
-    entries = parse_feed("""
+    entries = parse_feed(
+        """
         <rss version="2.0">
           <channel>
             <item>
@@ -13,7 +14,8 @@ def test_parse_rss_feed():
             </item>
           </channel>
         </rss>
-        """)
+        """
+    )
 
     assert len(entries) == 1
     assert entries[0].id == "episode-1"
@@ -22,7 +24,8 @@ def test_parse_rss_feed():
 
 
 def test_parse_atom_feed():
-    entries = parse_feed("""
+    entries = parse_feed(
+        """
         <feed xmlns="http://www.w3.org/2005/Atom">
           <entry>
             <title>Release</title>
@@ -31,7 +34,8 @@ def test_parse_atom_feed():
             <link href="https://example.test/release.magnet" />
           </entry>
         </feed>
-        """)
+        """
+    )
 
     assert len(entries) == 1
     assert entries[0].title == "Release"
