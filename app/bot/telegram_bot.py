@@ -66,6 +66,10 @@ from app.downloaders.base import DownloadRequest
 from app.downloaders.spotify import SpotifyDownloader, is_spotify_url
 
 # Import torrent crawler subsystems
+from app.downloaders.torrents.prowlarr import ProwlarrClient, ProwlarrHandlers
+from app.downloaders.torrents.prowlarr.keyboards import prowlarr_categories_keyboard
+from app.downloaders.torrents.rarbg import RARBGCrawler, RARBGHandlers
+from app.downloaders.torrents.rarbg.keyboards import rarbg_categories_keyboard
 from app.downloaders.torrents.tpb import TPBCrawler, TPBHandlers
 from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
 
@@ -177,6 +181,13 @@ ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
 
 # TPB crawler config
 TPB_API_URL = os.getenv("TPB_API_URL", "").strip()
+RARBG_BASE_URL = os.getenv("RARBG_BASE_URL", "").strip()
+PROWLARR_URL = os.getenv("PROWLARR_URL", "http://127.0.0.1:9696").strip()
+PROWLARR_API_KEY = os.getenv("PROWLARR_API_KEY", "").strip()
+try:
+    PROWLARR_SEARCH_LIMIT = int(os.getenv("PROWLARR_SEARCH_LIMIT", "20") or "20")
+except ValueError:
+    PROWLARR_SEARCH_LIMIT = 20
 
 FILES_PER_PAGE = 8
 MAX_SEND_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
@@ -457,6 +468,19 @@ LANGUAGES = {
         "tpb_download_started": "Download started!",
         "tpb_paste_to_download": "Paste this magnet link to start downloading.",
         "tpb_tap_download": "Tap 📥 to download instantly",
+        "rarbg_search": "🧲 RARBG Search",
+        "rarbg_welcome": "RARBG-style Search",
+        "rarbg_send_query": "Send a search query to find torrents on the configured RARBG-style mirror.",
+        "rarbg_fetching": "Fetching torrent details...",
+        "rarbg_download_started": "Download started!",
+        "rarbg_paste_to_download": "Paste this magnet link to start downloading.",
+        "rarbg_tap_download": "Tap 📥 to download instantly",
+        "prowlarr_search": "🧭 Prowlarr Search",
+        "prowlarr_welcome": "Prowlarr Search",
+        "prowlarr_send_query": "Send a query to search all configured Prowlarr indexers.",
+        "prowlarr_not_configured": "Prowlarr is not configured yet. Set PROWLARR_URL and PROWLARR_API_KEY in .env.",
+        "prowlarr_download_started": "Download started!",
+        "prowlarr_tap_download": "Tap 📥 for all files or ☑️ to select torrent files.",
         "select_category": "🔍 Select a category for: {}",
         "searching_query": "🔍 Searching: {}",
         "no_results": "No results found.",
@@ -628,6 +652,19 @@ LANGUAGES = {
         "tpb_download_started": "دانلود شروع شد!",
         "tpb_paste_to_download": "این لینک مغناطیسی را برای شروع دانلود ارسال کنید.",
         "tpb_tap_download": "برای دانلود فوری 📥 را بزنید",
+        "rarbg_search": "🧲 جستجوی RARBG",
+        "rarbg_welcome": "جستجوی RARBG",
+        "rarbg_send_query": "یک عبارت جستجو برای یافتن تورنت در میرور RARBG تنظیم‌شده ارسال کنید.",
+        "rarbg_fetching": "در حال دریافت جزئیات تورنت...",
+        "rarbg_download_started": "دانلود شروع شد!",
+        "rarbg_paste_to_download": "این لینک مغناطیسی را برای شروع دانلود ارسال کنید.",
+        "rarbg_tap_download": "برای دانلود فوری 📥 را بزنید",
+        "prowlarr_search": "🧭 جستجوی Prowlarr",
+        "prowlarr_welcome": "جستجوی Prowlarr",
+        "prowlarr_send_query": "یک عبارت برای جستجو در همه ایندکسرهای تنظیم‌شده Prowlarr ارسال کنید.",
+        "prowlarr_not_configured": "Prowlarr هنوز تنظیم نشده است. PROWLARR_URL و PROWLARR_API_KEY را در .env تنظیم کنید.",
+        "prowlarr_download_started": "دانلود شروع شد!",
+        "prowlarr_tap_download": "برای همه فایل‌ها 📥 یا برای انتخاب فایل‌های تورنت ☑️ را بزنید.",
         "select_category": "🔍 دسته‌بندی را انتخاب کنید: {}",
         "searching_query": "🔍 در حال جستجو: {}",
         "no_results": "نتیجه‌ای یافت نشد.",
@@ -1498,8 +1535,10 @@ def build_downloads_menu_text(user_id: int = None) -> str:
 def build_downloads_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{ICON_STATUS} Live Status", callback_data="menu:status")],
+        [InlineKeyboardButton("🧭 Prowlarr Search", callback_data="menu:prowlarr")],
         [
             InlineKeyboardButton(f"{ICON_MAGNET} TPB Search", callback_data="menu:tpb"),
+            InlineKeyboardButton("🧲 RARBG Search", callback_data="menu:rarbg"),
         ],
         [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
         [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
@@ -1536,8 +1575,10 @@ def build_tools_menu_text(user_id: int = None) -> str:
 def build_tools_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{ICON_ARCHIVE} Zip Menu", callback_data="menu:zip")],
+        [InlineKeyboardButton("🧭 Prowlarr Search", callback_data="menu:prowlarr")],
         [
             InlineKeyboardButton(f"{ICON_MAGNET} TPB Search", callback_data="menu:tpb"),
+            InlineKeyboardButton("🧲 RARBG Search", callback_data="menu:rarbg"),
         ],
         [InlineKeyboardButton(f"{ICON_IMAGE} Manga Settings", callback_data="menu:manga_settings")],
         [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
@@ -5168,6 +5209,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             context.user_data["tpb_waiting_for_query"] = True
 
+        elif normalized in ("rarbg search", "rargb search", "جستجوی rarbg"):
+            await update.message.reply_text(
+                f"🧲 {get_lang(user_id, 'rarbg_welcome')}\n\n"
+                f"{get_lang(user_id, 'rarbg_send_query')}",
+                disable_web_page_preview=True,
+            )
+            context.user_data["rarbg_waiting_for_query"] = True
+
+        elif normalized in ("prowlarr search", "جستجوی prowlarr"):
+            if not PROWLARR_API_KEY:
+                await update.message.reply_text(get_lang(user_id, "prowlarr_not_configured"))
+                return
+            await update.message.reply_text(
+                f"🧭 {get_lang(user_id, 'prowlarr_welcome')}\n\n"
+                f"{get_lang(user_id, 'prowlarr_send_query')}",
+                disable_web_page_preview=True,
+            )
+            context.user_data["prowlarr_waiting_for_query"] = True
+
         # Check if user is in TPB search flow (handled before unknown input)
         elif context.user_data.get("tpb_waiting_for_query"):
             context.user_data.pop("tpb_waiting_for_query", None)
@@ -5189,6 +5249,50 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     get_lang(user_id, 'tpb_send_query'),
                 )
                 context.user_data["tpb_waiting_for_query"] = True
+
+        # Check if user is in RARBG search flow (handled before unknown input)
+        elif context.user_data.get("rarbg_waiting_for_query"):
+            context.user_data.pop("rarbg_waiting_for_query", None)
+            old_ids = context.user_data.pop("rarbg_result_ids", [])
+            context.user_data.pop("rarbg_result_map", None)
+            for mid in old_ids:
+                try:
+                    await context.bot.delete_message(chat_id, mid)
+                except Exception:
+                    pass
+            if text:
+                await update.message.reply_text(
+                    f"🔍 {get_lang(user_id, 'select_category').format(text)}",
+                    reply_markup=rarbg_categories_keyboard(text),
+                    disable_web_page_preview=True,
+                )
+            else:
+                await update.message.reply_text(
+                    get_lang(user_id, 'rarbg_send_query'),
+                )
+                context.user_data["rarbg_waiting_for_query"] = True
+
+        # Check if user is in Prowlarr search flow (handled before unknown input)
+        elif context.user_data.get("prowlarr_waiting_for_query"):
+            context.user_data.pop("prowlarr_waiting_for_query", None)
+            old_ids = context.user_data.pop("prowlarr_result_ids", [])
+            context.user_data.pop("prowlarr_results", None)
+            for mid in old_ids:
+                try:
+                    await context.bot.delete_message(chat_id, mid)
+                except Exception:
+                    pass
+            if text:
+                await update.message.reply_text(
+                    f"🔍 {get_lang(user_id, 'select_category').format(text)}",
+                    reply_markup=prowlarr_categories_keyboard(text),
+                    disable_web_page_preview=True,
+                )
+            else:
+                await update.message.reply_text(
+                    get_lang(user_id, 'prowlarr_send_query'),
+                )
+                context.user_data["prowlarr_waiting_for_query"] = True
 
         else:
             await update.message.reply_text(
@@ -5443,6 +5547,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 query.message,
                 f"{ICON_MAGNET} {get_lang(user_id, 'tpb_welcome')}\n\n"
                 f"{get_lang(user_id, 'tpb_send_query')}",
+            )
+
+        elif data == "menu:rarbg":
+            context.user_data["rarbg_waiting_for_query"] = True
+            await safe_edit_message(
+                query.message,
+                f"🧲 {get_lang(user_id, 'rarbg_welcome')}\n\n"
+                f"{get_lang(user_id, 'rarbg_send_query')}",
+            )
+
+        elif data == "menu:prowlarr":
+            if not PROWLARR_API_KEY:
+                await safe_edit_message(query.message, get_lang(user_id, "prowlarr_not_configured"))
+                return
+            context.user_data["prowlarr_waiting_for_query"] = True
+            await safe_edit_message(
+                query.message,
+                f"🧭 {get_lang(user_id, 'prowlarr_welcome')}\n\n"
+                f"{get_lang(user_id, 'prowlarr_send_query')}",
             )
         
         elif data.startswith("set_lang:"):
@@ -6663,6 +6786,38 @@ def main():
     app.add_handler(CallbackQueryHandler(tpb_handlers.download_callback, pattern=r"^tpb_dl_"))
     app.add_handler(CallbackQueryHandler(tpb_handlers.info_callback, pattern=r"^tpb_info_"))
 
+    # RARBG-style crawler handlers
+    rarbg_crawler = RARBGCrawler(RARBG_BASE_URL)
+    rarbg_handlers = RARBGHandlers(
+        rarbg_crawler,
+        lang_func=get_lang,
+        download_func=torrent_search_start_download,
+    )
+    app.add_handler(CommandHandler("rarbg", rarbg_handlers.rarbg_cmd))
+    app.add_handler(CommandHandler("rarbgget", rarbg_handlers.rarbg_get_cmd))
+    app.add_handler(CallbackQueryHandler(rarbg_handlers.category_callback, pattern=r"^rarbg_cat_"))
+    app.add_handler(CallbackQueryHandler(rarbg_handlers.page_callback, pattern=r"^rarbg_page_"))
+    app.add_handler(CallbackQueryHandler(rarbg_handlers.newsearch_callback, pattern=r"^rarbg_newsearch$"))
+    app.add_handler(CallbackQueryHandler(rarbg_handlers.magnet_callback, pattern=r"^rarbg_magnet_"))
+    app.add_handler(CallbackQueryHandler(rarbg_handlers.download_callback, pattern=r"^rarbg_dl_"))
+    app.add_handler(CallbackQueryHandler(rarbg_handlers.info_callback, pattern=r"^rarbg_info_"))
+
+    # Prowlarr multi-indexer search handlers
+    prowlarr_client = ProwlarrClient(PROWLARR_URL, PROWLARR_API_KEY, PROWLARR_SEARCH_LIMIT)
+    prowlarr_handlers = ProwlarrHandlers(
+        prowlarr_client,
+        lang_func=get_lang,
+        download_func=torrent_search_start_download,
+        select_torrent_func=start_torrent_file_selection,
+        torrent_dir=DOWNLOAD_DIR / "_torrents" / "prowlarr",
+    )
+    app.add_handler(CommandHandler("prowlarr", prowlarr_handlers.prowlarr_cmd))
+    app.add_handler(CallbackQueryHandler(prowlarr_handlers.category_callback, pattern=r"^prowlarr_cat_"))
+    app.add_handler(CallbackQueryHandler(prowlarr_handlers.page_callback, pattern=r"^prowlarr_page_"))
+    app.add_handler(CallbackQueryHandler(prowlarr_handlers.newsearch_callback, pattern=r"^prowlarr_newsearch$"))
+    app.add_handler(CallbackQueryHandler(prowlarr_handlers.info_callback, pattern=r"^prowlarr_info_"))
+    app.add_handler(CallbackQueryHandler(prowlarr_handlers.download_callback, pattern=r"^prowlarr_dl_"))
+    app.add_handler(CallbackQueryHandler(prowlarr_handlers.select_callback, pattern=r"^prowlarr_select_"))
 
     # Legacy handlers
     app.add_handler(CallbackQueryHandler(handle_ytdlp_callback, pattern=r"^ytdlp_"))

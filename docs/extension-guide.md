@@ -23,20 +23,7 @@ class ExampleDownloader(BaseDownloader):
 
 ## 2. Register the Provider
 
-Register it in `app/downloaders/factory.py`:
-
-```python
-from app.downloaders.example import ExampleDownloader
-
-
-def build_downloader_registry(settings: Settings) -> DownloaderRegistry:
-    registry = DownloaderRegistry()
-    registry.register(ExampleDownloader())
-    return registry
-```
-
-The current legacy runtime is still being extracted, so provider registration
-should happen in the new service layer as that migration continues.
+Register it with `DownloaderRegistry` in the application composition layer. The current legacy runtime is still being extracted, so provider registration should happen in the new service layer as that migration continues.
 
 ## 3. Keep Provider Boundaries Clean
 
@@ -47,9 +34,8 @@ Providers should:
 - Avoid Telegram-specific imports.
 - Use timeouts and cancellation-aware async subprocess handling.
 - Store provider-specific metadata in `DownloadResult.metadata`.
-- Prefer wrappers around mature external tools/APIs over copying third-party
-  bot code into this repository.
 
 ## 4. Testing
 
 Add tests under `tests/downloaders`. Test `can_handle` directly and mock external network/process calls for `download`.
+
