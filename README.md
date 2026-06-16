@@ -80,6 +80,7 @@ These are routed into `Download/Adult/<site>/`.
 | SunPorno | ✅ | Public video pages |
 | YouJizz | ✅ | Public video pages |
 | Empflix | ✅ | Public video pages |
+| Thothub | ✅ | Public video pages via `yt-dlp` generic extractor |
 
 ### Hentai Video Sites
 

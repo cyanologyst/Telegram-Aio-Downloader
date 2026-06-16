@@ -40,6 +40,7 @@ ADULT_VIDEO_SITES: dict[str, str] = {
     "sunporno.com": "SunPorno",
     "youjizz.com": "YouJizz",
     "empflix.com": "Empflix",
+    "thothub.to": "Thothub",
 }
 
 HENTAI_VIDEO_SITES: dict[str, str] = {

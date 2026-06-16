@@ -32,6 +32,16 @@ def test_adult_video_site_subdomains_match():
     assert video_platform_label(url) == "XHamster"
 
 
+def test_thothub_video_urls_are_supported_and_labeled():
+    url = "https://thothub.to/videos/1104042/example-video/"
+
+    assert is_supported_video_url(url)
+    assert is_adult_video_url(url)
+    assert not is_hentai_video_url(url)
+    assert video_platform_label(url) == "Thothub"
+    assert video_platform_slug(url) == "Thothub"
+
+
 def test_unknown_http_url_is_not_supported_video():
     assert not is_supported_video_url("https://example.com/file.iso")
     assert not is_adult_video_url("magnet:?xt=urn:btih:test")
