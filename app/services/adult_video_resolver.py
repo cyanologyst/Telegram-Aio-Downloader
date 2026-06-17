@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from html import unescape
+from pathlib import Path
 from urllib.parse import urlparse
 
 from app.services.javhdporn import is_javhdporn_url, resolve_javhdporn_video_url
@@ -44,6 +46,13 @@ def resolve_adult_video_url(url: str, timeout: float = 30.0) -> ResolvedAdultVid
     if _is_javtiful_url(url):
         return ResolvedAdultVideo(_resolve_javtiful_url(url, timeout=timeout), referer=url)
     return ResolvedAdultVideo(url)
+
+
+def resolved_video_output_template(output_dir: Path, original_url: str) -> str:
+    """Build a short yt-dlp output template for pre-resolved signed media URLs."""
+
+    url_token = hashlib.sha1(original_url.encode("utf-8")).hexdigest()[:12]
+    return str(output_dir / f"%(title).160B [{url_token}].%(ext)s")
 
 
 def _resolve_missav_like_url(url: str, timeout: float) -> str:

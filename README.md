@@ -61,7 +61,8 @@ Sites marked as "resolved" are pre-processed with `curl-cffi` browser impersonat
 before handing the final HLS/MP4 URL to `yt-dlp`. The NJAV, MissAV `.ws`, and
 Javtiful routes have been smoke-tested against long-form media by resolving the
 exact page URL, validating the real media size/duration, and downloading a small
-media sample.
+media sample. Resolved routes use short hash-based filenames so temporary signed
+CDN query strings are never copied into the output filename.
 
 | Site | Status | Notes |
 |---|---:|---|

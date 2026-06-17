@@ -8,6 +8,7 @@ from app.services.adult_video_resolver import (
     _resolve_javtiful_url,
     _resolve_missav_like_url,
     resolve_adult_video_url,
+    resolved_video_output_template,
 )
 
 
@@ -85,6 +86,18 @@ def test_resolve_adult_video_url_leaves_unknown_urls_unchanged():
     assert resolve_adult_video_url("https://example.com/video") == ResolvedAdultVideo(
         "https://example.com/video"
     )
+
+
+def test_resolved_video_output_template_avoids_signed_url_ids(tmp_path):
+    template = resolved_video_output_template(
+        tmp_path,
+        "https://javtiful.com/video/107145/mida-625",
+    )
+
+    assert "%(id)s" not in template
+    assert "%(title).160B" in template
+    assert "X-Amz" not in template
+    assert len(template) < len(str(tmp_path)) + 200
 
 
 def test_resolve_missav_like_url_raises_when_page_has_no_media(monkeypatch):

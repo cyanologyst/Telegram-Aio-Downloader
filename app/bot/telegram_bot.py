@@ -76,7 +76,10 @@ from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
 # Import post downloader module for handling forwarded posts
 from app.handlers.forwarded_media import setup_pyrogram_forwarded_downloads
 from app.infrastructure.aria2_rpc import Aria2DaemonConfig, Aria2RpcClient, Aria2RpcError
-from app.services.adult_video_resolver import resolve_adult_video_url
+from app.services.adult_video_resolver import (
+    resolve_adult_video_url,
+    resolved_video_output_template,
+)
 
 # Import zipping utilities module
 from app.services.archive import (
@@ -3016,8 +3019,12 @@ async def start_ytdlp_download(
     def run_download():
         resolved_video = resolve_adult_video_url(url)
         download_url = resolved_video.url
+        output_template = str(output_dir / "%(title).200B [%(id)s].%(ext)s")
+        if resolved_video.referer:
+            output_template = resolved_video_output_template(output_dir, url)
+
         ydl_opts = {
-            "outtmpl": str(output_dir / "%(title).200B [%(id)s].%(ext)s"),
+            "outtmpl": output_template,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
