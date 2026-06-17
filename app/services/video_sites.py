@@ -66,6 +66,7 @@ YTDLP_GENERIC_IMPERSONATION_SITES: frozenset[str] = frozenset(
 )
 
 HENTAI_VIDEO_SITES: dict[str, str] = {
+    "hanime.tv": "Hanime",
     "hstream.moe": "HStream",
     "hentaihaven.com": "HentaiHaven",
     "hentaimama.io": "HentaiMama",

@@ -110,6 +110,11 @@ from app.services.manga import (
     list_manga_images,
     remove_manga_folder_if_empty,
 )
+from app.services.pornhub_model import (
+    PornHubModelPlaylist,
+    is_pornhub_model_url,
+    resolve_pornhub_model_playlist,
+)
 
 # Import thumbnail generation module
 from app.services.thumbnails import generate_contact_sheet
@@ -177,6 +182,7 @@ API_HASH = os.getenv("API_HASH", "").strip()
 PYRO_SESSION_NAME = os.getenv("PYRO_SESSION_NAME", "pyrogram_uploader")
 ARIA2_BIN = os.getenv("ARIA2_BIN", "aria2c")
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
+DENO_BIN = os.getenv("DENO_BIN", "").strip()
 SPOTDL_BIN = os.getenv("SPOTDL_BIN", "spotdl")
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
@@ -200,6 +206,11 @@ try:
     PROWLARR_SEARCH_LIMIT = int(os.getenv("PROWLARR_SEARCH_LIMIT", "20") or "20")
 except ValueError:
     PROWLARR_SEARCH_LIMIT = 20
+
+if DENO_BIN:
+    deno_path = Path(DENO_BIN).expanduser()
+    if deno_path.parent != Path("."):
+        os.environ["PATH"] = f"{deno_path.parent}{os.pathsep}{os.environ.get('PATH', '')}"
 
 FILES_PER_PAGE = 8
 MAX_SEND_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
@@ -267,6 +278,9 @@ pending_manga_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
 # Pending hentai playlist confirmations
 pending_hentai_playlist_requests = {}  # {user_id: {"playlist": HentaiPlaylist, "chat_id": int}}
+
+# Pending PornHub model confirmations
+pending_pornhub_model_requests = {}  # {user_id: {"playlist": PornHubModelPlaylist, "chat_id": int}}
 
 # Dedicated executors for CPU-intensive operations
 # Using ProcessPoolExecutor for py7zr since it's CPU-bound
@@ -1710,14 +1724,15 @@ def format_download_status_lines(job: dict) -> list[str]:
     seeders = int(job.get("num_seeders", 0) or 0)
     provider = str(job.get("provider") or "aria2")
 
-    if provider == "hentai-playlist":
+    if provider in {"hentai-playlist", "pornhub-model"}:
         done_items = int(job.get("completed_items", 0) or 0)
-        total_items = int(job.get("episode_count", 0) or 0)
+        total_items = int(job.get("episode_count", job.get("video_count", 0)) or 0)
+        item_label = "Episodes" if provider == "hentai-playlist" else "Videos"
         return [
             f"{ICON_DOWNLOAD} #{job['id']}  {title}",
             f"State: {state}  |  {progress:.1f}%",
             "Engine: yt-dlp playlist",
-            f"Episodes: {done_items} / {total_items}",
+            f"{item_label}: {done_items} / {total_items}",
             f"Current: {shorten(str(job.get('last_line') or 'Waiting...'), 100)}",
             "",
         ]
@@ -1762,7 +1777,7 @@ def build_status_controls_markup():
     rows = []
     for job in active:
         jid = job["id"]
-        if job.get("provider") in {"spotify", "manga", "yt-dlp", "hentai-playlist"}:
+        if job.get("provider") in {"spotify", "manga", "yt-dlp", "hentai-playlist", "pornhub-model"}:
             rows.append([
                 InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
             ])
@@ -2635,6 +2650,24 @@ def build_hentai_playlist_started_text(job: dict) -> str:
     )
 
 
+def build_pornhub_model_prompt_text(playlist: PornHubModelPlaylist) -> str:
+    return (
+        f"{ICON_DOWNLOAD} PornHub model page detected\n\n"
+        f"Model:\n{shorten(clean_download_name(playlist.slug), 100)}\n"
+        f"Videos found: {len(playlist.urls)}\n\n"
+        f"Folder:\n{ADULT_VIDEO_DIR / 'PornHub'}"
+    )
+
+
+def build_pornhub_model_started_text(job: dict) -> str:
+    return (
+        f"{ICON_DOWNLOAD} PornHub model download started\n\n"
+        f"Job: #{job['id']}\n"
+        f"Model:\n{shorten(clean_download_name(job.get('name', 'PornHub model')), 100)}\n"
+        f"Videos: {job.get('video_count', 0)}"
+    )
+
+
 def extract_spotify_url(text: str) -> str:
     match = re.search(
         r"https?://open\.spotify\.com/(?:intl-[a-z]{2}/)?"
@@ -3293,6 +3326,111 @@ async def start_hentai_playlist_download(
     return job
 
 
+async def start_pornhub_model_download(
+    app: Application,
+    chat_id: int,
+    playlist: PornHubModelPlaylist,
+    user_id: int = None,
+):
+    global job_counter, download_jobs
+
+    async with jobs_lock:
+        job_counter += 1
+        job_id = job_counter
+
+    video_count = len(playlist.urls)
+    job = {
+        "id": job_id,
+        "name": playlist.slug,
+        "url": playlist.source_url,
+        "chat_id": chat_id,
+        "user_id": user_id or 0,
+        "provider": "pornhub-model",
+        "source_type": "adult_video_playlist",
+        "platform": "PornHub",
+        "pid": None,
+        "process": None,
+        "status": "starting",
+        "progress": 0.0,
+        "completed_length": 0,
+        "total_length": 0,
+        "download_speed": 0,
+        "upload_speed": 0,
+        "eta": "Unknown",
+        "started_at": now_ts(),
+        "finished_at": None,
+        "last_line": "Preparing model videos...",
+        "video_count": video_count,
+        "completed_items": 0,
+        "folder": str(ADULT_VIDEO_DIR / "PornHub"),
+    }
+    download_jobs[job_id] = job
+
+    async def run_model_playlist():
+        try:
+            job["status"] = "downloading"
+            await maybe_auto_update_status_message(app, job, force=True)
+            for index, video_url in enumerate(playlist.urls, start=1):
+                if job.get("status") == "cancelled":
+                    return
+                job["last_line"] = f"Video {index}/{video_count}"
+                job["progress"] = ((index - 1) / video_count * 100) if video_count else 0.0
+                await maybe_auto_update_status_message(app, job, force=True)
+                child = await start_ytdlp_download(
+                    app,
+                    chat_id,
+                    video_url,
+                    audio_only=False,
+                    user_id=user_id,
+                    notify=False,
+                )
+                if child.get("status") == "failed":
+                    job["last_line"] = f"Video {index} failed: {child.get('last_line', 'Unknown')}"
+                    raise RuntimeError(job["last_line"])
+                job["completed_items"] = index
+                job["progress"] = (index / video_count * 100) if video_count else 100.0
+
+            job["status"] = "completed"
+            job["progress"] = 100.0
+            job["finished_at"] = now_ts()
+            job["last_line"] = "Completed"
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_OK} PornHub model download completed\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Model:\n{shorten(clean_download_name(playlist.slug), 100)}\n"
+                    f"Videos: {video_count}\n"
+                    f"Folder:\n{ADULT_VIDEO_DIR / 'PornHub'}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            if job.get("status") == "cancelled":
+                return
+            logger.exception("PornHub model download failed")
+            job["status"] = "failed"
+            job["finished_at"] = now_ts()
+            job["last_line"] = str(exc)
+            await maybe_auto_update_status_message(app, job, force=True)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"{ICON_FAIL} PornHub model download failed.\n\n"
+                    f"Job: #{job_id}\n"
+                    f"Reason:\n{shorten(str(exc), 900)}"
+                ),
+                reply_markup=build_reply_menu(user_id),
+                disable_web_page_preview=True,
+            )
+
+    await update_status_message(app, chat_id, user_id)
+    asyncio.create_task(run_model_playlist())
+    return job
+
+
 async def handle_ytdlp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle yt-dlp download format selection."""
     query = update.callback_query
@@ -3352,6 +3490,35 @@ async def handle_hentai_playlist_callback(update: Update, context: ContextTypes.
     )
 
 
+async def handle_pornhub_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    pending = pending_pornhub_model_requests.pop(user_id, None)
+
+    if query.data == "pornhub_model_cancel":
+        await query.edit_message_text(f"{ICON_WARN} PornHub model download cancelled.")
+        return
+
+    if not pending:
+        await query.edit_message_text(f"{ICON_WARN} No pending PornHub model request found.")
+        return
+
+    playlist = pending["playlist"]
+    await query.edit_message_text(build_pornhub_model_started_text({
+        "id": "new",
+        "name": playlist.slug,
+        "video_count": len(playlist.urls),
+    }))
+    await start_pornhub_model_download(
+        context.application,
+        pending["chat_id"],
+        playlist,
+        user_id=user_id,
+    )
+
+
 async def start_download_from_source(
     app: Application,
     chat_id: int,
@@ -3361,6 +3528,15 @@ async def start_download_from_source(
     """Mini-app download entrypoint that chooses the right backend for pasted links."""
     source = source.strip()
     http_url = extract_http_url(source)
+    if is_pornhub_model_url(http_url):
+        playlist = await resolve_pornhub_model_playlist(
+            http_url,
+            cookies_file=YTDLP_COOKIES_FILE if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists() else None,
+            proxy=YTDLP_PROXY or None,
+        )
+        if not playlist.urls:
+            raise RuntimeError("No public videos found on this PornHub model page.")
+        return await start_pornhub_model_download(app, chat_id, playlist, user_id=user_id)
     if is_hentai_playlist_url(http_url):
         playlist = await resolve_hentai_playlist(http_url)
         if not playlist.urls:
@@ -5186,6 +5362,46 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True,
             )
 
+        elif is_pornhub_model_url(extract_http_url(text)):
+            model_url = extract_http_url(text)
+            try:
+                playlist = await resolve_pornhub_model_playlist(
+                    model_url,
+                    cookies_file=(
+                        YTDLP_COOKIES_FILE
+                        if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists()
+                        else None
+                    ),
+                    proxy=YTDLP_PROXY or None,
+                )
+                if not playlist.urls:
+                    raise RuntimeError("No public videos found on this PornHub model page.")
+            except Exception as exc:
+                await update.message.reply_text(
+                    (
+                        f"{ICON_FAIL} PornHub model detection failed.\n\n"
+                        f"Reason:\n{shorten(str(exc), 900)}"
+                    ),
+                    reply_markup=build_reply_menu(user_id),
+                    disable_web_page_preview=True,
+                )
+                return
+
+            pending_pornhub_model_requests[user_id] = {
+                "playlist": playlist,
+                "chat_id": chat_id,
+            }
+            await update.message.reply_text(
+                build_pornhub_model_prompt_text(playlist),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("Download all", callback_data="pornhub_model_confirm"),
+                        InlineKeyboardButton("Cancel", callback_data="pornhub_model_cancel"),
+                    ],
+                ]),
+                disable_web_page_preview=True,
+            )
+
         elif is_video_url(text):
             video_url = extract_http_url(text)
             pending_ytdlp_requests[user_id] = {
@@ -6868,6 +7084,7 @@ def main():
     # Legacy handlers
     app.add_handler(CallbackQueryHandler(handle_ytdlp_callback, pattern=r"^ytdlp_"))
     app.add_handler(CallbackQueryHandler(handle_hentai_playlist_callback, pattern=r"^hentai_playlist_"))
+    app.add_handler(CallbackQueryHandler(handle_pornhub_model_callback, pattern=r"^pornhub_model_"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.Document.FileExtension("torrent"), on_torrent_file))
 

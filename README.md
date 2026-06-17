@@ -33,6 +33,7 @@ The bot is designed around a VPS workflow: send a link in Telegram, let the serv
 | Manga/gallery URL | Gallery image download | `Download/Manga/<gallery>/` |
 | Supported video URL | Video/MP3 prompt, then `yt-dlp` download | `Download/` |
 | Adult video URL | Video/MP3 prompt, separated by site | `Download/Adult/<site>/` |
+| PornHub model URL | Bulk model video prompt, then sequential `yt-dlp` downloads | `Download/Adult/PornHub/` |
 | Hentai episode URL | Video/MP3 prompt, separated by site | `Download/Hentai/<site>/` |
 | Hentai playlist/series URL | Download all detected episodes | `Download/Hentai/<site>/` |
 
@@ -68,7 +69,7 @@ CDN query strings are never copied into the output filename.
 |---|---:|---|
 | AlphaPorno | ✅ | Public video pages via resolved media URL |
 | CamSoda | ✅ | Public media pages via resolved media URL |
-| PornHub | ✅ | Public video pages |
+| PornHub | ✅ | Public video pages and public model bulk pages |
 | Eporner | ✅ | Public video pages |
 | HellPorno | ✅ | Public video pages via `yt-dlp` extractor |
 | XVideos | ✅ | Public video pages |
@@ -106,12 +107,14 @@ CDN query strings are never copied into the output filename.
 ### Hentai Video Sites
 
 These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<site>/`.
+`hanime.tv` also requires DenoJS, either available on `PATH` or configured with `DENO_BIN`.
 
 | Site | Single Episode | Playlist / Series | Tested Behavior |
 |---|---:|---:|---|
 | `hstream.moe` | ✅ | ✅ | Series pages are scraped for episode URLs, then each episode downloads with `yt-dlp` |
 | `hentaihaven.com` | ✅ | ✅ | Series pages are scraped for `/episode-N` URLs |
 | `hentaimama.io` | ✅ | ❌ | Tested as single episode only; no stable playlist page shape wired yet |
+| `hanime.tv` | ✅ | ❌ | Tested as single episode with `hanime-plugin`; requires DenoJS |
 | `hanime.red` | ✅ | ❌ | Some pages return direct MP4 URLs; treated as single episode and marked more brittle |
 | `ohentai.org` | ❌ | ❌ | Disabled: returned 403/timeout during local tests |
 | `oppai.stream` | ❌ | ❌ | Disabled: plugin extractor currently fails request handling |
@@ -134,6 +137,7 @@ These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<s
 | Spotify | ✅ limited | ✅ when available | ❌ | ✅ |
 | Manga/gallery | ✅ stage-based | ❌ | ❌ | ✅ |
 | Hentai playlists | ✅ episode count + child jobs | ✅ per episode | ❌ | ✅ best-effort |
+| PornHub model bulk | ✅ video count + child jobs | ✅ per video | ❌ | ✅ best-effort |
 
 `yt-dlp` progress depends on what the extractor reports. Some sites provide exact file size and percentage; others only provide downloaded bytes and speed until the file finishes.
 
@@ -254,6 +258,7 @@ Useful optional variables:
 | `ARIA2_BIN` | Path to `aria2c` |
 | `ARIA2_RPC_HOST` / `ARIA2_RPC_PORT` / `ARIA2_RPC_SECRET` | aria2 daemon RPC settings |
 | `FFMPEG_BIN` | Path to `ffmpeg` |
+| `DENO_BIN` | Optional path to Deno; required for `hanime.tv` when `deno` is not already on `PATH` |
 | `SPOTDL_BIN` | Path to `spotdl` |
 | `YTDLP_COOKIES_FILE` | Optional Netscape cookies file for sites needing login/consent |
 | `YTDLP_PROXY` | Optional proxy URL for `yt-dlp` |

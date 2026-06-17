@@ -131,7 +131,16 @@ def test_hentai_video_sites_are_supported_and_labeled():
     assert video_platform_slug(url) == "HStream"
 
 
+def test_hanime_tv_video_urls_are_supported_and_labeled():
+    url = "https://hanime.tv/videos/hentai/example-episode-1"
+
+    assert is_supported_video_url(url)
+    assert is_hentai_video_url(url)
+    assert not is_adult_video_url(url)
+    assert video_platform_label(url) == "Hanime"
+    assert video_platform_slug(url) == "Hanime"
+
+
 def test_inactive_hentai_candidates_are_not_routed():
-    assert not is_supported_video_url("https://hanime.tv/videos/hentai/todo-no-tsumari-1")
     assert not is_supported_video_url("https://ohentai.org/detail.php?vid=NDg4")
     assert not is_supported_video_url("https://oppai.stream/watch?e=Example")
