@@ -2,6 +2,7 @@ python-telegram-bot>=20.0
 pyrogram>=2.0
 tgcrypto
 yt-dlp
+curl-cffi>=0.10.0
 hanime-plugin==2026.5.10
 spotdl
 Pillow

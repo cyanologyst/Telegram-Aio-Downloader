@@ -41,7 +41,17 @@ ADULT_VIDEO_SITES: dict[str, str] = {
     "youjizz.com": "YouJizz",
     "empflix.com": "Empflix",
     "thothub.to": "Thothub",
+    "javhdporn.net": "JavHDPorn",
+    "njavtv.com": "NJAV",
+    "missav.ws": "MissAV",
+    "javtiful.com": "Javtiful",
 }
+
+YTDLP_GENERIC_IMPERSONATION_SITES: frozenset[str] = frozenset(
+    {
+        "javhdporn.net",
+    }
+)
 
 HENTAI_VIDEO_SITES: dict[str, str] = {
     "hstream.moe": "HStream",
@@ -89,6 +99,15 @@ def is_hentai_video_url(url: str) -> bool:
         return False
     host = _host(url)
     return any(_matches_domain(host, domain) for domain in HENTAI_VIDEO_SITES)
+
+
+def requires_ytdlp_generic_impersonation(url: str) -> bool:
+    """Return whether yt-dlp's generic extractor should impersonate a browser."""
+
+    if not url.lower().startswith(("http://", "https://")):
+        return False
+    host = _host(url)
+    return any(_matches_domain(host, domain) for domain in YTDLP_GENERIC_IMPERSONATION_SITES)
 
 
 def video_platform_label(url: str) -> str:

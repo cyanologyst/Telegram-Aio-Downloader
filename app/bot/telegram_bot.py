@@ -76,6 +76,7 @@ from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
 # Import post downloader module for handling forwarded posts
 from app.handlers.forwarded_media import setup_pyrogram_forwarded_downloads
 from app.infrastructure.aria2_rpc import Aria2DaemonConfig, Aria2RpcClient, Aria2RpcError
+from app.services.adult_video_resolver import resolve_adult_video_url
 
 # Import zipping utilities module
 from app.services.archive import (
@@ -125,6 +126,7 @@ from app.services.video_sites import (
     is_adult_video_url,
     is_hentai_video_url,
     is_supported_video_url,
+    requires_ytdlp_generic_impersonation,
     video_platform_label,
     video_platform_slug,
 )
@@ -3012,6 +3014,8 @@ async def start_ytdlp_download(
             await asyncio.sleep(1)
 
     def run_download():
+        resolved_video = resolve_adult_video_url(url)
+        download_url = resolved_video.url
         ydl_opts = {
             "outtmpl": str(output_dir / "%(title).200B [%(id)s].%(ext)s"),
             "noplaylist": True,
@@ -3041,6 +3045,10 @@ async def start_ytdlp_download(
             ydl_opts["cookiefile"] = YTDLP_COOKIES_FILE
         if YTDLP_PROXY:
             ydl_opts["proxy"] = YTDLP_PROXY
+        if requires_ytdlp_generic_impersonation(url):
+            ydl_opts["extractor_args"] = {"generic": {"impersonate": ["chrome"]}}
+        if resolved_video.referer:
+            ydl_opts["http_headers"]["Referer"] = resolved_video.referer
 
         if audio_only:
             ydl_opts.update({
@@ -3058,7 +3066,7 @@ async def start_ytdlp_download(
             })
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(download_url, download=True)
 
             if info is None:
                 raise RuntimeError("Failed to extract video info")

@@ -57,6 +57,12 @@ These are routed through `yt-dlp`. Support depends on the installed `yt-dlp` ver
 
 These are routed into `Download/Adult/<site>/`.
 
+Sites marked as "resolved" are pre-processed with `curl-cffi` browser impersonation
+before handing the final HLS/MP4 URL to `yt-dlp`. The NJAV, MissAV `.ws`, and
+Javtiful routes have been smoke-tested against long-form media by resolving the
+exact page URL, validating the real media size/duration, and downloading a small
+media sample.
+
 | Site | Status | Notes |
 |---|---:|---|
 | PornHub | ✅ | Public video pages |
@@ -81,6 +87,10 @@ These are routed into `Download/Adult/<site>/`.
 | YouJizz | ✅ | Public video pages |
 | Empflix | ✅ | Public video pages |
 | Thothub | ✅ | Public video pages via `yt-dlp` generic extractor |
+| JavHDPorn | ✅ | Public video pages via `yt-dlp` generic extractor with browser impersonation |
+| NJAV | ✅ | Public video pages via resolved HLS playlist |
+| MissAV `.ws` | ✅ | Public video pages via resolved HLS playlist |
+| Javtiful | ✅ | Public video pages via signed player media URL |
 
 ### Hentai Video Sites
 
