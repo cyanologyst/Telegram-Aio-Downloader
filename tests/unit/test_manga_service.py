@@ -13,6 +13,8 @@ from app.services.manga import (
 def test_manga_url_detection():
     assert is_manga_url("https://mangadex.org/chapter/11111111-1111-1111-1111-111111111111")
     assert is_manga_url("https://example.com/comic/chapter-1")
+    assert is_manga_url("https://nhentai.net/g/123456/")
+    assert is_manga_url("https://e-hentai.org/g/123456/example/")
     assert not is_manga_url("https://open.spotify.com/track/abc")
 
 

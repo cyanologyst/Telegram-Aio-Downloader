@@ -183,6 +183,13 @@ YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
 ARIA2_RPC_PORT = parse_env_int("ARIA2_RPC_PORT", 6800)
 ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
+SUPPORTED_SITES_URL = (
+    os.getenv(
+        "SUPPORTED_SITES_URL",
+        "https://github.com/cyanologyst/Telegram-Aio-Downloader#-website-support-matrix",
+    ).strip()
+    or "https://github.com/cyanologyst/Telegram-Aio-Downloader#-website-support-matrix"
+)
 
 # TPB crawler config
 TPB_API_URL = os.getenv("TPB_API_URL", "").strip()
@@ -1540,12 +1547,20 @@ def build_downloads_menu_text(user_id: int = None) -> str:
 def build_downloads_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{ICON_STATUS} Live Status", callback_data="menu:status")],
+        [InlineKeyboardButton("Supported Sites", url=SUPPORTED_SITES_URL)],
         [InlineKeyboardButton("🧭 Prowlarr Search", callback_data="menu:prowlarr")],
         [
             InlineKeyboardButton(f"{ICON_MAGNET} TPB Search", callback_data="menu:tpb"),
             InlineKeyboardButton("🧲 RARBG Search", callback_data="menu:rarbg"),
         ],
         [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
+        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
+    ])
+
+
+def build_supported_sites_markup(user_id: int = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Open Supported Sites", url=SUPPORTED_SITES_URL)],
         [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
     ])
 
@@ -4522,6 +4537,20 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_status_message(context.application, chat_id, user_id)
 
 
+async def supported_sites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_authorized_user(user_id):
+        await update.message.reply_text("Unauthorized")
+        return
+
+    await update.message.reply_text(
+        "Supported Sites\n\nOpen the live support matrix for video, adult video, hentai, manga/gallery, torrent, and music inputs.",
+        reply_markup=build_supported_sites_markup(user_id),
+        disable_web_page_preview=True,
+    )
+
+
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -5043,7 +5072,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "help" in normalized or "راهنما" in normalized:
             await update.message.reply_text(
                 build_help_text(user_id), 
-                reply_markup=build_reply_menu(user_id)
+                reply_markup=build_supported_sites_markup(user_id),
+                disable_web_page_preview=True,
             )
 
         elif normalized in ("settings", "zip settings"):
@@ -6748,6 +6778,7 @@ def main():
     # Core commands
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("sites", supported_sites_cmd))
     app.add_handler(CommandHandler("files", files_cmd))
     app.add_handler(CommandHandler("browse", browse_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))

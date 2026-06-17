@@ -5,6 +5,7 @@ from app.services.adult_video_resolver import (
     ResolvedAdultVideo,
     _decode_packed_javascript,
     _media_urls,
+    _resolve_generic_adult_media_url,
     _resolve_javtiful_url,
     _resolve_missav_like_url,
     resolve_adult_video_url,
@@ -69,6 +70,38 @@ def test_resolve_javtiful_url_prefers_largest_player_source(monkeypatch):
     )
 
 
+def test_resolve_generic_adult_media_url_uses_packed_playlist(monkeypatch):
+    html = """
+        <script>
+        eval(function(p,a,c,k,e,d){}(
+            '0="1://2.3/4.5"',10,6,
+            'source|https|cdn|example|playlist|m3u8'.split('|'),0,{}
+        ))
+        </script>
+    """
+
+    monkeypatch.setattr(adult_video_resolver, "_fetch_page", lambda url, timeout: html)
+
+    assert (
+        _resolve_generic_adult_media_url("https://nonktube.com/video/example/", timeout=1)
+        == "https://cdn.example/playlist.m3u8"
+    )
+
+
+def test_resolve_generic_adult_media_url_falls_back_to_direct_media(monkeypatch):
+    html = """
+        <video src="https://cdn.example/video-720.mp4"></video>
+        <a href="https://cdn.example/previews/video_preview.mp4">preview</a>
+    """
+
+    monkeypatch.setattr(adult_video_resolver, "_fetch_page", lambda url, timeout: html)
+
+    assert (
+        _resolve_generic_adult_media_url("https://alphaporno.com/videos/example/", timeout=1)
+        == "https://cdn.example/video-720.mp4"
+    )
+
+
 def test_resolve_adult_video_url_returns_referer_for_javtiful(monkeypatch):
     monkeypatch.setattr(
         adult_video_resolver,
@@ -79,6 +112,32 @@ def test_resolve_adult_video_url_returns_referer_for_javtiful(monkeypatch):
     assert resolve_adult_video_url("https://javtiful.com/video/1/example") == ResolvedAdultVideo(
         "https://cdn.example/video.mp4",
         referer="https://javtiful.com/video/1/example",
+    )
+
+
+def test_resolve_adult_video_url_returns_referer_for_generic_jav_site(monkeypatch):
+    monkeypatch.setattr(
+        adult_video_resolver,
+        "_resolve_generic_adult_media_url",
+        lambda url, timeout: "https://cdn.example/video.m3u8",
+    )
+
+    assert resolve_adult_video_url("https://nonktube.com/video/example/") == ResolvedAdultVideo(
+        "https://cdn.example/video.m3u8",
+        referer="https://nonktube.com/video/example/",
+    )
+
+
+def test_resolve_adult_video_url_routes_missav_mirrors(monkeypatch):
+    monkeypatch.setattr(
+        adult_video_resolver,
+        "_resolve_missav_like_url",
+        lambda url, timeout: "https://cdn.example/playlist.m3u8",
+    )
+
+    assert resolve_adult_video_url("https://missav.live/en/example") == ResolvedAdultVideo(
+        "https://cdn.example/playlist.m3u8",
+        referer="https://missav.live/en/example",
     )
 
 

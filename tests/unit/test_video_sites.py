@@ -84,6 +84,37 @@ def test_javtiful_video_urls_are_supported_and_labeled():
     assert video_platform_slug(url) == "Javtiful"
 
 
+def test_expanded_adult_yt_dlp_sites_are_supported_and_labeled():
+    examples = {
+        "https://alphaporno.com/videos/example": "AlphaPorno",
+        "https://camsoda.com/example/media/example/123": "CamSoda",
+        "https://hellporno.com/videos/example": "HellPorno",
+        "https://lovehomeporn.com/video/123/example": "LoveHomePorn",
+        "https://nonktube.com/video/123": "NonkTube",
+        "https://porntop.com/video/123/example": "PornTop",
+        "https://sexu.com/123": "Sexu",
+        "https://webcamera.pl/example": "WebCamera.pl",
+        "https://zenporn.com/video/123": "ZenPorn",
+    }
+
+    for url, label in examples.items():
+        assert is_supported_video_url(url)
+        assert is_adult_video_url(url)
+        assert video_platform_label(url) == label
+
+
+def test_expanded_jav_sites_are_supported_and_labeled():
+    examples = {
+        "https://missav.live/en/example": "MissAV",
+        "https://missav123.com/en/example": "MissAV",
+    }
+
+    for url, label in examples.items():
+        assert is_supported_video_url(url)
+        assert is_adult_video_url(url)
+        assert video_platform_label(url) == label
+
+
 def test_unknown_http_url_is_not_supported_video():
     assert not is_supported_video_url("https://example.com/file.iso")
     assert not is_adult_video_url("magnet:?xt=urn:btih:test")

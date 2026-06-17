@@ -23,7 +23,7 @@ NHENTAI_GALLERY_RE = re.compile(
     re.IGNORECASE,
 )
 MANGA_URL_RE = re.compile(
-    r"https?://[^\s]*(manga|comic|chapter|gallery|doujin|nhentai|mangadex|manganato)[^\s]*",
+    r"https?://[^\s]*(manga|comic|chapter|gallery|doujin|nhentai|e-hentai|mangadex|manganato)[^\s]*",
     re.IGNORECASE,
 )
 

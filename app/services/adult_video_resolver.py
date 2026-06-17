@@ -26,6 +26,23 @@ JAVTIFUL_CONFIG_RE = re.compile(
     r'<script[^>]+id=["\']frontWatchConfig["\'][^>]*>(?P<json>.*?)</script>',
     re.I | re.S,
 )
+MISSAV_LIKE_DOMAINS = frozenset(
+    {
+        "missav.com",
+        "missav.live",
+        "missav.ws",
+        "missav123.com",
+        "njavtv.com",
+    }
+)
+GENERIC_RESOLVED_DOMAINS = frozenset(
+    {
+        "alphaporno.com",
+        "camsoda.com",
+        "nonktube.com",
+        "sexu.com",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +62,10 @@ def resolve_adult_video_url(url: str, timeout: float = 30.0) -> ResolvedAdultVid
         return ResolvedAdultVideo(_resolve_missav_like_url(url, timeout=timeout), referer=url)
     if _is_javtiful_url(url):
         return ResolvedAdultVideo(_resolve_javtiful_url(url, timeout=timeout), referer=url)
+    if _is_generic_resolved_url(url):
+        return ResolvedAdultVideo(
+            _resolve_generic_adult_media_url(url, timeout=timeout), referer=url
+        )
     return ResolvedAdultVideo(url)
 
 
@@ -69,6 +90,48 @@ def _resolve_missav_like_url(url: str, timeout: float) -> str:
 
 def _resolve_javtiful_url(url: str, timeout: float) -> str:
     html = _fetch_page(url, timeout=timeout)
+    media_url = _front_watch_config_media_url(html)
+    if media_url:
+        return media_url
+
+    media_urls = [
+        media_url
+        for media_url in _media_urls(html)
+        if "/previews/" not in media_url.lower() and "_preview." not in media_url.lower()
+    ]
+    if media_urls:
+        return media_urls[0]
+    raise RuntimeError("Could not resolve a media URL from this Javtiful page.")
+
+
+def _resolve_generic_adult_media_url(url: str, timeout: float) -> str:
+    html = _fetch_page(url, timeout=timeout)
+    media_url = _front_watch_config_media_url(html)
+    if media_url:
+        return media_url
+
+    for decoded in _decode_packed_javascript(html):
+        media_urls = _media_urls(decoded)
+        if media_urls:
+            playlist = next(
+                (media_url for media_url in media_urls if "playlist.m3u8" in media_url), None
+            )
+            return playlist or media_urls[0]
+
+    filtered_media_urls = [
+        media_url
+        for media_url in _media_urls(html)
+        if "/previews/" not in media_url.lower() and "_preview." not in media_url.lower()
+    ]
+    if filtered_media_urls:
+        playlist = next(
+            (media_url for media_url in filtered_media_urls if ".m3u8" in media_url), None
+        )
+        return playlist or filtered_media_urls[0]
+    raise RuntimeError("Could not resolve a media URL from this adult video page.")
+
+
+def _front_watch_config_media_url(html: str) -> str | None:
     config_match = JAVTIFUL_CONFIG_RE.search(html)
     if config_match:
         config = json.loads(unescape(config_match.group("json")))
@@ -81,15 +144,7 @@ def _resolve_javtiful_url(url: str, timeout: float) -> str:
             media_url = str(source.get("src") or "")
             if media_url:
                 return media_url
-
-    media_urls = [
-        media_url
-        for media_url in _media_urls(html)
-        if "/previews/" not in media_url.lower() and "_preview." not in media_url.lower()
-    ]
-    if media_urls:
-        return media_urls[0]
-    raise RuntimeError("Could not resolve a media URL from this Javtiful page.")
+    return None
 
 
 def _fetch_page(url: str, timeout: float) -> str:
@@ -166,17 +221,17 @@ def _base_to_int(value: str, radix: int) -> int | None:
 
 def _is_missav_like_url(url: str) -> bool:
     host = _host(url)
-    return (
-        host == "missav.ws"
-        or host.endswith(".missav.ws")
-        or host == "njavtv.com"
-        or host.endswith(".njavtv.com")
-    )
+    return any(host == domain or host.endswith(f".{domain}") for domain in MISSAV_LIKE_DOMAINS)
 
 
 def _is_javtiful_url(url: str) -> bool:
     host = _host(url)
     return host == "javtiful.com" or host.endswith(".javtiful.com")
+
+
+def _is_generic_resolved_url(url: str) -> bool:
+    host = _host(url)
+    return any(host == domain or host.endswith(f".{domain}") for domain in GENERIC_RESOLVED_DOMAINS)
 
 
 def _host(url: str) -> str:

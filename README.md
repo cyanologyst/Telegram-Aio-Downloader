@@ -66,15 +66,22 @@ CDN query strings are never copied into the output filename.
 
 | Site | Status | Notes |
 |---|---:|---|
+| AlphaPorno | ✅ | Public video pages via resolved media URL |
+| CamSoda | ✅ | Public media pages via resolved media URL |
 | PornHub | ✅ | Public video pages |
 | Eporner | ✅ | Public video pages |
+| HellPorno | ✅ | Public video pages via `yt-dlp` extractor |
 | XVideos | ✅ | Public video pages |
 | XHamster | ✅ | Public video pages |
 | XNXX | ✅ | Public video pages |
 | SpankBang | ✅ | Public video pages |
 | MissAV | ✅ | Public video pages where `yt-dlp` supports them |
+| MissAV mirror domains | ✅ | `.live`, `.ws`, and `missav123.com` via resolved HLS playlist |
+| LoveHomePorn | ✅ | Public video pages via `yt-dlp` extractor |
+| NonkTube | ✅ | Public video pages via resolved media URL |
 | YouPorn | ✅ | Public video pages |
 | Porntrex | ✅ | Public video pages |
+| PornTop | ✅ | Public video pages via `yt-dlp` extractor |
 | HQPorner | ✅ | Public video pages |
 | RedTube | ✅ | Public video pages |
 | Tube8 | ✅ | Public video pages |
@@ -83,6 +90,7 @@ CDN query strings are never copied into the output filename.
 | Motherless | ✅ | Public video pages |
 | ThisVid | ✅ | Public video pages |
 | Rule34Video | ✅ | Public video pages |
+| Sexu | ✅ | Public video pages via resolved media URL |
 | Txxx | ✅ | Public video pages |
 | SunPorno | ✅ | Public video pages |
 | YouJizz | ✅ | Public video pages |
@@ -92,6 +100,8 @@ CDN query strings are never copied into the output filename.
 | NJAV | ✅ | Public video pages via resolved HLS playlist |
 | MissAV `.ws` | ✅ | Public video pages via resolved HLS playlist |
 | Javtiful | ✅ | Public video pages via signed player media URL |
+| WebCamera.pl | ✅ | Public cam pages via `yt-dlp` extractor |
+| ZenPorn | ✅ | Public video pages via `yt-dlp` extractor |
 
 ### Hentai Video Sites
 
@@ -103,7 +113,6 @@ These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<s
 | `hentaihaven.com` | ✅ | ✅ | Series pages are scraped for `/episode-N` URLs |
 | `hentaimama.io` | ✅ | ❌ | Tested as single episode only; no stable playlist page shape wired yet |
 | `hanime.red` | ✅ | ❌ | Some pages return direct MP4 URLs; treated as single episode and marked more brittle |
-| `hanime.tv` | ❌ | ❌ | Disabled: requires Deno and previously failed server/CDN checks |
 | `ohentai.org` | ❌ | ❌ | Disabled: returned 403/timeout during local tests |
 | `oppai.stream` | ❌ | ❌ | Disabled: plugin extractor currently fails request handling |
 
@@ -166,6 +175,10 @@ Telegram Mini Apps require HTTPS. If you do not own a domain, use the included C
 | Auto-convert downloaded manga to PDF | ✅ setting |
 | Remove source images after PDF conversion | ✅ setting |
 | Put generated PDFs in parent `Download/` folder | ✅ |
+
+Gallery routing includes MangaDex chapters, nhentai galleries, and generic
+gallery pages including `e-hentai.org` when public image URLs can be discovered
+from the page.
 
 ## 🎵 Spotify Features
 
@@ -244,6 +257,7 @@ Useful optional variables:
 | `SPOTDL_BIN` | Path to `spotdl` |
 | `YTDLP_COOKIES_FILE` | Optional Netscape cookies file for sites needing login/consent |
 | `YTDLP_PROXY` | Optional proxy URL for `yt-dlp` |
+| `SUPPORTED_SITES_URL` | Optional URL used by the bot's Supported Sites button |
 | `TPB_API_URL` | Optional API Bay mirror |
 | `RARBG_BASE_URL` | Optional RARBG-style mirror base URL; useful when the default mirror challenges your VPS |
 | `PROWLARR_URL` / `PROWLARR_API_KEY` / `PROWLARR_SEARCH_LIMIT` | Prowlarr multi-indexer torrent search |
