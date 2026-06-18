@@ -114,6 +114,11 @@ def is_hentai_video_url(url: str) -> bool:
     return any(_matches_domain(host, domain) for domain in HENTAI_VIDEO_SITES)
 
 
+def requires_deno_runtime(url: str) -> bool:
+    """Return whether the site's extractor requires Deno."""
+    return _matches_domain(_host(url), "hanime.tv")
+
+
 def requires_ytdlp_generic_impersonation(url: str) -> bool:
     """Return whether yt-dlp's generic extractor should impersonate a browser."""
 

@@ -442,6 +442,13 @@ function renderDownloadJob(dl) {
     const sourceLabel = sourceTypeLabel(dl.source_type || dl.kind || "download");
     const icon = sourceIcon(dl.source_type || sourceLabel);
     const etaText = isPaused ? "Paused" : `${escapeHtml(dl.eta || "Unknown")} left`;
+    const hasBatchProgress = Number(dl.total_items || 0) > 0;
+    const progressText = hasBatchProgress
+        ? `${Number(dl.completed_items || 0)}/${Number(dl.total_items || 0)} done (${Number(dl.remaining_items || 0)} remaining)`
+        : `${escapeHtml(dl.completed_readable || "0 B")} / ${escapeHtml(dl.total_readable || "0 B")} (${progress.toFixed(0)}%)`;
+    const activityText = hasBatchProgress
+        ? escapeHtml(dl.last_line || "Preparing batch...")
+        : `Down ${formatSpeed(dl.download_speed || 0)}${Number(dl.upload_speed || 0) ? ` / Up ${formatSpeed(dl.upload_speed || 0)}` : ""}`;
     return `
         <div class="download-item neu-out">
             <div class="dl-header">
@@ -472,8 +479,8 @@ function renderDownloadJob(dl) {
                 <div class="progress-bar" style="width: ${progress}%"></div>
             </div>
             <div class="dl-status">
-                <span>${escapeHtml(dl.completed_readable || "0 B")} / ${escapeHtml(dl.total_readable || "0 B")} (${progress.toFixed(0)}%)</span>
-                <span class="speeds">Down ${formatSpeed(dl.download_speed || 0)}${Number(dl.upload_speed || 0) ? ` / Up ${formatSpeed(dl.upload_speed || 0)}` : ""}</span>
+                <span>${progressText}</span>
+                <span class="speeds">${activityText}</span>
             </div>
         </div>
     `;
@@ -666,6 +673,19 @@ function renderSettings() {
         ${settingsSection("Mini-App Preferences", "fa-mobile-screen", `
             ${settingToggle("Forwarded Posts", "Automatically download forwarded Telegram media.", "auto_download_forwarded_posts", settings.auto_download_forwarded_posts)}
             ${settingToggle("Delete After Upload", "Delete selected source files after direct upload.", "auto_delete_files_after_upload", settings.auto_delete_files_after_upload)}
+        `)}
+        ${settingsSection("Batch Downloads", "fa-list-check", `
+            ${settingSegmented("Processing Mode", "batch_download_mode", [
+                ["upload_and_delete", "Upload & delete each"],
+                ["download_only", "Download only"],
+            ], settings.batch_download_mode || "download_only")}
+            ${settingStatic(
+                "Behavior",
+                settings.batch_download_mode === "upload_and_delete"
+                    ? "Each item is uploaded to Saved Messages and removed before the next download."
+                    : "All items remain on the VPS and are not uploaded automatically.",
+                settings.batch_download_mode === "upload_and_delete" ? "Disk saver" : "Keep files"
+            )}
         `)}
     `;
 }

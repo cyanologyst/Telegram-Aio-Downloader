@@ -6,6 +6,7 @@ VENV_DIR="${PROJECT_ROOT}/.venv"
 ENV_FILE="${PROJECT_ROOT}/.env"
 PROWLARR_AUTO_API_KEY=""
 PROWLARR_AUTO_URL=""
+DENO_BIN_PATH=""
 
 log() {
   printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*"
@@ -149,6 +150,36 @@ install_system_packages() {
     sudo apt-get update
     sudo apt-get install -y "${packages[@]}"
   fi
+}
+
+install_deno() {
+  local candidate
+
+  if command -v deno >/dev/null 2>&1; then
+    DENO_BIN_PATH="$(command -v deno)"
+  else
+    for candidate in "${HOME}/.deno/bin/deno" "${HOME}/.local/bin/deno"; do
+      if [[ -x "${candidate}" ]]; then
+        DENO_BIN_PATH="${candidate}"
+        export PATH="$(dirname "${candidate}"):${PATH}"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "${DENO_BIN_PATH}" ]]; then
+    log "Installing Deno for hanime.tv and yt-dlp JavaScript extraction"
+    curl -fsSL https://deno.land/install.sh | DENO_INSTALL="${HOME}/.local" sh
+    DENO_BIN_PATH="${HOME}/.local/bin/deno"
+    export PATH="${HOME}/.local/bin:${PATH}"
+  fi
+
+  if [[ ! -x "${DENO_BIN_PATH}" ]]; then
+    log "Deno installation failed: ${DENO_BIN_PATH} is not executable."
+    return 1
+  fi
+
+  log "Using $("${DENO_BIN_PATH}" --version | head -n 1) at ${DENO_BIN_PATH}"
 }
 
 create_venv() {
@@ -328,6 +359,10 @@ EOF
 
     cat <<'EOF'
 FFMPEG_BIN=ffmpeg
+EOF
+    write_env_line "DENO_BIN" "${DENO_BIN_PATH}"
+
+    cat <<'EOF'
 SPOTDL_BIN=spotdl
 
 # The Pirate Bay API mirror
@@ -374,6 +409,7 @@ main() {
   cd "${PROJECT_ROOT}"
   require_ubuntu
   install_system_packages
+  install_deno
   install_prowlarr_optional
   create_venv
   install_python_requirements

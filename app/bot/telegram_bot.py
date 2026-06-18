@@ -97,6 +97,14 @@ from app.services.archive import (
     render_progress_bar,
 )
 from app.services.archive import sanitize_filename as zip_sanitize
+from app.services.batch_download import (
+    BatchDownloadMode,
+    BatchProgress,
+    batch_download_mode_description,
+    batch_download_mode_label,
+    normalize_batch_download_mode,
+    run_sequential_batch,
+)
 from app.services.hentai_playlist import (
     HentaiPlaylist,
     is_hentai_playlist_url,
@@ -115,6 +123,7 @@ from app.services.pornhub_model import (
     is_pornhub_model_url,
     resolve_pornhub_model_playlist,
 )
+from app.services.runtime_dependencies import configure_deno_runtime, get_deno_version
 
 # Import thumbnail generation module
 from app.services.thumbnails import generate_contact_sheet
@@ -134,6 +143,7 @@ from app.services.video_sites import (
     is_adult_video_url,
     is_hentai_video_url,
     is_supported_video_url,
+    requires_deno_runtime,
     requires_ytdlp_generic_impersonation,
     video_platform_label,
     video_platform_slug,
@@ -207,10 +217,8 @@ try:
 except ValueError:
     PROWLARR_SEARCH_LIMIT = 20
 
-if DENO_BIN:
-    deno_path = Path(DENO_BIN).expanduser()
-    if deno_path.parent != Path("."):
-        os.environ["PATH"] = f"{deno_path.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+DENO_PATH = configure_deno_runtime(DENO_BIN)
+DENO_VERSION = get_deno_version(DENO_PATH)
 
 FILES_PER_PAGE = 8
 MAX_SEND_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
@@ -1623,7 +1631,7 @@ def build_tools_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
 def build_settings_menu_text(user_id: int = None) -> str:
     return (
         f"{ICON_SETTINGS} Settings\n\n"
-        "Tune archive behavior, manga PDF automation, forwarded-post downloads, "
+        "Tune archive behavior, batch downloads, manga PDF automation, forwarded-post downloads, "
         "and language from one place."
     )
 
@@ -1631,9 +1639,11 @@ def build_settings_menu_text(user_id: int = None) -> str:
 def build_settings_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
     settings = get_user_settings(user_id or 0)
     forwarded = "ON" if settings.get("auto_download_forwarded_posts") else "OFF"
+    batch_mode = batch_download_mode_label(settings.get("batch_download_mode"))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{ICON_SETTINGS} Archive Settings", callback_data="menu:zip_settings")],
         [InlineKeyboardButton(f"{ICON_IMAGE} Manga Settings", callback_data="menu:manga_settings")],
+        [InlineKeyboardButton(f"{ICON_DOWNLOAD} Batch: {batch_mode}", callback_data="menu:batch_mode")],
         [InlineKeyboardButton(f"{ICON_DOWNLOAD} Forwarded Posts: {forwarded}", callback_data="menu:forwarded_posts")],
         [InlineKeyboardButton(f"{ICON_LANGUAGE} Language", callback_data="menu:language")],
         [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
@@ -1727,12 +1737,13 @@ def format_download_status_lines(job: dict) -> list[str]:
     if provider in {"hentai-playlist", "pornhub-model"}:
         done_items = int(job.get("completed_items", 0) or 0)
         total_items = int(job.get("episode_count", job.get("video_count", 0)) or 0)
-        item_label = "Episodes" if provider == "hentai-playlist" else "Videos"
+        remaining_items = max(0, total_items - done_items)
+        batch_mode = batch_download_mode_label(job.get("batch_download_mode"))
         return [
             f"{ICON_DOWNLOAD} #{job['id']}  {title}",
             f"State: {state}  |  {progress:.1f}%",
-            "Engine: yt-dlp playlist",
-            f"{item_label}: {done_items} / {total_items}",
+            f"Batch: {done_items}/{total_items} done ({remaining_items} remaining)",
+            f"Mode: {batch_mode}",
             f"Current: {shorten(str(job.get('last_line') or 'Waiting...'), 100)}",
             "",
         ]
@@ -2370,16 +2381,19 @@ def split_file_into_chunks(file_path: str, chunk_size: int = 2 * 1024 * 1024 * 1
     chunk_num = 1
     total_chunks = math.ceil(file_size / chunk_size)
     
+    copy_buffer_size = 8 * 1024 * 1024
     with open(full, "rb") as src:
-        while True:
-            chunk_data = src.read(chunk_size)
-            if not chunk_data:
-                break
-            
+        while chunk_num <= total_chunks:
             chunk_path = chunk_dir / f"{full.stem}_part_{chunk_num:03d}{full.suffix}"
             with open(chunk_path, "wb") as dst:
-                dst.write(chunk_data)
-            
+                remaining = min(chunk_size, file_size - src.tell())
+                while remaining > 0:
+                    block = src.read(min(copy_buffer_size, remaining))
+                    if not block:
+                        break
+                    dst.write(block)
+                    remaining -= len(block)
+
             chunks.append((str(chunk_path), chunk_num, total_chunks))
             chunk_num += 1
     
@@ -2630,12 +2644,15 @@ def is_video_url(text: str) -> bool:
     return is_supported_video_url(text)
 
 
-def build_hentai_playlist_prompt_text(playlist: HentaiPlaylist) -> str:
+def build_hentai_playlist_prompt_text(playlist: HentaiPlaylist, user_id: int = 0) -> str:
+    mode = get_user_settings(user_id).get("batch_download_mode")
     return (
         f"{ICON_DOWNLOAD} Hentai playlist detected\n\n"
         f"Site: {playlist.site}\n"
         f"Title:\n{shorten(clean_download_name(playlist.title), 100)}\n"
         f"Episodes: {len(playlist.urls)}\n\n"
+        f"Batch mode: {batch_download_mode_label(mode)}\n"
+        f"{batch_download_mode_description(mode)}\n\n"
         f"Folder:\n{HENTAI_VIDEO_DIR / video_platform_slug(playlist.urls[0])}"
     )
 
@@ -2646,15 +2663,19 @@ def build_hentai_playlist_started_text(job: dict) -> str:
         f"Job: #{job['id']}\n"
         f"Site: {job.get('platform', 'Hentai')}\n"
         f"Title:\n{shorten(clean_download_name(job.get('name', 'Playlist')), 100)}\n"
-        f"Episodes: {job.get('episode_count', 0)}"
+        f"Episodes: {job.get('episode_count', 0)}\n"
+        f"Mode: {batch_download_mode_label(job.get('batch_download_mode'))}"
     )
 
 
-def build_pornhub_model_prompt_text(playlist: PornHubModelPlaylist) -> str:
+def build_pornhub_model_prompt_text(playlist: PornHubModelPlaylist, user_id: int = 0) -> str:
+    mode = get_user_settings(user_id).get("batch_download_mode")
     return (
         f"{ICON_DOWNLOAD} PornHub model page detected\n\n"
         f"Model:\n{shorten(clean_download_name(playlist.slug), 100)}\n"
         f"Videos found: {len(playlist.urls)}\n\n"
+        f"Batch mode: {batch_download_mode_label(mode)}\n"
+        f"{batch_download_mode_description(mode)}\n\n"
         f"Folder:\n{ADULT_VIDEO_DIR / 'PornHub'}"
     )
 
@@ -2664,7 +2685,8 @@ def build_pornhub_model_started_text(job: dict) -> str:
         f"{ICON_DOWNLOAD} PornHub model download started\n\n"
         f"Job: #{job['id']}\n"
         f"Model:\n{shorten(clean_download_name(job.get('name', 'PornHub model')), 100)}\n"
-        f"Videos: {job.get('video_count', 0)}"
+        f"Videos: {job.get('video_count', 0)}\n"
+        f"Mode: {batch_download_mode_label(job.get('batch_download_mode'))}"
     )
 
 
@@ -3020,6 +3042,7 @@ async def start_ytdlp_download(
         "finished_at": None,
         "last_line": "",
         "folder": str(output_dir),
+        "filepath": "",
     }
 
     download_jobs[job_id] = job
@@ -3065,8 +3088,18 @@ async def start_ytdlp_download(
             await asyncio.sleep(1)
 
     def run_download():
+        if requires_deno_runtime(url) and not DENO_VERSION:
+            raise RuntimeError(
+                "Hanime requires Deno. Install Deno, ensure `deno --version` works for "
+                "the bot service user, or set DENO_BIN=/absolute/path/to/deno in .env."
+            )
         resolved_video = resolve_adult_video_url(url)
         download_url = resolved_video.url
+        existing_files = {
+            path.resolve()
+            for path in output_dir.iterdir()
+            if path.is_file()
+        }
         output_template = str(output_dir / "%(title).200B [%(id)s].%(ext)s")
         if resolved_video.referer:
             output_template = resolved_video_output_template(output_dir, url)
@@ -3128,23 +3161,48 @@ async def start_ytdlp_download(
 
             title = info.get("title") or "Unknown Video"
 
-            filepath = None
-
+            filepath_candidates = []
             requested = info.get("requested_downloads") or []
-            if requested:
-                filepath = requested[0].get("filepath")
-
-            if not filepath:
-                filepath = info.get("_filename")
-
-            if not filepath:
-                filepath = ydl.prepare_filename(info)
+            filepath_candidates.extend(item.get("filepath") for item in requested)
+            filepath_candidates.extend(
+                [
+                    info.get("filepath"),
+                    info.get("_filename"),
+                    ydl.prepare_filename(info),
+                ]
+            )
 
             if audio_only:
-                base_path = os.path.splitext(filepath)[0]
-                mp3_path = f"{base_path}.mp3"
-                if os.path.exists(mp3_path):
-                    filepath = mp3_path
+                filepath_candidates.extend(
+                    f"{os.path.splitext(candidate)[0]}.mp3"
+                    for candidate in list(filepath_candidates)
+                    if candidate
+                )
+            else:
+                filepath_candidates.extend(
+                    f"{os.path.splitext(candidate)[0]}.mp4"
+                    for candidate in list(filepath_candidates)
+                    if candidate
+                )
+
+            filepath = next(
+                (
+                    str(Path(candidate).resolve())
+                    for candidate in filepath_candidates
+                    if candidate and Path(candidate).is_file()
+                ),
+                None,
+            )
+            if not filepath:
+                new_files = [
+                    path
+                    for path in output_dir.iterdir()
+                    if path.is_file()
+                    and path.resolve() not in existing_files
+                    and path.suffix not in {".part", ".ytdl"}
+                ]
+                if new_files:
+                    filepath = str(max(new_files, key=lambda path: path.stat().st_mtime).resolve())
 
             return title, filepath
 
@@ -3164,6 +3222,7 @@ async def start_ytdlp_download(
                 size = os.path.getsize(filepath)
                 job["completed_length"] = size
                 job["total_length"] = size
+                job["filepath"] = str(Path(filepath).resolve())
             job["download_speed"] = 0
             job["finished_at"] = now_ts()
             if notify:
@@ -3221,6 +3280,137 @@ async def start_ytdlp_download(
     return job
 
 
+async def upload_and_delete_batch_artifact(
+    app: Application,
+    job: dict,
+    filepath: str,
+    item_index: int,
+    total_items: int,
+) -> bool:
+    """Upload one completed batch artifact and remove it only after success."""
+    full = Path(filepath).resolve()
+    try:
+        rel_path = file_rel_path(full)
+    except ValueError as exc:
+        raise RuntimeError(f"Downloaded file is outside the managed Download folder: {full}") from exc
+    if not full.is_file():
+        raise FileNotFoundError(str(full))
+
+    chunks = split_file_into_chunks(rel_path)
+    chunk_dirs: set[Path] = set()
+    try:
+        for chunk_path, chunk_index, chunk_total in chunks:
+            if job.get("status") == "cancelled":
+                return False
+            chunk = Path(chunk_path).resolve()
+            chunk_rel_path = file_rel_path(chunk)
+            if chunk.parent != full.parent:
+                chunk_dirs.add(chunk.parent)
+
+            async def progress(current, total, *, part=chunk_index, parts=chunk_total):
+                if job.get("status") == "cancelled":
+                    return
+                percent = (current / total * 100) if total else 0.0
+                part_text = f", part {part}/{parts}" if parts > 1 else ""
+                job["status"] = "uploading"
+                job["last_line"] = (
+                    f"Uploading {item_index}/{total_items}{part_text}: "
+                    f"{full.name} ({percent:.1f}%)"
+                )
+                job["upload_length"] = int(current or 0)
+                await maybe_auto_update_status_message(app, job)
+
+            job["status"] = "uploading"
+            job["last_line"] = f"Uploading {item_index}/{total_items}: {full.name}"
+            await maybe_auto_update_status_message(app, job, force=True)
+            await pyrogram_send_file(chunk_rel_path, progress_callback=progress)
+    finally:
+        for chunk_path, _, chunk_total in chunks:
+            chunk = Path(chunk_path)
+            if chunk_total > 1 and chunk.exists():
+                try:
+                    chunk.unlink()
+                except OSError:
+                    logger.warning("Could not remove temporary batch upload chunk: %s", chunk)
+        for chunk_dir in chunk_dirs:
+            try:
+                chunk_dir.rmdir()
+            except OSError:
+                pass
+
+    if job.get("status") == "cancelled":
+        return False
+
+    full.unlink()
+    job["uploaded_items"] = int(job.get("uploaded_items", 0) or 0) + 1
+    job["deleted_items"] = int(job.get("deleted_items", 0) or 0) + 1
+    job["upload_length"] = 0
+    return True
+
+
+async def run_video_batch(
+    app: Application,
+    chat_id: int,
+    urls: list[str] | tuple[str, ...],
+    job: dict,
+    *,
+    item_label: str,
+    user_id: int | None,
+) -> None:
+    """Run provider batch items sequentially using the job's snapshotted mode."""
+    mode = normalize_batch_download_mode(job.get("batch_download_mode"))
+
+    async def process_item(item_url: str, index: int, total_items: int) -> dict:
+        child = await start_ytdlp_download(
+            app,
+            chat_id,
+            item_url,
+            audio_only=False,
+            user_id=user_id,
+            notify=False,
+        )
+        if child.get("status") != "completed":
+            reason = child.get("last_line") or child.get("status") or "Unknown error"
+            raise RuntimeError(f"{item_label} {index} failed: {reason}")
+        return child
+
+    async def after_item(child: dict, index: int, total_items: int) -> None:
+        filepath = str(child.get("filepath") or "")
+        if mode is BatchDownloadMode.UPLOAD_AND_DELETE:
+            if not filepath:
+                raise RuntimeError(f"{item_label} {index} completed without an output file path.")
+            deleted = await upload_and_delete_batch_artifact(
+                app, job, filepath, index, total_items
+            )
+            if deleted:
+                job["last_line"] = (
+                    f"Uploaded and deleted {item_label.lower()} {index}/{total_items}"
+                )
+        else:
+            job["last_line"] = f"Downloaded {item_label.lower()} {index}/{total_items}"
+
+    async def on_progress(progress: BatchProgress) -> None:
+        job["current_item"] = progress.current
+        job["completed_items"] = progress.completed
+        job["progress"] = (
+            (progress.completed / progress.total * 100) if progress.total else 100.0
+        )
+        if progress.phase == "processing":
+            job["status"] = "downloading"
+            job["last_line"] = (
+                f"Downloading {item_label.lower()} {progress.current}/{progress.total}"
+            )
+        await maybe_auto_update_status_message(app, job, force=True)
+
+    await run_sequential_batch(
+        urls,
+        process_item,
+        after_item=after_item,
+        on_progress=on_progress,
+        is_cancelled=lambda: job.get("status") == "cancelled",
+    )
+
+
 async def start_hentai_playlist_download(
     app: Application,
     chat_id: int,
@@ -3234,6 +3424,9 @@ async def start_hentai_playlist_download(
         job_id = job_counter
 
     episode_count = len(playlist.urls)
+    batch_mode = normalize_batch_download_mode(
+        get_user_settings(user_id or 0).get("batch_download_mode")
+    )
     job = {
         "id": job_id,
         "name": playlist.title,
@@ -3257,6 +3450,9 @@ async def start_hentai_playlist_download(
         "last_line": "Preparing playlist...",
         "episode_count": episode_count,
         "completed_items": 0,
+        "uploaded_items": 0,
+        "deleted_items": 0,
+        "batch_download_mode": batch_mode.value,
         "folder": str(HENTAI_VIDEO_DIR),
     }
     download_jobs[job_id] = job
@@ -3265,25 +3461,16 @@ async def start_hentai_playlist_download(
         try:
             job["status"] = "downloading"
             await maybe_auto_update_status_message(app, job, force=True)
-            for index, episode_url in enumerate(playlist.urls, start=1):
-                if job.get("status") == "cancelled":
-                    return
-                job["last_line"] = f"Episode {index}/{episode_count}"
-                job["progress"] = ((index - 1) / episode_count * 100) if episode_count else 0.0
-                await maybe_auto_update_status_message(app, job, force=True)
-                child = await start_ytdlp_download(
-                    app,
-                    chat_id,
-                    episode_url,
-                    audio_only=False,
-                    user_id=user_id,
-                    notify=False,
-                )
-                if child.get("status") == "failed":
-                    job["last_line"] = f"Episode {index} failed: {child.get('last_line', 'Unknown')}"
-                    raise RuntimeError(job["last_line"])
-                job["completed_items"] = index
-                job["progress"] = (index / episode_count * 100) if episode_count else 100.0
+            await run_video_batch(
+                app,
+                chat_id,
+                playlist.urls,
+                job,
+                item_label="Episode",
+                user_id=user_id,
+            )
+            if job.get("status") == "cancelled":
+                return
 
             job["status"] = "completed"
             job["progress"] = 100.0
@@ -3297,7 +3484,12 @@ async def start_hentai_playlist_download(
                     f"Job: #{job_id}\n"
                     f"Title:\n{shorten(clean_download_name(playlist.title), 100)}\n"
                     f"Episodes: {episode_count}\n"
-                    f"Folder:\n{HENTAI_VIDEO_DIR}"
+                    f"Mode: {batch_download_mode_label(batch_mode)}\n"
+                    + (
+                        f"Uploaded and deleted: {job.get('uploaded_items', 0)}"
+                        if batch_mode is BatchDownloadMode.UPLOAD_AND_DELETE
+                        else f"Folder:\n{HENTAI_VIDEO_DIR}"
+                    )
                 ),
                 reply_markup=build_reply_menu(user_id),
                 disable_web_page_preview=True,
@@ -3339,6 +3531,9 @@ async def start_pornhub_model_download(
         job_id = job_counter
 
     video_count = len(playlist.urls)
+    batch_mode = normalize_batch_download_mode(
+        get_user_settings(user_id or 0).get("batch_download_mode")
+    )
     job = {
         "id": job_id,
         "name": playlist.slug,
@@ -3362,6 +3557,9 @@ async def start_pornhub_model_download(
         "last_line": "Preparing model videos...",
         "video_count": video_count,
         "completed_items": 0,
+        "uploaded_items": 0,
+        "deleted_items": 0,
+        "batch_download_mode": batch_mode.value,
         "folder": str(ADULT_VIDEO_DIR / "PornHub"),
     }
     download_jobs[job_id] = job
@@ -3370,25 +3568,16 @@ async def start_pornhub_model_download(
         try:
             job["status"] = "downloading"
             await maybe_auto_update_status_message(app, job, force=True)
-            for index, video_url in enumerate(playlist.urls, start=1):
-                if job.get("status") == "cancelled":
-                    return
-                job["last_line"] = f"Video {index}/{video_count}"
-                job["progress"] = ((index - 1) / video_count * 100) if video_count else 0.0
-                await maybe_auto_update_status_message(app, job, force=True)
-                child = await start_ytdlp_download(
-                    app,
-                    chat_id,
-                    video_url,
-                    audio_only=False,
-                    user_id=user_id,
-                    notify=False,
-                )
-                if child.get("status") == "failed":
-                    job["last_line"] = f"Video {index} failed: {child.get('last_line', 'Unknown')}"
-                    raise RuntimeError(job["last_line"])
-                job["completed_items"] = index
-                job["progress"] = (index / video_count * 100) if video_count else 100.0
+            await run_video_batch(
+                app,
+                chat_id,
+                playlist.urls,
+                job,
+                item_label="Video",
+                user_id=user_id,
+            )
+            if job.get("status") == "cancelled":
+                return
 
             job["status"] = "completed"
             job["progress"] = 100.0
@@ -3402,7 +3591,12 @@ async def start_pornhub_model_download(
                     f"Job: #{job_id}\n"
                     f"Model:\n{shorten(clean_download_name(playlist.slug), 100)}\n"
                     f"Videos: {video_count}\n"
-                    f"Folder:\n{ADULT_VIDEO_DIR / 'PornHub'}"
+                    f"Mode: {batch_download_mode_label(batch_mode)}\n"
+                    + (
+                        f"Uploaded and deleted: {job.get('uploaded_items', 0)}"
+                        if batch_mode is BatchDownloadMode.UPLOAD_AND_DELETE
+                        else f"Folder:\n{ADULT_VIDEO_DIR / 'PornHub'}"
+                    )
                 ),
                 reply_markup=build_reply_menu(user_id),
                 disable_web_page_preview=True,
@@ -3476,11 +3670,13 @@ async def handle_hentai_playlist_callback(update: Update, context: ContextTypes.
         return
 
     playlist = pending["playlist"]
+    batch_mode = get_user_settings(user_id).get("batch_download_mode")
     await query.edit_message_text(build_hentai_playlist_started_text({
         "id": "new",
         "platform": playlist.site,
         "name": playlist.title,
         "episode_count": len(playlist.urls),
+        "batch_download_mode": batch_mode,
     }))
     await start_hentai_playlist_download(
         context.application,
@@ -3506,10 +3702,12 @@ async def handle_pornhub_model_callback(update: Update, context: ContextTypes.DE
         return
 
     playlist = pending["playlist"]
+    batch_mode = get_user_settings(user_id).get("batch_download_mode")
     await query.edit_message_text(build_pornhub_model_started_text({
         "id": "new",
         "name": playlist.slug,
         "video_count": len(playlist.urls),
+        "batch_download_mode": batch_mode,
     }))
     await start_pornhub_model_download(
         context.application,
@@ -4066,7 +4264,16 @@ async def zip_upload_mini_app_selection(
 # =========================================================
 
 ARIA2_DONE_STATES = {"complete", "error", "removed"}
-JOB_ACTIVE_STATES = {"starting", "downloading", "metadata", "allocating", "queued", "paused", "processing"}
+JOB_ACTIVE_STATES = {
+    "starting",
+    "downloading",
+    "uploading",
+    "metadata",
+    "allocating",
+    "queued",
+    "paused",
+    "processing",
+}
 
 
 def _parse_int_field(value, default: int = 0) -> int:
@@ -4440,7 +4647,7 @@ async def cancel_job(job_id: int):
         job["last_line"] = "Cancelled by user"
         return True, f"Cancelled job #{job_id}: {job['name']}"
 
-    if job.get("provider") in {"manga", "yt-dlp", "hentai-playlist"}:
+    if job.get("provider") in {"manga", "yt-dlp", "hentai-playlist", "pornhub-model"}:
         job["status"] = "cancelled"
         job["finished_at"] = now_ts()
         job["last_line"] = "Cancelled by user"
@@ -5009,6 +5216,7 @@ def build_zip_settings_markup(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"🗑 Auto-delete zips: {'✅' if settings.get('auto_delete_zips_after_send') else '❌'}", callback_data="zip_setting:auto_del_zips")],
         [InlineKeyboardButton(f"🗑 Auto-delete after upload: {'✅' if settings.get('auto_delete_files_after_upload') else '❌'}", callback_data="zip_setting:auto_del_upload")],
         [InlineKeyboardButton(f"📥 Forwarded posts: {'✅' if settings.get('auto_download_forwarded_posts') else '❌'}", callback_data="zip_setting:forwarded_posts")],
+        [InlineKeyboardButton(f"Batch: {batch_download_mode_label(settings.get('batch_download_mode'))}", callback_data="zip_setting:batch_mode")],
         [InlineKeyboardButton(f"🔨 Compression: {settings.get('compression_level', 5)}/9", callback_data="zip_setting:compression")],
         [InlineKeyboardButton(f"🏠 Back", callback_data="zip_menu:back")],
     ])
@@ -5352,7 +5560,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "chat_id": chat_id,
             }
             await update.message.reply_text(
-                build_hentai_playlist_prompt_text(playlist),
+                build_hentai_playlist_prompt_text(playlist, user_id),
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("Download all", callback_data="hentai_playlist_confirm"),
@@ -5392,7 +5600,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "chat_id": chat_id,
             }
             await update.message.reply_text(
-                build_pornhub_model_prompt_text(playlist),
+                build_pornhub_model_prompt_text(playlist, user_id),
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("Download all", callback_data="pornhub_model_confirm"),
@@ -5791,6 +5999,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_settings_menu_markup(user_id),
             )
             await query.answer(f"Forwarded posts: {'ON' if enabled else 'OFF'}")
+
+        elif data == "menu:batch_mode":
+            settings = get_user_settings(user_id)
+            current = normalize_batch_download_mode(settings.get("batch_download_mode"))
+            next_mode = (
+                BatchDownloadMode.DOWNLOAD_ONLY
+                if current is BatchDownloadMode.UPLOAD_AND_DELETE
+                else BatchDownloadMode.UPLOAD_AND_DELETE
+            )
+            await update_setting(user_id, "batch_download_mode", next_mode.value)
+            await safe_edit_message(
+                query.message,
+                build_settings_menu_text(user_id),
+                build_settings_menu_markup(user_id),
+            )
+            await query.answer(f"Batch mode: {batch_download_mode_label(next_mode)}")
 
         elif data == "menu:clear":
             await safe_edit_message(
@@ -6771,6 +6995,21 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Send your desired password (or send 'none' to remove the password)"
                 )
             
+            elif setting_key == "batch_mode":
+                settings = get_user_settings(user_id)
+                current = normalize_batch_download_mode(settings.get("batch_download_mode"))
+                next_mode = (
+                    BatchDownloadMode.DOWNLOAD_ONLY
+                    if current is BatchDownloadMode.UPLOAD_AND_DELETE
+                    else BatchDownloadMode.UPLOAD_AND_DELETE
+                )
+                await update_setting(user_id, "batch_download_mode", next_mode.value)
+                await safe_edit_message(
+                    query.message,
+                    build_zip_settings_text(user_id),
+                    build_zip_settings_markup(user_id),
+                )
+
             elif setting_key in ("auto_del_files", "auto_del_zips", "auto_del_upload", "forwarded_posts"):
                 # Toggle boolean setting
                 setting_name = {

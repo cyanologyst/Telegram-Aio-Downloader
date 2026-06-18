@@ -37,6 +37,19 @@ The bot is designed around a VPS workflow: send a link in Telegram, let the serv
 | Hentai episode URL | Video/MP3 prompt, separated by site | `Download/Hentai/<site>/` |
 | Hentai playlist/series URL | Download all detected episodes | `Download/Hentai/<site>/` |
 
+### Batch Download Modes
+
+PornHub model pages and supported hentai playlists use the per-user batch setting:
+
+| Mode | Behavior |
+|---|---|
+| `Upload & delete each` | Downloads one item, uploads it to Telegram Saved Messages, deletes the local file after a successful upload, then starts the next item. This keeps VPS disk usage low. |
+| `Download only` | Downloads every item sequentially and keeps all files on the VPS. Nothing is uploaded or deleted automatically. |
+
+Change the mode from the Telegram **Settings** menu or the Mini App settings.
+Active batch status shows completed and remaining items, for example `3/86 done (83 remaining)`.
+The selected mode is snapshotted when a batch starts, so changing the setting does not alter a running batch.
+
 ## 🌍 Website Support Matrix
 
 ### General Video / Social Sites
@@ -108,6 +121,8 @@ CDN query strings are never copied into the output filename.
 
 These require `hanime-plugin==2026.5.10` and are routed into `Download/Hentai/<site>/`.
 `hanime.tv` also requires DenoJS, either available on `PATH` or configured with `DENO_BIN`.
+The bot automatically checks `~/.deno/bin/deno` and `~/.local/bin/deno`, which covers
+the standard Deno installer locations even when systemd or PM2 has a restricted `PATH`.
 
 | Site | Single Episode | Playlist / Series | Tested Behavior |
 |---|---:|---:|---|
@@ -217,6 +232,44 @@ The setup script can:
 | 4 | Asks for BotFather token, `API_ID`, `API_HASH`, allowed user IDs |
 | 5 | Lets you choose automatic or manual ports/IP settings |
 | 6 | Optionally starts Prowlarr with Docker and auto-captures its generated API key when available |
+
+The Ubuntu setup script also installs Deno when it is missing and writes its absolute
+path to `DENO_BIN`. Docker builds include Deno automatically.
+
+### Updating An Existing VPS
+
+After pulling an update, refresh Python dependencies and verify Deno before restarting:
+
+```bash
+cd /root/telegram-bot/Telegram-Aio-Downloader
+git pull
+source .venv/bin/activate
+pip install -U -r requirements.txt
+
+command -v deno || true
+~/.deno/bin/deno --version 2>/dev/null || ~/.local/bin/deno --version
+```
+
+If neither Deno command works, install it:
+
+```bash
+curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$HOME/.local" sh
+echo 'DENO_BIN='"$HOME"'/.local/bin/deno' >> .env
+"$HOME/.local/bin/deno" --version
+```
+
+If `DENO_BIN` already exists in `.env`, update that line instead of adding a duplicate.
+Then test the exact Hanime extractor before restarting the bot:
+
+```bash
+set -a
+source .env
+set +a
+export PATH="$(dirname "$DENO_BIN"):$PATH"
+python -m yt_dlp --simulate \
+  --print "extractor=%(extractor)s title=%(title)s duration=%(duration)s" \
+  "https://hanime.tv/videos/hentai/shin-ringetsu-2"
+```
 
 `ALLOWED_USER_IDS` and `MINI_APP_DEFAULT_CHAT_ID` must be numeric Telegram user IDs only. Bot tokens contain a colon and belong only in `BOT_TOKEN`.
 

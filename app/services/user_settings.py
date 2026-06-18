@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.services.batch_download import DEFAULT_BATCH_DOWNLOAD_MODE, batch_download_mode_label
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 SETTINGS_DIR = BASE_DIR / "zip_settings"
 SETTINGS_DIR.mkdir(exist_ok=True)
@@ -20,6 +22,7 @@ DEFAULT_SETTINGS = {
     "auto_delete_zips_after_send": False,
     "auto_delete_files_after_upload": False,
     "auto_download_forwarded_posts": False,
+    "batch_download_mode": DEFAULT_BATCH_DOWNLOAD_MODE.value,
     "manga_auto_convert_pdf": False,
     "manga_remove_images_after_conversion": False,
     "compression_level": 3,  # 1-9, reduced from 5 for better responsiveness
@@ -108,6 +111,7 @@ def format_settings_text(user_id: int) -> str:
         f"🗑 Auto-delete zips after send: {'✅' if settings.get('auto_delete_zips_after_send') else '❌'}",
         f"🗑 Auto-delete after upload: {'✅' if settings.get('auto_delete_files_after_upload') else '❌'}",
         f"📥 Auto-download forwarded posts: {'✅' if settings.get('auto_download_forwarded_posts') else '❌'}",
+        f"Batch downloads: {batch_download_mode_label(settings.get('batch_download_mode'))}",
         f"🔨 Compression level: {settings.get('compression_level', 3)}/9",
     ]
 

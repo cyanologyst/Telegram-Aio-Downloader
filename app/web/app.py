@@ -17,6 +17,7 @@ from urllib.parse import parse_qsl
 from flask import Flask, jsonify, render_template, request, send_file
 from flask_cors import CORS
 
+from app.services.batch_download import BatchDownloadMode, normalize_batch_download_mode
 from app.services.user_settings import (
     DEFAULT_SETTINGS,
     get_user_settings,
@@ -179,6 +180,8 @@ def create_web_app(
         total = int(job.get("total_length", 0) or 0)
         completed = int(job.get("completed_length", 0) or 0)
         progress = float(job.get("progress", 0.0) or 0.0)
+        total_items = int(job.get("episode_count", job.get("video_count", 0)) or 0)
+        completed_items = int(job.get("completed_items", 0) or 0)
         return {
             "id": job.get("id"),
             "name": job.get("name", "Unknown download"),
@@ -187,6 +190,11 @@ def create_web_app(
             "gid": job.get("gid"),
             "source_type": job.get("source_type", "download"),
             "progress": progress,
+            "completed_items": completed_items,
+            "total_items": total_items,
+            "remaining_items": max(0, total_items - completed_items),
+            "batch_download_mode": job.get("batch_download_mode"),
+            "last_line": job.get("last_line", ""),
             "completed_length": completed,
             "total_length": total,
             "completed_readable": format_size(completed),
@@ -253,6 +261,9 @@ def create_web_app(
             "auto_delete_zips_after_send": bool(settings.get("auto_delete_zips_after_send")),
             "auto_delete_files_after_upload": bool(settings.get("auto_delete_files_after_upload")),
             "auto_download_forwarded_posts": bool(settings.get("auto_download_forwarded_posts")),
+            "batch_download_mode": normalize_batch_download_mode(
+                settings.get("batch_download_mode")
+            ).value,
             "manga_auto_convert_pdf": bool(settings.get("manga_auto_convert_pdf")),
             "manga_remove_images_after_conversion": bool(
                 settings.get("manga_remove_images_after_conversion")
@@ -736,6 +747,10 @@ def create_web_app(
                 value = str(value).lower()
                 if value not in {"zip", "7z"}:
                     return jsonify({"error": "Method must be ZIP or 7Z"}), 400
+            elif key == "batch_download_mode":
+                value = str(value).lower()
+                if value not in {mode.value for mode in BatchDownloadMode}:
+                    return jsonify({"error": "Invalid batch download mode"}), 400
             elif key in {
                 "auto_delete_files_after_zip",
                 "auto_delete_zips_after_send",

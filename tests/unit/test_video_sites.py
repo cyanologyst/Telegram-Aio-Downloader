@@ -2,6 +2,7 @@ from app.services.video_sites import (
     is_adult_video_url,
     is_hentai_video_url,
     is_supported_video_url,
+    requires_deno_runtime,
     requires_ytdlp_generic_impersonation,
     video_platform_label,
     video_platform_slug,
@@ -132,13 +133,15 @@ def test_hentai_video_sites_are_supported_and_labeled():
 
 
 def test_hanime_tv_video_urls_are_supported_and_labeled():
-    url = "https://hanime.tv/videos/hentai/example-episode-1"
+    url = "https://hanime.tv/videos/hentai/shin-ringetsu-2"
 
     assert is_supported_video_url(url)
     assert is_hentai_video_url(url)
+    assert requires_deno_runtime(url)
     assert not is_adult_video_url(url)
     assert video_platform_label(url) == "Hanime"
     assert video_platform_slug(url) == "Hanime"
+    assert not requires_deno_runtime("https://hstream.moe/hentai/star-jewel-1")
 
 
 def test_inactive_hentai_candidates_are_not_routed():
