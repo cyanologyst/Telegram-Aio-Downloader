@@ -202,9 +202,9 @@ ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
 SUPPORTED_SITES_URL = (
     os.getenv(
         "SUPPORTED_SITES_URL",
-        "https://github.com/cyanologyst/Telegram-Aio-Downloader#-website-support-matrix",
+        "https://github.com/cyanologyst/Telegram-Aio-Downloader/blob/main/docs/SUPPORTED_SITES.md",
     ).strip()
-    or "https://github.com/cyanologyst/Telegram-Aio-Downloader#-website-support-matrix"
+    or "https://github.com/cyanologyst/Telegram-Aio-Downloader/blob/main/docs/SUPPORTED_SITES.md"
 )
 
 # TPB crawler config
