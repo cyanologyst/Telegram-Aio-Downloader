@@ -4,6 +4,8 @@ Zip Settings Manager - Handles user preferences for zipping operations
 
 import asyncio
 import json
+import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -63,14 +65,25 @@ def get_user_settings(user_id: int) -> dict[str, Any]:
 
 
 def save_user_settings(user_id: int, settings: dict[str, Any]) -> bool:
-    """Save user settings to disk."""
+    """Save user settings to disk.
+
+    Written to a temp file and renamed so a crash mid-write cannot leave
+    truncated JSON behind - get_user_settings() would silently fall back to
+    defaults and the user would lose every preference.
+    """
+    settings_path = get_settings_path(user_id)
+    tmp_path = settings_path.with_suffix(".json.tmp")
     try:
-        settings_path = get_settings_path(user_id)
-        with open(settings_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, settings_path)
         return True
     except OSError as e:
         print(f"Error saving settings for user {user_id}: {e}")
+        with suppress(OSError):
+            tmp_path.unlink()
         return False
 
 

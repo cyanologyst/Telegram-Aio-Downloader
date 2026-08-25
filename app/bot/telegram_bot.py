@@ -40,6 +40,17 @@ except ImportError:
     HAS_PIL = False
 
 import yt_dlp
+
+# Pyrogram 2.x calls asyncio.get_event_loop() while building its sync wrappers
+# at import time. From Python 3.12 that is deprecated and on 3.14 it raises
+# outright ("There is no current event loop"), so importing the bot fails before
+# any of our code runs. Make a loop current first; telegram_bot.main() installs
+# the loop it actually runs on later.
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from pyrogram import Client
 from pyrogram.errors import FloodWait, RPCError
 from telegram import (
@@ -51,7 +62,7 @@ from telegram import (
     Update,
     WebAppInfo,
 )
-from telegram.error import BadRequest, NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -266,9 +277,12 @@ user_languages = {}  # {user_id: "en" or "fa"}
 DEFAULT_LANGUAGE = "en"
 
 # Status refresh tracking - one dashboard per chat
-status_messages = {}  # {chat_id: {"message_id": int, "last_update": float}}
+status_messages = {}  # {chat_id: {"message_id": int, "last_update": float, "text_hash": str}}
 status_message_locks = {}  # {chat_id: asyncio.Lock}
-STATUS_AUTO_UPDATE_SECONDS = 5
+# How often the live status dashboard may be edited, in seconds. Edits are
+# rate limited by Telegram; values below ~5s risk RetryAfter storms and the
+# "70+ messages per minute" spam caused by edit failures recreating messages.
+STATUS_AUTO_UPDATE_SECONDS = parse_env_int("STATUS_UPDATE_INTERVAL", 8)
 dashboard_messages = {}  # {chat_id: {"message_id": int, "last_update": float}}
 
 # Pinned live dashboard tracking
@@ -462,7 +476,7 @@ LANGUAGES = {
         "send_thumbnail": "📸 Send Thumbnail",
         "zip_menu": "📦 Zip Menu",
         "list_files": "📋 List Files",
-        "select_files": "☑️ Select Files to Zip",
+        "select_files_zip": "☑️ Select Files to Zip",
         "zip_all": "📦 Zip All",
         "settings": "⚙️ Settings",
         "zip_part_size": "Zip Part Size (MB)",
@@ -646,7 +660,7 @@ LANGUAGES = {
         "send_thumbnail": "📸 ارسال ریزنمونه",
         "zip_menu": "📦 منوی فشرده‌سازی",
         "list_files": "📋 فهرست فایل‌ها",
-        "select_files": "☑️ انتخاب فایل‌ها برای فشرده‌سازی",
+        "select_files_zip": "☑️ انتخاب فایل‌ها برای فشرده‌سازی",
         "zip_all": "📦 فشرده‌سازی تمام",
         "settings": "⚙️ تنظیمات",
         "zip_part_size": "اندازه قسمت فشرده‌سازی (مگابایت)",
@@ -1343,49 +1357,125 @@ def format_eta(seconds):
     return f"{s}s"
 
 
+class _DashboardMessageGone(Exception):
+    """Raised when a tracked status/dashboard message must be recreated."""
+
+
+async def _edit_dashboard_message(
+    app: Application,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup,
+) -> bool:
+    """Edit a dashboard/status message, classifying failures correctly.
+
+    Returns True when the message now shows `text` (edited or already
+    identical). Raises _DashboardMessageGone only when the target message no
+    longer exists or can never be edited, so callers may safely recreate it.
+
+    This is the fix for progress-message spam: transient errors (rate limits,
+    network hiccups) must NOT cause callers to send a brand-new message.
+    """
+    try:
+        await app.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+        return True
+    except BadRequest as exc:
+        lowered = str(exc).lower()
+        if "message is not modified" in lowered:
+            return True
+        if any(
+            term in lowered
+            for term in (
+                "message to edit not found",
+                "message can't be edited",
+                "there is no text in the message to edit",
+                "chat not found",
+                "message id is invalid",
+            )
+        ):
+            raise _DashboardMessageGone() from exc
+        logger.warning("Status edit rejected (%s); skipping this update", exc)
+        return False
+    except RetryAfter as exc:
+        retry_after = min(float(getattr(exc, "retry_after", 5) or 5), 15.0)
+        logger.warning("Telegram rate limit on status edits; backing off %.1fs", retry_after)
+        await asyncio.sleep(retry_after)
+        return False
+    except (TimedOut, NetworkError) as exc:
+        logger.warning("Network error editing status message: %s", exc)
+        return False
+
+
+def _hash_content(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+
 async def update_status_message(app: Application, chat_id: int, user_id: int = None):
     """Update existing status message or create a new one."""
     u = user_id or 0
     lock = status_message_locks.setdefault(chat_id, asyncio.Lock())
     async with lock:
+        # Re-check the throttle inside the lock: concurrent monitor loops all
+        # pass the pre-lock check at once and would otherwise each edit/send.
+        msg_data = status_messages.get(chat_id)
+        now = time.time()
+        if msg_data and now - msg_data.get("last_update", 0) < 2.0:
+            return
         await _update_status_message_unlocked(app, chat_id, u)
 
 
 async def _update_status_message_unlocked(app: Application, chat_id: int, user_id: int):
     """Update the chat status dashboard while the per-chat lock is held."""
     u = user_id or 0
-    try:
-        if chat_id in status_messages:
-            msg_data = status_messages[chat_id]
-            try:
-                await app.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_data["message_id"],
-                    text=build_status_text(u),
-                    reply_markup=build_status_controls_markup(),
-                    disable_web_page_preview=True,
-                )
+    text = build_status_text(u)
+    markup = build_status_controls_markup()
+    text_hash = _hash_content(text)
+
+    msg_data = status_messages.get(chat_id)
+    if msg_data is not None:
+        # Skip the API entirely when nothing visible changed. This alone kills
+        # most edit traffic during slow or stalled downloads.
+        if msg_data.get("text_hash") == text_hash:
+            msg_data["last_update"] = time.time()
+            return
+
+        try:
+            if await _edit_dashboard_message(app, chat_id, msg_data["message_id"], text, markup):
                 msg_data["last_update"] = time.time()
                 msg_data["user_id"] = u
+                msg_data["text_hash"] = text_hash
                 return
-            except Exception:
-                # Message not found or expired, remove it
-                del status_messages[chat_id]
-        
-        # Send new status message
+            # Transient failure: keep tracking the same message; the next tick
+            # retries. Recreating here is what caused duplicate-message floods.
+            return
+        except _DashboardMessageGone:
+            del status_messages[chat_id]
+
+    # Only reached when there is no tracked message or it truly disappeared.
+    try:
         msg = await app.bot.send_message(
             chat_id=chat_id,
-            text=build_status_text(u),
-            reply_markup=build_status_controls_markup(),
+            text=text,
+            reply_markup=markup,
             disable_web_page_preview=True,
         )
         status_messages[chat_id] = {
             "message_id": msg.message_id,
             "last_update": time.time(),
             "user_id": u,
+            "text_hash": text_hash,
         }
-    except Exception:
-        pass
+    except RetryAfter as exc:
+        logger.warning("Rate limited sending status message: %.1fs", float(exc.retry_after or 0))
+    except Exception as exc:
+        logger.warning("Unable to send status message: %s", exc)
 
 
 async def maybe_auto_update_status_message(app: Application, job: dict, force: bool = False):
@@ -1406,55 +1496,53 @@ async def maybe_auto_update_status_message(app: Application, job: dict, force: b
 async def update_live_dashboard(app: Application, chat_id: int, user_id: int = None):
     """Update or create live dashboard with pinned message."""
     u = user_id or 0
+    dashboard_text = build_live_dashboard_text(u)
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(u, 'refresh'))}",
+                callback_data="refresh_dashboard",
+            )
+        ]
+    ])
+
+    if chat_id in pinned_dashboard_messages:
+        msg_id = pinned_dashboard_messages[chat_id]
+        try:
+            await _edit_dashboard_message(app, chat_id, msg_id, dashboard_text, markup)
+            return
+        except _DashboardMessageGone:
+            del pinned_dashboard_messages[chat_id]
+        except Exception as exc:
+            logger.warning("Live dashboard edit failed: %s", exc)
+            return
+
+    # Send new dashboard message
     try:
-        dashboard_text = build_live_dashboard_text(u)
-        
-        if chat_id in pinned_dashboard_messages:
-            msg_id = pinned_dashboard_messages[chat_id]
-            try:
-                await app.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=dashboard_text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(u, 'refresh'))}", 
-                                               callback_data="refresh_dashboard"),
-                        ]
-                    ]),
-                    disable_web_page_preview=True,
-                )
-                return
-            except Exception:
-                # Message not found, create new one
-                del pinned_dashboard_messages[chat_id]
-        
-        # Send new dashboard message
         msg = await app.bot.send_message(
             chat_id=chat_id,
             text=dashboard_text,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(f"{ICON_REFRESH} {clean_emoji_prefix(get_lang(u, 'refresh'))}", 
-                                       callback_data="refresh_dashboard"),
-                ]
-            ]),
+            reply_markup=markup,
             disable_web_page_preview=True,
         )
-        
-        # Try to pin the message
-        try:
-            await app.bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id)
-        except Exception:
-            pass
-        
-        pinned_dashboard_messages[chat_id] = msg.message_id
-        dashboard_messages[chat_id] = {
-            "message_id": msg.message_id,
-            "last_update": time.time(),
-        }
+    except RetryAfter as exc:
+        logger.warning("Rate limited sending live dashboard: %.1fs", float(exc.retry_after or 0))
+        return
+    except Exception as exc:
+        logger.warning("Unable to send live dashboard: %s", exc)
+        return
+
+    # Try to pin the message
+    try:
+        await app.bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id)
     except Exception:
         pass
+
+    pinned_dashboard_messages[chat_id] = msg.message_id
+    dashboard_messages[chat_id] = {
+        "message_id": msg.message_id,
+        "last_update": time.time(),
+    }
 
 
 async def live_dashboard_refresh_loop(app: Application, chat_id: int, user_id: int = None):
@@ -1462,9 +1550,12 @@ async def live_dashboard_refresh_loop(app: Application, chat_id: int, user_id: i
     u = user_id or 0
     while chat_id in pinned_dashboard_messages:
         try:
-            await asyncio.sleep(2)
+            await asyncio.sleep(max(STATUS_AUTO_UPDATE_SECONDS, 5))
             await update_live_dashboard(app, chat_id, u)
+        except asyncio.CancelledError:
+            raise
         except Exception:
+            logger.exception("Live dashboard refresh loop stopped for chat %s", chat_id)
             break
 
 
@@ -1539,6 +1630,42 @@ async def safe_edit_message(message, text, reply_markup=None):
             pass
 
 
+def mini_app_inline_button(label: str = "Open File Browser"):
+    """HTTPS-aware inline Mini-App button; falls back to a plain URL button."""
+    if not mini_app_enabled():
+        return None
+    if mini_app_url_is_https():
+        return InlineKeyboardButton(label, web_app=WebAppInfo(url=WEB_APP_URL))
+    return InlineKeyboardButton(f"{label} (browser)", url=WEB_APP_URL)
+
+
+def mini_app_url_is_https() -> bool:
+    return bool(WEB_APP_URL) and WEB_APP_URL.lower().startswith("https://")
+
+
+def mini_app_enabled() -> bool:
+    return bool(WEB_APP_ENABLE and WEB_APP_URL)
+
+
+def mini_app_reply_rows(label: str = "Mini-App"):
+    """Rows for a ReplyKeyboardMarkup - must contain KeyboardButton/str only.
+
+    Telegram clients only open native WebApp buttons over public HTTPS. Reply
+    keyboards have no URL button type at all, so over plain HTTP there is
+    nothing useful to show here; the browser link lives on the inline Files
+    menu instead (see mini_app_inline_rows).
+    """
+    if not mini_app_enabled() or not mini_app_url_is_https():
+        return []
+    return [[KeyboardButton(f"📱 {label}", web_app=WebAppInfo(url=WEB_APP_URL))]]
+
+
+def mini_app_inline_rows(label: str = "Mini-App"):
+    """Rows for an InlineKeyboardMarkup - must contain InlineKeyboardButton only."""
+    button = mini_app_inline_button(label)
+    return [[button]] if button else []
+
+
 def build_reply_menu(user_id: int = None):
     u = user_id or 0
     rows = [
@@ -1547,8 +1674,8 @@ def build_reply_menu(user_id: int = None):
         [f"{ICON_ARCHIVE} Tools", f"{ICON_SETTINGS} Settings"],
         [f"{ICON_HELP} Help"],
     ]
-    if WEB_APP_ENABLE and WEB_APP_URL:
-        rows.insert(0, [KeyboardButton("📱 Mini-App", web_app=WebAppInfo(url=WEB_APP_URL))])
+    for extra_row in reversed(mini_app_reply_rows()):
+        rows.insert(0, extra_row)
 
     return ReplyKeyboardMarkup(
         rows,
@@ -1597,8 +1724,7 @@ def build_files_menu_text(user_id: int = None) -> str:
 
 def build_files_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
     rows = []
-    if WEB_APP_ENABLE and WEB_APP_URL:
-        rows.append([InlineKeyboardButton("📱 Open Mini-App", web_app=WebAppInfo(url=WEB_APP_URL))])
+    rows.extend(mini_app_inline_rows("Open Mini-App"))
     rows.extend([
         [InlineKeyboardButton(f"{ICON_FOLDER} Chat File Browser", callback_data="menu:file_browser")],
         [InlineKeyboardButton(f"{ICON_ARCHIVE} Archive / Zip Menu", callback_data="menu:zip")],
@@ -2400,6 +2526,32 @@ def split_file_into_chunks(file_path: str, chunk_size: int = 2 * 1024 * 1024 * 1
     return chunks
 
 
+def cleanup_file_chunks(chunks: list) -> None:
+    """Delete temporary split-upload parts and the folder holding them.
+
+    split_file_into_chunks() copies the whole file into <stem>_chunks/ when it
+    exceeds the Telegram part limit, so skipping this leaves a full duplicate
+    on disk for every large upload.
+    """
+    chunk_dirs: set[Path] = set()
+    for chunk_path, _, chunk_total in chunks:
+        if chunk_total <= 1:
+            continue
+        chunk = Path(chunk_path)
+        chunk_dirs.add(chunk.parent)
+        try:
+            if chunk.exists():
+                chunk.unlink()
+        except OSError:
+            logger.warning("Could not remove temporary upload chunk: %s", chunk)
+
+    for chunk_dir in chunk_dirs:
+        try:
+            chunk_dir.rmdir()
+        except OSError:
+            pass
+
+
 def get_video_metadata(file_path: str):
     """Extract video width, height and duration using ffprobe."""
     try:
@@ -2558,9 +2710,12 @@ async def convert_video_quality(input_path: str, output_path: str, target_res: s
 
     duration = None
     # try to get duration from original file
-    probe = subprocess.run(
+    probe = await asyncio.to_thread(
+        subprocess.run,
         [FFMPEG_BIN, "-i", input_path],
-        stderr=subprocess.PIPE, text=True, timeout=10
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
     )
     for line in probe.stderr.splitlines():
         if "Duration:" in line:
@@ -3297,15 +3452,12 @@ async def upload_and_delete_batch_artifact(
         raise FileNotFoundError(str(full))
 
     chunks = split_file_into_chunks(rel_path)
-    chunk_dirs: set[Path] = set()
     try:
         for chunk_path, chunk_index, chunk_total in chunks:
             if job.get("status") == "cancelled":
                 return False
             chunk = Path(chunk_path).resolve()
             chunk_rel_path = file_rel_path(chunk)
-            if chunk.parent != full.parent:
-                chunk_dirs.add(chunk.parent)
 
             async def progress(current, total, *, part=chunk_index, parts=chunk_total):
                 if job.get("status") == "cancelled":
@@ -3325,18 +3477,7 @@ async def upload_and_delete_batch_artifact(
             await maybe_auto_update_status_message(app, job, force=True)
             await pyrogram_send_file(chunk_rel_path, progress_callback=progress)
     finally:
-        for chunk_path, _, chunk_total in chunks:
-            chunk = Path(chunk_path)
-            if chunk_total > 1 and chunk.exists():
-                try:
-                    chunk.unlink()
-                except OSError:
-                    logger.warning("Could not remove temporary batch upload chunk: %s", chunk)
-        for chunk_dir in chunk_dirs:
-            try:
-                chunk_dir.rmdir()
-            except OSError:
-                pass
+        cleanup_file_chunks(chunks)
 
     if job.get("status") == "cancelled":
         return False
@@ -3922,11 +4063,10 @@ async def update_upload_progress(app: Application, chat_id: int, message_id: int
     job = upload_jobs[upload_id]
     last_update = job.get("last_update", 0)
 
-    if now - last_update < 1.5 and sent < total:
+    if now - last_update < 3.0 and sent < total:
         return
 
     job["last_update"] = now
-    pct = 0 if total == 0 else (sent / total) * 100
     progress_bar = build_progress_bar(sent, total, width=15)
 
     text = (
@@ -3937,17 +4077,16 @@ async def update_upload_progress(app: Application, chat_id: int, message_id: int
         f"{ICON_BOX} {human_size(sent)} / {human_size(total)}"
     )
 
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")]
+    ])
+
     try:
-        await app.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")]
-            ]),
-        )
-    except Exception:
-        pass
+        await _edit_dashboard_message(app, chat_id, message_id, text, markup)
+    except _DashboardMessageGone:
+        logger.warning("Upload progress message %s no longer exists", message_id)
+    except Exception as exc:
+        logger.debug("Upload progress edit failed: %s", exc)
 
 
 async def send_single_file_via_pyrogram(
@@ -3988,8 +4127,8 @@ async def send_single_file_via_pyrogram(
         if len(chunks) > 1:
             # File was split, upload each chunk
             for chunk_path, chunk_num, total_chunks in chunks:
-                async def progress_chunk(current, total):
-                    await progress(current, total, chunk_num, total_chunks)
+                async def progress_chunk(current, total, part=chunk_num, parts=total_chunks):
+                    await progress(current, total, part, parts)
                 
                 try:
                     await pyrogram_send_file(chunk_path, progress_callback=progress_chunk)
@@ -4015,6 +4154,9 @@ async def send_single_file_via_pyrogram(
                 "Then log in with your personal Telegram account."
             )
         raise
+    finally:
+        # These parts are a full second copy of the file on disk.
+        cleanup_file_chunks(chunks)
 
     job["status"] = "completed"
 
@@ -4110,6 +4252,7 @@ async def send_folder_files_via_pyrogram(
                 total
             )
 
+        chunks = []
         try:
             chunks = split_file_into_chunks(str(full))
             for chunk_path, chunk_num, total_chunks in chunks:
@@ -4120,12 +4263,6 @@ async def send_folder_files_via_pyrogram(
                     await update_upload_progress(app, chat_id, message_id, upload_id, label, current, total)
                 
                 await pyrogram_send_file(chunk_path, progress_callback=progress_chunk)
-
-                try:
-                    if "_part_" in chunk_path and Path(chunk_path).exists():
-                        Path(chunk_path).unlink()
-                except Exception:
-                    pass
 
             sent_count += 1
             upload_jobs[upload_id]["sent_count"] = sent_count
@@ -4139,6 +4276,8 @@ async def send_folder_files_via_pyrogram(
                     "Then log in with your personal Telegram account."
                 )
             raise
+        finally:
+            cleanup_file_chunks(chunks)
 
     upload_jobs[upload_id]["status"] = "completed"
 
@@ -4898,19 +5037,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     # Show the file browser mini-app button
-    if WEB_APP_ENABLE:
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "Open Modern File Browser",
-                    web_app={"url": WEB_APP_URL}
-                )
-            ]
-        ])
-        
+    button = mini_app_inline_button("Open Modern File Browser")
+    if button:
         await update.message.reply_text(
             "Or use our modern file browser:",
-            reply_markup=keyboard
+            reply_markup=InlineKeyboardMarkup([[button]]),
         )
 
 
@@ -4957,14 +5088,10 @@ async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Use inline keyboard with Web App button
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "Open File Browser",
-                web_app={"url": WEB_APP_URL}
-            )
-        ]
-    ])
+    button = mini_app_inline_button("Open File Browser")
+    if not button:
+        return
+    keyboard = InlineKeyboardMarkup([[button]])
     
     await update.message.reply_text(
         "Modern File Browser\n\n"
@@ -5057,7 +5184,7 @@ def build_zip_menu_markup(user_id: int) -> InlineKeyboardMarkup:
     u = user_id or 0
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{ICON_FILE} {clean_emoji_prefix(get_lang(u, 'list_files'))}", callback_data="zip_menu:list")],
-        [InlineKeyboardButton(f"{ICON_OK} {clean_emoji_prefix(get_lang(u, 'select_files'))}", callback_data="zip_menu:select")],
+        [InlineKeyboardButton(f"{ICON_OK} {clean_emoji_prefix(get_lang(u, 'select_files_zip'))}", callback_data="zip_menu:select")],
         [InlineKeyboardButton(f"{ICON_ARCHIVE} {clean_emoji_prefix(get_lang(u, 'zip_all'))}", callback_data="zip_menu:zip_all")],
         [InlineKeyboardButton(f"{ICON_SETTINGS} {clean_emoji_prefix(get_lang(u, 'zip_settings'))}", callback_data="zip_menu:settings")],
         [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
@@ -5124,7 +5251,7 @@ def build_zip_file_select_markup(user_id: int, page: int = 0, files_per_page: in
 
     if not all_files:
         return (
-            f"{clean_emoji_prefix(get_lang(u, 'select_files'))}\n\n{get_lang(u, 'no_files')}",
+            f"{clean_emoji_prefix(get_lang(u, 'select_files_zip'))}\n\n{get_lang(u, 'no_files')}",
             InlineKeyboardMarkup([[InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'home_btn'))}", callback_data="zip_menu:back")]])
         )
     
@@ -5140,7 +5267,7 @@ def build_zip_file_select_markup(user_id: int, page: int = 0, files_per_page: in
     page_files = all_files[start_idx:end_idx]
     
     lines = [
-        f"{clean_emoji_prefix(get_lang(u, 'select_files'))}",
+        f"{clean_emoji_prefix(get_lang(u, 'select_files_zip'))}",
         f"Page {page + 1}/{total_pages}",
         f"Selected: {len(session['selected'])}/{len(all_files)}",
         ""
@@ -6808,11 +6935,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 async def progress_callback(pct):
                     try:
                         await msg.edit_text(f"🔄 Converting to {target_res}... {pct}%")
-                    except:
-                        pass
-                # Run conversion in executor
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, lambda: asyncio.run(convert_video_quality(str(input_path), str(temp_output), target_res, progress_callback)))
+                    except Exception as exc:
+                        logger.debug("Conversion progress edit failed: %s", exc)
+                # convert_video_quality is already fully async (it drives
+                # ffmpeg through create_subprocess_exec), so run it on this
+                # loop. Wrapping it in asyncio.run() inside an executor thread
+                # handed progress_callback a foreign event loop, so every
+                # edit_text() raised and the bar sat at 0% for the whole encode.
+                await convert_video_quality(
+                    str(input_path), str(temp_output), target_res, progress_callback
+                )
                 # After conversion
                 await msg.edit_text(
                     f"✅ Conversion finished!\nOutput: {temp_output.name}\nSize: {human_size(temp_output.stat().st_size)}",
@@ -7149,13 +7281,22 @@ async def post_init(app: Application):
 
     if WEB_APP_ENABLE and WEB_APP_URL:
         try:
-            await app.bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(
-                    text="Mini-App",
-                    web_app=WebAppInfo(url=WEB_APP_URL),
+            if WEB_APP_URL.lower().startswith("https://"):
+                await app.bot.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(
+                        text="Mini-App",
+                        web_app=WebAppInfo(url=WEB_APP_URL),
+                    )
                 )
-            )
-            logger.info("Telegram mini-app menu button configured")
+                logger.info("Telegram mini-app menu button configured")
+            else:
+                logger.info(
+                    "WEB_APP_URL is not HTTPS (%s); skipping native mini-app menu "
+                    "button. Telegram only opens WebApp buttons over HTTPS. Use "
+                    "scripts/start_with_tunnel.py for a free HTTPS URL, or open "
+                    "the dashboard via the browser button.",
+                    WEB_APP_URL,
+                )
         except Exception as exc:
             logger.warning("Unable to configure Telegram mini-app menu button: %s", exc)
 
@@ -7338,12 +7479,17 @@ def main():
     if WEB_APP_ENABLE:
         try:
             default_chat_id = MINI_APP_DEFAULT_CHAT_ID or next(iter(ALLOWED_USER_IDS), None)
+            # Create the loop explicitly and make it current: PTB reuses the
+            # current loop in run_polling(), so run_coroutine_threadsafe() from
+            # the Flask thread targets a loop that is actually running.
+            bot_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(bot_loop)
             flask_app = create_web_app(
                 str(DOWNLOAD_DIR),
                 BOT_TOKEN,
                 download_jobs=download_jobs,
                 zip_jobs=mini_app_zip_jobs,
-                bot_loop=asyncio.get_event_loop(),
+                bot_loop=bot_loop,
                 bot_app=app,
                 start_download=start_download_from_source,
                 pause_download=pause_job,
@@ -7352,6 +7498,8 @@ def main():
                 upload_selected=upload_mini_app_selection,
                 zip_selected=zip_upload_mini_app_selection,
                 default_chat_id=default_chat_id,
+                web_app_url=WEB_APP_URL,
+                allowed_user_ids=frozenset(ALLOWED_USER_IDS),
             )
             
             def run_flask():

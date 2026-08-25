@@ -5,15 +5,20 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from app.downloaders.torrents.rarbg.crawler import RARBGCrawler
 
 
-def rarbg_categories_keyboard(query: str) -> InlineKeyboardMarkup:
-    """Show RARBG category buttons for a search query."""
+def rarbg_categories_keyboard() -> InlineKeyboardMarkup:
+    """Show RARBG category buttons.
+
+    The query deliberately stays out of callback_data. Telegram caps that at
+    64 *bytes* and percent-encoding a 60-character query can produce several
+    hundred, so any moderately long search used to fail with
+    BUTTON_DATA_INVALID. The handler reads the query from user_data instead.
+    """
     buttons = []
     row = []
-    encoded = RARBGCrawler.safe_query(query)
 
     for key, code in RARBGCrawler.CATEGORIES.items():
         label = RARBGCrawler.CATEGORY_LABELS.get(key, key)
-        callback = f"rarbg_cat_{code or 'all'}_{encoded}"
+        callback = f"rarbg_cat_{code or 'all'}"
         row.append(InlineKeyboardButton(text=label, callback_data=callback))
         if len(row) == 2:
             buttons.append(row)
@@ -39,20 +44,18 @@ def rarbg_result_keyboard(torrent_id: str) -> InlineKeyboardMarkup:
 
 
 def rarbg_header_keyboard(
-    query: str,
     category: str,
     page: int,
     has_more: bool,
 ) -> InlineKeyboardMarkup:
     """Pagination and navigation on the header message."""
-    encoded = RARBGCrawler.safe_query(query)
     nav_row = []
 
     if page > 0:
         nav_row.append(
             InlineKeyboardButton(
                 text="⬅️",
-                callback_data=f"rarbg_page_{category or 'all'}_{encoded}_{page - 1}",
+                callback_data=f"rarbg_page_{category or 'all'}_{page - 1}",
             )
         )
 
@@ -62,7 +65,7 @@ def rarbg_header_keyboard(
         nav_row.append(
             InlineKeyboardButton(
                 text="➡️",
-                callback_data=f"rarbg_page_{category or 'all'}_{encoded}_{page + 1}",
+                callback_data=f"rarbg_page_{category or 'all'}_{page + 1}",
             )
         )
 

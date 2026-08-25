@@ -4,7 +4,7 @@ import logging
 import os
 from urllib.parse import quote
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +42,15 @@ class TPBCrawler:
 
     def __init__(self, api_url: str | None = None):
         self.api_url = (api_url or os.getenv("TPB_API_URL", self.DEFAULT_API_URL)).rstrip("/")
-        self._client: httpx.AsyncClient | None = None
+        self._client: AsyncSession | None = None
 
     @property
-    def client(self) -> httpx.AsyncClient:
+    def client(self) -> AsyncSession:
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                timeout=30.0,
-                follow_redirects=True,
-            )
+            # apibay.org (and most TPB mirrors) sit behind Cloudflare TLS
+            # fingerprinting and reject plain httpx/requests clients with 403.
+            # Impersonating a real Chrome TLS fingerprint is required.
+            self._client = AsyncSession(impersonate="chrome", timeout=30.0)
         return self._client
 
     async def search(
@@ -133,5 +133,5 @@ class TPBCrawler:
 
     async def close(self):
         if self._client is not None:
-            await self._client.aclose()
+            await self._client.close()
             self._client = None

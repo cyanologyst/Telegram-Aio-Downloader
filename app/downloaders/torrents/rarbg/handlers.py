@@ -3,7 +3,6 @@
 import logging
 from collections.abc import Callable
 from contextlib import suppress
-from urllib.parse import unquote
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -49,6 +48,49 @@ class RARBGHandlers:
         result_map = context.user_data.get("rarbg_result_map", {})
         return result_map.get(token, token)
 
+    def _pending_query(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """The query the user typed, kept in user_data rather than callback_data."""
+        return (context.user_data.get("rarbg_query") or "").strip()
+
+    async def _results_for_page(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        search_query: str,
+        category: str,
+        page: int,
+    ) -> tuple[list[dict], bool]:
+        """Return one UI page of results plus whether more exist.
+
+        RARBG-style sites paginate server-side and return far more rows per
+        request than PER_PAGE. Slicing only the first PER_PAGE off each server
+        page silently discarded the rest, so results were unreachable. Instead
+        accumulate server pages into a cache and window over it.
+        """
+        cache = context.user_data.get("rarbg_cache")
+        key = [search_query, category]
+        if not isinstance(cache, dict) or cache.get("key") != key:
+            cache = {"key": key, "items": [], "next_server_page": 0, "exhausted": False}
+
+        wanted = (page + 1) * PER_PAGE + 1
+        while len(cache["items"]) < wanted and not cache["exhausted"]:
+            batch = await self.crawler.search(
+                search_query, category=category, page=cache["next_server_page"]
+            )
+            cache["next_server_page"] += 1
+            seen = {item.get("id") for item in cache["items"]}
+            fresh = [item for item in batch if item.get("id") and item["id"] not in seen]
+            if not fresh:
+                cache["exhausted"] = True
+                break
+            cache["items"].extend(fresh)
+
+        context.user_data["rarbg_cache"] = cache
+
+        start = page * PER_PAGE
+        window = cache["items"][start : start + PER_PAGE]
+        has_more = len(cache["items"]) > start + PER_PAGE
+        return window, has_more
+
     async def rarbg_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         message = update.message
@@ -57,6 +99,7 @@ class RARBGHandlers:
         context.user_data.pop("rarbg_query", None)
         context.user_data.pop("rarbg_category", None)
         context.user_data.pop("rarbg_page", None)
+        context.user_data.pop("rarbg_cache", None)
         await self._cleanup_results(context, message.chat.id)
 
         await message.reply_text(
@@ -90,14 +133,14 @@ class RARBGHandlers:
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
 
-        try:
-            category, search_query = query.data.removeprefix("rarbg_cat_").split("_", 1)
-        except ValueError:
-            await query.edit_message_text(self._lang(user_id, "error_occurred"))
+        category = query.data.removeprefix("rarbg_cat_")
+        category = "" if category == "all" else category
+        search_query = self._pending_query(context)
+        if not search_query:
+            await query.edit_message_text(self._lang(user_id, "rarbg_send_query"))
+            context.user_data["rarbg_waiting_for_query"] = True
             return
 
-        category = "" if category == "all" else category
-        search_query = unquote(search_query)
         await self._cleanup_results(context, chat_id)
         await query.edit_message_text(
             f"⏳ {self._lang(user_id, 'searching_query').format(search_query)}"
@@ -113,15 +156,19 @@ class RARBGHandlers:
         chat_id = update.effective_chat.id
 
         try:
-            category, rest = query.data.removeprefix("rarbg_page_").split("_", 1)
-            search_query, page_str = rest.rsplit("_", 1)
+            category, page_str = query.data.removeprefix("rarbg_page_").rsplit("_", 1)
             page = int(page_str)
         except ValueError:
             await query.edit_message_text(self._lang(user_id, "error_occurred"))
             return
 
         category = "" if category == "all" else category
-        search_query = unquote(search_query)
+        search_query = self._pending_query(context)
+        if not search_query:
+            await query.edit_message_text(self._lang(user_id, "rarbg_send_query"))
+            context.user_data["rarbg_waiting_for_query"] = True
+            return
+
         await self._cleanup_results(context, chat_id)
         await self._render_page(
             context, chat_id, user_id, query.message, search_query, category, page
@@ -138,6 +185,7 @@ class RARBGHandlers:
         context.user_data.pop("rarbg_query", None)
         context.user_data.pop("rarbg_category", None)
         context.user_data.pop("rarbg_page", None)
+        context.user_data.pop("rarbg_cache", None)
 
         await query.edit_message_text(
             f"🧲 <b>{self._lang(user_id, 'rarbg_welcome')}</b>\n\n"
@@ -249,12 +297,14 @@ class RARBGHandlers:
         page: int = 0,
     ):
         try:
-            all_results = await self.crawler.search(search_query, category=category, page=page)
+            results, has_more = await self._results_for_page(
+                context, search_query, category, page
+            )
         except RARBGVerificationError as exc:
             await header_message.edit_text(f"⚠️ {exc}")
             return
 
-        if not all_results:
+        if not results:
             await header_message.edit_text(
                 f"❌ {self._lang(user_id, 'no_results')}",
                 reply_markup=InlineKeyboardMarkup(
@@ -263,15 +313,13 @@ class RARBGHandlers:
             )
             return
 
-        results = all_results[:PER_PAGE]
         cat_name = {v: k for k, v in RARBGCrawler.CATEGORIES.items()}.get(category, "all")
         cat_label = RARBGCrawler.CATEGORY_LABELS.get(cat_name, "🌐 All")
-        has_more = len(all_results) >= PER_PAGE
 
         await header_message.edit_text(
             f"🔍 <b>{search_query}</b>  ·  {cat_label}  ·  <i>Page {page + 1}</i>\n"
             f"<i>{self._lang(user_id, 'rarbg_tap_download')}</i>",
-            reply_markup=rarbg_header_keyboard(search_query, category, page, has_more),
+            reply_markup=rarbg_header_keyboard(category, page, has_more),
         )
 
         result_ids = []
@@ -337,9 +385,11 @@ class RARBGHandlers:
             context.user_data["rarbg_waiting_for_query"] = True
             return True
 
+        context.user_data["rarbg_query"] = text
+        context.user_data.pop("rarbg_cache", None)
         await update.message.reply_text(
             f"🔍 {self._lang(user_id, 'select_category').format(text)}",
-            reply_markup=rarbg_categories_keyboard(text),
+            reply_markup=rarbg_categories_keyboard(),
             disable_web_page_preview=True,
         )
         return True

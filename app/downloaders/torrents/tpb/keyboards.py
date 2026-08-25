@@ -5,14 +5,20 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from app.downloaders.torrents.tpb.crawler import TPBCrawler
 
 
-def tpb_categories_keyboard(query: str) -> InlineKeyboardMarkup:
-    """Show TPB category buttons for a search query."""
+def tpb_categories_keyboard() -> InlineKeyboardMarkup:
+    """Show TPB category buttons.
+
+    The search query deliberately does not travel in callback_data: Telegram
+    caps that at 64 *bytes*, which a 40-character query blows past as soon as
+    it contains non-ASCII (a Persian query is 2 bytes per character). The
+    handler reads the pending query from user_data instead.
+    """
     buttons = []
     row = []
 
     for key, code in TPBCrawler.CATEGORIES.items():
         label = TPBCrawler.CATEGORY_LABELS.get(key, key)
-        callback = f"tpb_cat_{code}_{query[:40]}"
+        callback = f"tpb_cat_{code}"
         row.append(InlineKeyboardButton(text=label, callback_data=callback))
         if len(row) == 2:
             buttons.append(row)
@@ -47,7 +53,6 @@ def tpb_result_keyboard(torrent_id: str) -> InlineKeyboardMarkup:
 
 
 def tpb_header_keyboard(
-    query: str,
     category: str,
     page: int,
     has_more: bool,
@@ -59,7 +64,7 @@ def tpb_header_keyboard(
         nav_row.append(
             InlineKeyboardButton(
                 text="⬅️",
-                callback_data=f"tpb_page_{category}_{query[:36]}_{page - 1}",
+                callback_data=f"tpb_page_{category or '0'}_{page - 1}",
             )
         )
 
@@ -74,7 +79,7 @@ def tpb_header_keyboard(
         nav_row.append(
             InlineKeyboardButton(
                 text="➡️",
-                callback_data=f"tpb_page_{category}_{query[:36]}_{page + 1}",
+                callback_data=f"tpb_page_{category or '0'}_{page + 1}",
             )
         )
 

@@ -96,17 +96,22 @@ class TPBHandlers:
     # Callbacks
     # ------------------------------------------------------------------
 
+    def _pending_query(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """The query the user typed, kept in user_data rather than callback_data."""
+        return (context.user_data.get("tpb_query") or "").strip()
+
     async def category_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle tpb_cat_<code>_<query>."""
+        """Handle tpb_cat_<code>."""
         query = update.callback_query
         await query.answer()
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
 
-        try:
-            _, category, search_query = query.data.split("_", 2)
-        except ValueError:
-            await query.edit_message_text(self._lang(user_id, "error_occurred"))
+        category = query.data.removeprefix("tpb_cat_")
+        search_query = self._pending_query(context)
+        if not search_query:
+            await query.edit_message_text(self._lang(user_id, "tpb_send_query"))
+            context.user_data["tpb_waiting_for_query"] = True
             return
 
         await self._cleanup_results(context, chat_id)
@@ -125,17 +130,23 @@ class TPBHandlers:
         )
 
     async def page_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle tpb_page_<cat>_<query>_<page>."""
+        """Handle tpb_page_<cat>_<page>."""
         query = update.callback_query
         await query.answer()
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
 
         try:
-            _, category, search_query, page_str = query.data.split("_", 3)
+            category, page_str = query.data.removeprefix("tpb_page_").rsplit("_", 1)
             page = int(page_str)
         except ValueError:
             await query.edit_message_text(self._lang(user_id, "error_occurred"))
+            return
+
+        search_query = self._pending_query(context)
+        if not search_query:
+            await query.edit_message_text(self._lang(user_id, "tpb_send_query"))
+            context.user_data["tpb_waiting_for_query"] = True
             return
 
         await self._cleanup_results(context, chat_id)
@@ -320,7 +331,6 @@ class TPBHandlers:
             f"🔍 <b>{search_query}</b>  ·  {cat_label}  ·  <i>Page {page + 1}</i>\n"
             f"<i>{self._lang(user_id, 'tpb_tap_download')}</i>",
             reply_markup=tpb_header_keyboard(
-                search_query,
                 category,
                 page,
                 has_more,
@@ -405,9 +415,10 @@ class TPBHandlers:
             context.user_data["tpb_waiting_for_query"] = True
             return True
 
+        context.user_data["tpb_query"] = text
         await update.message.reply_text(
             f"🔍 {self._lang(user_id, 'select_category').format(text)}",
-            reply_markup=tpb_categories_keyboard(text),
+            reply_markup=tpb_categories_keyboard(),
             disable_web_page_preview=True,
         )
         return True

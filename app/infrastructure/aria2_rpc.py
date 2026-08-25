@@ -135,10 +135,16 @@ class Aria2RpcClient:
                     break
                 await asyncio.sleep(0.2)
 
+            # Only drain stderr once the process is gone. On a live process
+            # read() waits for EOF, which never arrives, so the intended error
+            # below was never raised and startup hung forever instead.
             stderr = ""
-            if self._process.stderr:
-                raw = await self._process.stderr.read()
-                stderr = raw.decode("utf-8", errors="replace").strip()
+            if self._process.stderr and self._process.returncode is not None:
+                try:
+                    raw = await asyncio.wait_for(self._process.stderr.read(), timeout=5)
+                    stderr = raw.decode("utf-8", errors="replace").strip()
+                except TimeoutError:
+                    stderr = ""
 
             message = "aria2 RPC daemon did not become ready"
             if stderr:

@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import os
 import shutil
 import time
 import uuid
@@ -12,9 +13,9 @@ from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlsplit
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, g, jsonify, render_template, request, send_file
 from flask_cors import CORS
 
 from app.services.batch_download import BatchDownloadMode, normalize_batch_download_mode
@@ -25,6 +26,29 @@ from app.services.user_settings import (
     validate_compression_level,
     validate_part_size,
 )
+
+
+# Telegram signs initData with a key derived from the bot token. Signatures older
+# than this are rejected so a captured header cannot be replayed indefinitely.
+INIT_DATA_MAX_AGE_SECONDS = 24 * 60 * 60
+
+# Fields Telegram excludes from the data-check-string.
+_INIT_DATA_SIGNATURE_FIELDS = frozenset({"hash", "signature"})
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _origin_of(url: str) -> str | None:
+    """Return the scheme://host[:port] origin of ``url``, or None if unusable."""
+    parts = urlsplit((url or "").strip())
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def create_web_app(
@@ -42,6 +66,9 @@ def create_web_app(
     upload_selected: Callable[..., Any] | None = None,
     zip_selected: Callable[..., Any] | None = None,
     default_chat_id: int | None = None,
+    web_app_url: str = "",
+    require_auth: bool | None = None,
+    allowed_user_ids: frozenset[int] | set[int] | None = None,
 ) -> Flask:
     """
     Create and configure Flask app for Telegram mini-app.
@@ -49,9 +76,13 @@ def create_web_app(
     Args:
         download_dir: Directory containing downloaded files
         bot_token: Telegram bot token for validating initData
+        web_app_url: Public URL the mini-app is served from; used to scope CORS
+        require_auth: Enforce Telegram initData signatures on every /api route.
+            Defaults to the WEB_APP_REQUIRE_AUTH env var (enabled).
+        allowed_user_ids: When non-empty, only these Telegram user IDs may call
+            the API, even with a valid signature.
     """
     app = Flask(__name__, template_folder="templates", static_folder="static")
-    CORS(app)
     app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
 
     # Store config
@@ -68,51 +99,106 @@ def create_web_app(
     app.upload_selected = upload_selected
     app.zip_selected = zip_selected
     app.default_chat_id = default_chat_id
+    app.require_auth = (
+        _env_flag("WEB_APP_REQUIRE_AUTH", True) if require_auth is None else bool(require_auth)
+    )
+    app.allowed_user_ids = frozenset(allowed_user_ids or ())
+
+    # The mini-app page is served by this same app, so cross-origin access is
+    # never needed. Allowing "*" (the old behaviour) let any website the user
+    # visited read every /api response, including the file listing.
+    allowed_origin = _origin_of(web_app_url or os.getenv("WEB_APP_URL", ""))
+    if allowed_origin:
+        CORS(app, resources={r"/api/*": {"origins": [allowed_origin]}})
+
+    if not app.require_auth:
+        app.logger.warning(
+            "WEB_APP_REQUIRE_AUTH is disabled: the mini-app API is unauthenticated. "
+            "Only do this when the server is bound to localhost and not tunnelled."
+        )
 
     # Ensure download directory exists
     app.download_dir.mkdir(parents=True, exist_ok=True)
 
-    def validate_telegram_init_data(init_data: str) -> bool:
-        """Validate Telegram Web App initData signature."""
-        if not init_data:
-            return False
+    def verify_telegram_init_data(init_data: str) -> dict[str, str] | None:
+        """Verify a Telegram Web App initData signature.
+
+        Returns the decoded fields when the signature is valid and fresh,
+        otherwise None. Per Telegram's spec the data-check-string is built from
+        the *URL-decoded* values, sorted by key, with the signature fields
+        removed - the decoding step is what the previous implementation missed,
+        so it would have rejected every legitimate request.
+        """
+        if not init_data or not app.bot_token:
+            return None
 
         try:
-            # Parse init data
-            params = dict(param.split("=", 1) for param in init_data.split("&"))
+            params = dict(parse_qsl(init_data, keep_blank_values=True))
+        except ValueError:
+            return None
 
-            if "hash" not in params:
-                return False
+        hash_value = params.get("hash")
+        if not hash_value:
+            return None
 
-            hash_value = params.pop("hash")
+        data_check_string = "\n".join(
+            f"{key}={value}"
+            for key, value in sorted(params.items())
+            if key not in _INIT_DATA_SIGNATURE_FIELDS
+        )
 
-            # Sort and format data to check
-            data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
+        secret_key = hmac.new(b"WebAppData", app.bot_token.encode(), hashlib.sha256).digest()
+        calculated_hash = hmac.new(
+            secret_key, data_check_string.encode(), hashlib.sha256
+        ).hexdigest()
 
-            # Create HMAC
-            secret_key = hmac.new(b"WebAppData", app.bot_token.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(calculated_hash, hash_value):
+            return None
 
-            calculated_hash = hmac.new(
-                secret_key, data_check_string.encode(), hashlib.sha256
-            ).hexdigest()
+        # Reject stale signatures so a captured header cannot be replayed forever.
+        try:
+            auth_age = time.time() - int(params.get("auth_date", "0"))
+        except (TypeError, ValueError):
+            return None
+        if auth_age < -60 or auth_age > INIT_DATA_MAX_AGE_SECONDS:
+            return None
 
-            return calculated_hash == hash_value
-        except Exception as e:
-            print(f"Validation error: {e}")
-            return False
+        return params
+
+    def validate_telegram_init_data(init_data: str) -> bool:
+        """Boolean wrapper around verify_telegram_init_data."""
+        return verify_telegram_init_data(init_data) is not None
+
+    def _user_from_params(params: dict[str, str] | None) -> dict[str, Any] | None:
+        if not params:
+            return None
+        raw_user = params.get("user")
+        if not raw_user:
+            return None
+        try:
+            user = json.loads(raw_user)
+        except (TypeError, ValueError):
+            return None
+        return user if isinstance(user, dict) else None
 
     def parse_telegram_user(init_data: str) -> dict[str, Any] | None:
-        """Parse the Telegram user object from initData without trusting it for auth."""
+        """Parse the Telegram user from initData WITHOUT verifying the signature."""
         if not init_data:
             return None
         try:
             params = dict(parse_qsl(init_data, keep_blank_values=True))
-            raw_user = params.get("user")
-            return json.loads(raw_user) if raw_user else None
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except ValueError:
             return None
+        return _user_from_params(params)
 
     def get_request_user() -> dict[str, Any] | None:
+        """Return the Telegram user for this request.
+
+        When auth is enforced this is the *verified* user recorded by
+        require_telegram_auth; the raw header is never trusted.
+        """
+        if app.require_auth:
+            return getattr(g, "telegram_user", None)
         return parse_telegram_user(request.headers.get("X-Init-Data", ""))
 
     def secure_path(path: str = "") -> Path:
@@ -142,15 +228,27 @@ def create_web_app(
         asyncio.run_coroutine_threadsafe(coro, app.bot_loop)
 
     def require_telegram_auth(f):
-        """Decorator to validate Telegram auth for API endpoints."""
+        """Reject API calls without a valid, fresh Telegram initData signature."""
 
         @wraps(f)
         def decorated_function(*args, **kwargs):
-            # Optional: Enable this for production
-            # init_data = request.headers.get('X-Init-Data', '')
-            # if not validate_telegram_init_data(init_data):
-            #     return jsonify({'error': 'Unauthorized'}), 401
+            if not app.require_auth:
+                g.telegram_user = parse_telegram_user(request.headers.get("X-Init-Data", ""))
+                return f(*args, **kwargs)
 
+            params = verify_telegram_init_data(request.headers.get("X-Init-Data", ""))
+            if params is None:
+                return jsonify({"error": "Unauthorized"}), 401
+
+            user = _user_from_params(params)
+            user_id = user.get("id") if user else None
+            if not user_id:
+                return jsonify({"error": "Unauthorized"}), 401
+
+            if app.allowed_user_ids and int(user_id) not in app.allowed_user_ids:
+                return jsonify({"error": "Forbidden"}), 403
+
+            g.telegram_user = user
             return f(*args, **kwargs)
 
         return decorated_function
@@ -230,27 +328,31 @@ def create_web_app(
 
         return files, total_size
 
-    def request_user_id() -> int:
-        data = request.get_json(silent=True) or {}
+    def _identity(field: str) -> int:
+        """Resolve the acting Telegram ID for this request.
+
+        With auth enforced, only the signed initData user counts. Honouring a
+        client-supplied user_id/chat_id would let any caller aim uploads and
+        downloads at an arbitrary chat.
+        """
         user = get_request_user() or {}
+        if app.require_auth:
+            return int(user.get("id") or 0)
+
+        data = request.get_json(silent=True) or {}
         return int(
-            data.get("user_id")
-            or request.args.get("user_id")
+            data.get(field)
+            or request.args.get(field)
             or user.get("id")
             or app.default_chat_id
             or 0
         )
 
+    def request_user_id() -> int:
+        return _identity("user_id")
+
     def request_chat_id() -> int:
-        data = request.get_json(silent=True) or {}
-        user = get_request_user() or {}
-        return int(
-            data.get("chat_id")
-            or request.args.get("chat_id")
-            or user.get("id")
-            or app.default_chat_id
-            or 0
-        )
+        return _identity("chat_id")
 
     def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -431,13 +533,11 @@ def create_web_app(
                     break
 
                 try:
-                    if (
-                        query
-                        and query in file_path.name.lower()
-                        or file_type
-                        and file_path.suffix.lower() == f".{file_type}"
-                    ):
-                        results.append(get_file_info(file_path))
+                    if query and query not in file_path.name.lower():
+                        continue
+                    if file_type and file_path.suffix.lower() != f".{file_type}":
+                        continue
+                    results.append(get_file_info(file_path))
                 except (OSError, PermissionError):
                     continue
 
@@ -514,7 +614,7 @@ def create_web_app(
             )
 
         except Exception as e:
-            return jsonify({"error": f"Archive creation failed: {str(e)}"}), 500
+            return jsonify({"error": f"Archive creation failed: {e}"}), 500
 
     @app.route("/api/files/zip-upload", methods=["POST"])
     @require_telegram_auth
@@ -787,6 +887,7 @@ def create_web_app(
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/thumbnail/<filename>")
+    @require_telegram_auth
     def get_thumbnail(filename: str):
         """Get thumbnail for image files."""
         try:
