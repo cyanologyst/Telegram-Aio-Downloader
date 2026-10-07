@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -206,6 +207,9 @@ API_ID = parse_env_int("API_ID", 0)
 API_HASH = os.getenv("API_HASH", "").strip()
 
 PYRO_SESSION_NAME = os.getenv("PYRO_SESSION_NAME", "pyrogram_uploader")
+# Optional: a Pyrogram/Kurigram session string, for hosts where an interactive
+# login (phone number + code) is not possible. Treat it like a password.
+PYRO_SESSION_STRING = os.getenv("PYRO_SESSION_STRING", "").strip()
 ARIA2_BIN = os.getenv("ARIA2_BIN", "aria2c")
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 DENO_BIN = os.getenv("DENO_BIN", "").strip()
@@ -3643,18 +3647,42 @@ async def send_with_flood_wait_handling(send_coroutine, max_retries: int = 5):
             raise
 
 
+class PyrogramUnavailable(RuntimeError):
+    """No Pyrogram user login is available; the bot runs in bot-only mode."""
+
+
+def pyrogram_unavailable_reason() -> str | None:
+    """Why the Pyrogram user client can't be used, or None when it can."""
+    if not API_ID or not API_HASH:
+        return "API_ID/API_HASH are not set"
+    if PYRO_SESSION_STRING or (BASE_DIR / f"{PYRO_SESSION_NAME}.session").exists():
+        return None
+    if sys.stdin is not None and sys.stdin.isatty():
+        return None  # first run in a terminal: Pyrogram asks for phone and code
+    return (
+        "there is no Pyrogram login yet (run `python main.py` once in a terminal to "
+        "log in, or set PYRO_SESSION_STRING)"
+    )
+
+
 async def get_pyrogram_client():
     global pyro_client
 
-    if not API_ID or not API_HASH:
-        raise RuntimeError("API_ID or API_HASH not configured")
-
     if pyro_client is None:
+        reason = pyrogram_unavailable_reason()
+        if reason:
+            raise PyrogramUnavailable(reason)
+        session_kwargs = (
+            {"session_string": PYRO_SESSION_STRING, "in_memory": True}
+            if PYRO_SESSION_STRING
+            else {}
+        )
         pyro_client = Client(
             PYRO_SESSION_NAME,
             api_id=API_ID,
             api_hash=API_HASH,
             workdir=str(BASE_DIR),
+            **session_kwargs,
         )
         await pyro_client.start()
 
@@ -3845,9 +3873,34 @@ async def update_upload_progress(app: Application, chat_id: int, message_id: int
         logger.debug("Upload progress edit failed: %s", exc)
 
 
+async def _send_via_bot_api(app: Application, job: dict, rel_path: str) -> None:
+    """Bot-only mode: send a file of up to 50 MB to the chat through the Bot API."""
+    full = safe_join(DOWNLOAD_DIR, rel_path)
+    size = full.stat().st_size
+    if size > BOT_MAX_DOCUMENT_BYTES:
+        raise RuntimeError(
+            f"{full.name} is {human_size(size)}. Without the Pyrogram login only files up to "
+            "50 MB can be sent; set up the login to upload bigger files to Saved Messages."
+        )
+    with open(full, "rb") as fh:
+        await app.bot.send_document(
+            chat_id=job["chat_id"],
+            document=fh,
+            caption=build_upload_caption(rel_path),
+            read_timeout=300,
+            write_timeout=300,
+        )
+    job["via_bot"] = True
+
+
 async def _upload_one_file(app: Application, upload_id: str, rel_path: str, label: str) -> bool:
     """Upload one file (split into parts above the size limit). False if cancelled."""
     job = upload_jobs[upload_id]
+    try:
+        await get_pyrogram_client()
+    except PyrogramUnavailable:
+        await _send_via_bot_api(app, job, rel_path)
+        return True
     chunks = split_file_into_chunks(rel_path)
     try:
         for chunk_path, part, parts in chunks:
@@ -3919,7 +3972,8 @@ async def upload_files_via_pyrogram(
         )
     else:
         job["status"] = "completed"
-        text = f"{ICON_OK} Upload complete\n\n{title}\nSent to: Saved Messages"
+        destination = "this chat" if job.get("via_bot") else "Saved Messages"
+        text = f"{ICON_OK} Upload complete\n\n{title}\nSent to: {destination}"
         if total_files > 1:
             text += f"\nFiles: {sent}/{total_files}"
     try:
@@ -5853,10 +5907,9 @@ async def post_init(app: Application):
     # Limit to 2 workers to prevent bot overload from concurrent zip operations
     zip_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="zip_worker")
     
-    client = await get_pyrogram_client()
-    
     # FIX #10: Verify pyrogram is logged in as user account (not bot)
     try:
+        client = await get_pyrogram_client()
         me = await client.get_me()
         if me.is_bot:
             raise RuntimeError(
@@ -5866,6 +5919,12 @@ async def post_init(app: Application):
                 f"Then log in with your personal Telegram account."
             )
         logger.info(f"✅ Pyrogram logged in as user: @{me.username}")
+    except PyrogramUnavailable as exc:
+        logger.warning(
+            "Running in bot-only mode because %s. Files up to 50 MB are sent through the "
+            "Bot API; bigger uploads and forwarded-media capture need the Pyrogram login.",
+            exc,
+        )
     except Exception as e:
         logger.warning(f"Could not verify pyrogram user account: {e}")
     
@@ -5973,7 +6032,7 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN missing")
     if not API_ID or not API_HASH:
-        raise RuntimeError("API_ID or API_HASH missing")
+        logger.warning("API_ID/API_HASH missing: uploads over 50 MB will not be available")
     if not ALLOWED_USER_IDS:
         raise RuntimeError(
             "ALLOWED_USER_IDS is empty. Set it in .env to your numeric Telegram user ID "

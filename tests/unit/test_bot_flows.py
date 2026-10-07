@@ -73,7 +73,11 @@ async def test_upload_cancel_stops_the_transfer_and_skips_remaining_files(monkey
         tb.cancel_upload(next(iter(tb.upload_jobs)))
         await progress_callback(5, 10)  # raises StopTransmission once cancelled
 
+    async def logged_in():
+        return object()
+
     monkeypatch.setattr(tb, "pyrogram_send_file", fake_send)
+    monkeypatch.setattr(tb, "get_pyrogram_client", logged_in)
     context = make_context()
 
     job = await tb.upload_files_via_pyrogram(
@@ -398,3 +402,40 @@ async def test_cancel_command_leaves_input_modes(monkeypatch):
 
     await tb.cancel_input_cmd(text_update(context, "/cancel"), context)
     assert context.bot.texts()[-1].startswith("Nothing to cancel")
+
+
+# ---------------------------------------------------------------- bot-only mode
+
+
+def test_no_pyrogram_login_is_reported_not_prompted(monkeypatch, tmp_path):
+    monkeypatch.setattr(tb, "API_ID", 1)
+    monkeypatch.setattr(tb, "API_HASH", "hash")
+    monkeypatch.setattr(tb, "PYRO_SESSION_STRING", "")
+    monkeypatch.setattr(tb, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(tb.sys, "stdin", None)
+
+    assert "no Pyrogram login" in tb.pyrogram_unavailable_reason()
+    monkeypatch.setattr(tb, "PYRO_SESSION_STRING", "abc")
+    assert tb.pyrogram_unavailable_reason() is None
+    monkeypatch.setattr(tb, "API_HASH", "")
+    assert "API_ID/API_HASH" in tb.pyrogram_unavailable_reason()
+
+
+async def test_bot_only_mode_sends_small_files_and_explains_big_ones(monkeypatch):
+    (tb.DOWNLOAD_DIR / "small.txt").write_bytes(b"x" * 10)
+    (tb.DOWNLOAD_DIR / "big.bin").write_bytes(b"x" * 100)
+    monkeypatch.setattr(tb, "BOT_MAX_DOCUMENT_BYTES", 50)
+
+    async def unavailable():
+        raise tb.PyrogramUnavailable("no login")
+
+    monkeypatch.setattr(tb, "get_pyrogram_client", unavailable)
+    context = make_context()
+
+    job = await tb.upload_files_via_pyrogram(context.application, 1, 2, ["small.txt"], title="t")
+    assert job["status"] == "completed"
+    assert context.bot.called("send_document")
+    assert "Sent to: this chat" in context.bot.called("edit_message_text")[-1].kwargs["text"]
+
+    with pytest.raises(RuntimeError, match="only files up to"):
+        await tb.upload_files_via_pyrogram(context.application, 1, 3, ["big.bin"], title="t")
