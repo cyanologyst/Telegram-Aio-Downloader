@@ -24,7 +24,7 @@ An asynchronous Telegram bot and Mini App for downloading, organizing, processin
 - Cookies (for YouTube's "confirm you're not a bot", private or age-restricted videos) can be sent to the bot as a file
 - Optional automatic upload to Saved Messages when a download finishes
 - Unified torrent search across Prowlarr, The Pirate Bay and RARBG mirrors
-- Compact file browser with multi-select upload, zip and delete
+- File browser where every file is a button: Recent downloads first, Find, sort, and a card per file with Send here / Saved Messages / Zip / Rename / Delete
 - The job list survives restarts; torrent and direct downloads resume
 - Telegram Mini App for downloads, files, storage, uploads, archives, and settings
 

@@ -1784,7 +1784,8 @@ def get_all_files_in_folder(rel_path: str):
             try:
                 if p.is_file():
                     rel = str(p.relative_to(DOWNLOAD_DIR))
-                    out.append(rel)
+                    if not is_internal(rel):
+                        out.append(rel)
             except Exception:
                 pass
     return sorted(out)
@@ -1973,6 +1974,18 @@ def build_queue_text(user_id: int = None):
 # File browser
 # =========================================================
 
+# Kept out of the file browser, archives and bulk deletes: aria2's RPC secret
+# and other dotfiles, and the .torrent files aria2 is still using.
+INTERNAL_ROOT_NAMES = {"_torrents"}
+
+
+def is_internal(rel_path: str) -> bool:
+    parts = [p for p in Path(rel_path).parts if p not in ("", ".")]
+    return bool(parts) and (
+        parts[0] in INTERNAL_ROOT_NAMES or any(p.startswith(".") for p in parts)
+    )
+
+
 def list_dir(rel_path: str):
     full = safe_join(DOWNLOAD_DIR, rel_path)
     if not full.is_dir():
@@ -1980,13 +1993,16 @@ def list_dir(rel_path: str):
 
     items = []
     for entry in full.iterdir():
+        entry_rel = os.path.join(rel_path, entry.name) if rel_path else entry.name
+        if is_internal(entry_rel):
+            continue
         try:
             st = entry.stat()
             is_dir = entry.is_dir()
             count = 0
             if is_dir:
                 try:
-                    count = sum(1 for _ in os.scandir(entry))
+                    count = sum(1 for e in os.scandir(entry) if not e.name.startswith("."))
                 except OSError:
                     count = 0
             items.append({
@@ -2114,22 +2130,189 @@ def build_organize_preview(rel_path: str, page: int, plan: OrganizePlan):
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
+files_sort: dict[int, str] = {}  # chat id -> "new" | "name" | "size"
+FIND_LIMIT = 30
+
+
+def _entry_for(rel_path: str) -> dict | None:
+    full = DOWNLOAD_DIR / rel_path
+    try:
+        st = full.stat()
+    except OSError:
+        return None
+    is_dir = full.is_dir()
+    count = 0
+    if is_dir:
+        try:
+            count = sum(1 for e in os.scandir(full) if not e.name.startswith("."))
+        except OSError:
+            pass
+    return {
+        "name": full.name, "rel_path": rel_path, "is_dir": is_dir,
+        "size": 0 if is_dir else st.st_size, "mtime": st.st_mtime, "count": count,
+    }
+
+
+def recent_entries(limit: int = file_views.RECENT_COUNT) -> list[dict]:
+    """The latest finished downloads, newest first; recent files fill any gap."""
+    picked: list[dict] = []
+    seen: set[str] = set()
+    finished = sorted(
+        (j for j in download_jobs.values() if j.get("status") == "completed"),
+        key=lambda j: j.get("finished_at") or 0,
+        reverse=True,
+    )
+    for job in finished:
+        for rel in job_outputs(job):
+            entry = _entry_for(rel)
+            if entry and rel not in seen and not is_internal(rel):
+                seen.add(rel)
+                picked.append(entry)
+            if len(picked) >= limit:
+                return picked
+    newest: list[tuple[float, str]] = []
+    for count, rel in enumerate(get_all_files_in_folder("")):
+        if count > 5000:
+            break
+        try:
+            newest.append(((DOWNLOAD_DIR / rel).stat().st_mtime, rel))
+        except OSError:
+            continue
+    for _, rel in sorted(newest, reverse=True):
+        if len(picked) >= limit:
+            break
+        if rel in seen or any(rel.startswith(s.rstrip("/") + "/") for s in seen):
+            continue
+        entry = _entry_for(rel)
+        if entry:
+            seen.add(rel)
+            picked.append(entry)
+    return picked
+
+
+def browser_entries(rel_path: str, order: str) -> list[dict]:
+    """A folder's visible entries: empty folders hidden, sorted."""
+    entries = [e for e in list_dir(rel_path) if not (e["is_dir"] and not e["count"])]
+    return file_views.sort_entries(entries, order)
+
+
 async def show_folder(message, rel_path: str, page: int = 0, *, edit: bool = True):
-    entries = await asyncio.to_thread(list_dir, rel_path)
+    order = files_sort.get(message.chat_id, "new")
+    entries = await asyncio.to_thread(browser_entries, rel_path, order)
+    recent = None
+    free = None
+    if not rel_path and page == 0:
+        recent = await asyncio.to_thread(recent_entries)
+        on_first_page = {e["rel_path"] for e in entries[: file_views.PER_PAGE]}
+        if all(e["rel_path"] in on_first_page for e in recent):
+            recent = None  # everything recent is already right there
+        try:
+            free = shutil.disk_usage(DOWNLOAD_DIR).free
+        except OSError:
+            free = None
     await show_screen(
-        message, file_views.browser_screen(rel_path, entries, page, encode_path), edit=edit
+        message,
+        file_views.browser_screen(
+            rel_path, entries, page, encode_path, recent=recent, free_bytes=free, order=order
+        ),
+        edit=edit,
     )
 
 
-async def show_file(message, rel_path: str, page: int = 0):
+async def show_file(message, rel_path: str, page: int = 0, *, edit: bool = True):
     info = await asyncio.to_thread(file_info, rel_path)
     if info["is_dir"]:
-        await show_folder(message, rel_path, 0)
+        await show_folder(message, rel_path, 0, edit=edit)
         return
     await show_screen(message, file_views.file_screen(
         rel_path, info["size"], info["mtime"], page, encode_path,
         is_video=is_video_file(info["name"]),
-    ))
+        can_send_here=info["size"] <= BOT_MAX_DOCUMENT_BYTES,
+        has_saved_messages=pyrogram_unavailable_reason() is None,
+        send_limit=BOT_MAX_DOCUMENT_BYTES,
+    ), edit=edit)
+
+
+def find_files(query: str, limit: int = FIND_LIMIT) -> list[dict]:
+    """Files and folders anywhere in Download/ whose name contains ``query``."""
+    needle = query.casefold().strip()
+    matches: list[dict] = []
+    for root, dirs, files in os.walk(DOWNLOAD_DIR):
+        rel_root = os.path.relpath(root, DOWNLOAD_DIR)
+        rel_root = "" if rel_root == "." else rel_root
+        dirs[:] = [d for d in dirs if not is_internal(os.path.join(rel_root, d))]
+        for name in dirs + files:
+            rel = os.path.join(rel_root, name) if rel_root else name
+            if is_internal(rel):
+                continue
+            if needle in name.casefold() or needle in file_views.display_name(name).casefold():
+                entry = _entry_for(rel)
+                if entry:
+                    matches.append(entry)
+    matches.sort(key=lambda e: -float(e.get("mtime") or 0))
+    return matches[:limit]
+
+
+def rename_file(rel_path: str, new_name: str) -> str:
+    """Rename a file in place; returns the new relative path."""
+    full = safe_join(DOWNLOAD_DIR, rel_path)
+    if not full.is_file():
+        raise FileNotFoundError(rel_path)
+    name = " ".join(new_name.split())
+    if not name or name in (".", "..") or name.startswith(".") or re.search(r'[/\\\x00]', name):
+        raise ValueError("Use a plain name: no slashes, and not starting with a dot.")
+    if len(name.encode()) > 240:
+        raise ValueError("That name is too long.")
+    if not Path(name).suffix and full.suffix:
+        name += full.suffix
+    target = full.with_name(name)
+    if target.exists():
+        raise ValueError(f"There is already a file called “{name}” here.")
+    full.rename(target)
+    return str(target.relative_to(DOWNLOAD_DIR))
+
+
+async def send_file_here(app: Application, chat_id: int, rel_path: str) -> None:
+    """Send a file of up to 50 MB into the chat, as a video, song, photo or GIF when it is one."""
+    full = safe_join(DOWNLOAD_DIR, rel_path)
+    size = full.stat().st_size
+    if size > BOT_MAX_DOCUMENT_BYTES:
+        raise RuntimeError(f"{full.name} is {human_size(size)}; the chat limit is 50 MB.")
+    ext = full.suffix.lower()
+    caption = shorten(file_views.display_name(full.name), 200)
+    kwargs = {"chat_id": chat_id, "caption": caption, "read_timeout": 300, "write_timeout": 300}
+    info = await asyncio.to_thread(animation.probe, full, FFPROBE_BIN) if ext in animation.VIDEO_SUFFIXES else None
+    with open(full, "rb") as fh:
+        if ext == ".gif" or (info and animation.is_gif_like(full, info)):
+            await app.bot.send_animation(animation=fh, **kwargs)
+        elif ext in file_views.VIDEO_EXTS and ext in (".mp4", ".mov", ".m4v"):
+            await app.bot.send_video(
+                video=fh, supports_streaming=True,
+                width=getattr(info, "width", None) or None,
+                height=getattr(info, "height", None) or None,
+                duration=int(getattr(info, "duration", 0) or 0) or None,
+                **kwargs,
+            )
+        elif ext in (".mp3", ".m4a"):
+            await app.bot.send_audio(audio=fh, **kwargs)
+        elif ext in (".jpg", ".jpeg", ".png", ".webp") and size <= 10 * 1024 * 1024:
+            await app.bot.send_photo(photo=fh, **kwargs)
+        else:
+            await app.bot.send_document(document=fh, **kwargs)
+
+
+FILES_WAIT_SECONDS = 600
+
+
+def files_wait(context, kind: str) -> dict | None:
+    """The pending rename/find prompt of this kind, if it hasn't expired."""
+    wait = context.user_data.get("files_wait")
+    if not wait or wait.get("kind") != kind:
+        return None
+    if time.time() - wait.get("since", 0) > FILES_WAIT_SECONDS:
+        context.user_data.pop("files_wait", None)
+        return None
+    return wait
 
 
 def files_in_folder(rel_path: str) -> list[dict]:
@@ -5007,6 +5190,8 @@ async def cancel_input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cancelled.append("torrent file selection")
     if context.user_data.pop("cookies_wait", None):
         cancelled.append("cookies upload")
+    if wait := context.user_data.pop("files_wait", None):
+        cancelled.append("file rename" if wait.get("kind") == "rename" else "file search")
     text = (
         f"{ICON_OK} Cancelled: {', '.join(cancelled)}."
         if cancelled
@@ -5174,10 +5359,29 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # A link always wins over a pending search prompt; anything else typed
-    # while the search prompt is open is the search query.
+    # A link always wins over a pending search, rename or find prompt;
+    # anything else typed while one is open is its answer.
     is_link = lower.startswith("magnet:") or is_http_url(text)
     is_keyboard_button = text in KEYBOARD_LABELS
+    if is_link or is_keyboard_button:
+        context.user_data.pop("files_wait", None)
+    elif rename := files_wait(context, "rename"):
+        try:
+            new_rel = await asyncio.to_thread(rename_file, rename["rel"], text)
+        except (ValueError, FileNotFoundError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "That file is gone."
+            await update.message.reply_text(f"{ICON_FAIL} {reason} Send another name or /cancel.")
+            return
+        context.user_data.pop("files_wait", None)
+        await show_file(update.message, new_rel, rename.get("page", 0), edit=False)
+        return
+    elif files_wait(context, "find"):
+        context.user_data.pop("files_wait", None)
+        results = await asyncio.to_thread(find_files, text)
+        await show_screen(
+            update.message, file_views.find_results_screen(text, results, encode_path), edit=False
+        )
+        return
     if (is_link or is_keyboard_button) and search_ui is not None:
         search_ui.cancel_waiting(context)
     elif search_ui is not None and await search_ui.handle_text(update, context):
@@ -5780,11 +5984,60 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if action in ("list", "o", "file", "more", "send_yes", "send_folder_confirm", "send_folder_yes",
                           "delete_confirm", "delete_yes", "deleteall_confirm", "deleteall_yes", "zipdir",
-                          "sel", "manga_pdf", "conv_menu", "thumb_send"):
+                          "sel", "manga_pdf", "conv_menu", "thumb_send",
+                          "here", "zip1", "ren", "sort", "find"):
                 rel_path = decode_path(encoded.split(":", 1)[0]) if encoded else ""
 
             if action == "list":
+                context.user_data.pop("files_wait", None)
                 await show_folder(query.message, rel_path, page)
+
+            elif action == "sort":
+                files_sort[chat_id] = file_views.next_sort(files_sort.get(chat_id, "new"))
+                await show_folder(query.message, rel_path, page)
+
+            elif action == "find":
+                context.user_data["files_wait"] = {"kind": "find", "since": time.time()}
+                await show_screen(
+                    query.message, file_views.find_prompt_screen(rel_path, page, encode_path)
+                )
+
+            elif action == "here":
+                if not safe_join(DOWNLOAD_DIR, rel_path).is_file():
+                    raise FileNotFoundError(rel_path)
+                await answer_once(query, "Sending…")
+
+                async def report_send_error(exc: BaseException, name=rel_name(rel_path)):
+                    await context.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"{ICON_FAIL} Couldn't send {name}: {shorten(str(exc), 300)}",
+                    )
+
+                run_in_background(
+                    send_file_here(context.application, chat_id, rel_path),
+                    name="send-here",
+                    on_error=report_send_error,
+                )
+
+            elif action == "zip1":
+                full = safe_join(DOWNLOAD_DIR, rel_path)
+                if not full.is_file():
+                    raise FileNotFoundError(rel_path)
+                await ask_zip_name(
+                    query.message, user_id, chat_id, [full],
+                    default_name=full.stem[:100] or default_archive_name(),
+                    cancel_data=f"fb:file:{page}:{encoded}",
+                )
+
+            elif action == "ren":
+                if not safe_join(DOWNLOAD_DIR, rel_path).is_file():
+                    raise FileNotFoundError(rel_path)
+                context.user_data["files_wait"] = {
+                    "kind": "rename", "rel": rel_path, "page": page, "since": time.time(),
+                }
+                await show_screen(
+                    query.message, file_views.rename_prompt_screen(rel_path, page, encode_path)
+                )
 
             elif action == "o":
                 full = safe_join(DOWNLOAD_DIR, rel_path)
@@ -5796,6 +6049,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise FileNotFoundError(rel_path)
 
             elif action == "file":
+                context.user_data.pop("files_wait", None)
                 await show_file(query.message, rel_path, page)
 
             elif action == "more":

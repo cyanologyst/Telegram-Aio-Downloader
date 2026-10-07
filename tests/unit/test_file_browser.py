@@ -52,23 +52,44 @@ async def _drain():
 # ---------------------------------------------------------------- views
 
 
-def test_browser_lists_items_with_sizes_and_number_buttons():
-    tokens = {}
+def _labels(markup):
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+def test_every_item_is_a_button_with_a_tidy_name():
     entries = [
         {"name": "Show", "rel_path": "Show", "is_dir": True, "size": 0, "count": 3},
-        {"name": "a <b>.mkv", "rel_path": "a <b>.mkv", "is_dir": False, "size": 2048},
+        {
+            "name": "میـوزاده - https:⧸⧸t.co⧸64Y2 [2107907522107494400].mp4",
+            "rel_path": "x.mp4",
+            "is_dir": False,
+            "size": 2048,
+        },
     ]
 
-    text, markup = file_views.browser_screen(
-        "", entries, 0, lambda p: tokens.setdefault(p, f"t{len(tokens)}")
-    )
+    text, markup = file_views.browser_screen("", entries, 0, lambda p: p, free_bytes=10 * 1024**3)
 
-    assert "1. 📁 Show — 3 items" in text
-    assert "2. 🎞 a &lt;b&gt;.mkv — 2.0 KB" in text
-    labels = [b.text for row in markup.inline_keyboard for b in row]
-    assert labels[:2] == ["1", "2"]
+    assert text.startswith("📁 <b>Files</b> · 💽 10.0 GB free")
+    labels = _labels(markup)
+    assert labels[0] == "📁 \u2068Show\u2069 · 3 items"
+    assert labels[1] == "🎬 \u2068میـوزاده.mp4\u2069 · 2.0 KB"  # link and id dropped
     assert "⬆ Up" not in labels  # already at the root
-    assert len(markup.inline_keyboard) <= 4  # compact: numbers, select/more, nav
+    assert {"🔍 Find", "☑️ Select", "⇅ 🕘 Newest"} <= set(labels)
+
+
+def test_recent_downloads_come_first_at_the_root():
+    recent = [{"name": "song.mp3", "rel_path": "Spotify/song.mp3", "is_dir": False, "size": 5}]
+    entries = [{"name": "Spotify", "rel_path": "Spotify", "is_dir": True, "size": 0, "count": 1}]
+
+    _, markup = file_views.browser_screen("", entries, 0, lambda p: p, recent=recent)
+
+    labels = _labels(markup)
+    assert labels[:4] == [
+        "🕘 Recent downloads",
+        "🎵 \u2068song.mp3\u2069 · 5 B",
+        "📂 All files",
+        "📁 \u2068Spotify\u2069 · 1 items",
+    ]
 
 
 def test_browser_pages_and_empty_folder():
@@ -76,9 +97,23 @@ def test_browser_pages_and_empty_folder():
         {"name": f"f{i}", "rel_path": f"f{i}", "is_dir": False, "size": 1} for i in range(20)
     ]
     text, markup = file_views.browser_screen("x", entries, 2, lambda p: p)
-    assert "page 3/3" in text and "17. " in text
+    assert "page 3/3" in text and "◀ Prev" in _labels(markup)
+    assert "📁 <b>Files › x</b>" in text
     empty_text, _ = file_views.browser_screen("x", [], 0, lambda p: p)
     assert "This folder is empty." in empty_text
+
+
+def test_sorting():
+    entries = [
+        {"name": "b", "rel_path": "b", "is_dir": False, "size": 9, "mtime": 1},
+        {"name": "a", "rel_path": "a", "is_dir": False, "size": 1, "mtime": 3},
+        {"name": "z", "rel_path": "z", "is_dir": True, "size": 0, "mtime": 0},
+    ]
+    names = lambda order: [e["name"] for e in file_views.sort_entries(entries, order)]  # noqa: E731
+    assert names("new") == ["z", "a", "b"]
+    assert names("name") == ["z", "a", "b"]
+    assert names("size") == ["z", "b", "a"]
+    assert file_views.next_sort("new") == "name"
 
 
 # ---------------------------------------------------------------- browsing
@@ -90,20 +125,102 @@ async def test_open_folder_then_file_then_back(download_dir):
 
     await tb.files_cmd(text_update(context, "/files"), context)
     root = context.bot.calls[-1]
-    assert "1. 📁 Movies — 1 items" in root.kwargs["text"]
+    assert "📁 \u2068Movies\u2069 · 1 items" in [b.text for b in _buttons(root)]
 
-    await tb.on_button(callback_update(context, _button(root, "1").callback_data), context)
+    await tb.on_button(callback_update(context, _button(root, "Movies").callback_data), context)
     folder = context.bot.calls[-1]
-    assert "📁 <b>/Movies</b>" in folder.kwargs["text"]
+    assert "📁 <b>Files › Movies</b>" in folder.kwargs["text"]
 
-    await tb.on_button(callback_update(context, _button(folder, "1").callback_data), context)
+    await tb.on_button(callback_update(context, _button(folder, "clip.mp4").callback_data), context)
     detail = context.bot.calls[-1]
-    assert "🎞 <b>clip.mp4</b>" in detail.kwargs["text"]
+    assert "🎬 <b>clip.mp4</b>" in detail.kwargs["text"]
     labels = [b.text for b in _buttons(detail)]
-    assert "🎬 Convert" in labels and "📸 Thumbnails" in labels
+    assert {"📨 Send here", "🗜 Zip", "✏️ Rename", "🗑 Delete", "🎬 Convert"} <= set(labels)
+    assert "📤 Saved Messages" not in labels  # no Pyrogram login in tests
 
-    await tb.on_button(callback_update(context, _button(detail, "Folder").callback_data), context)
-    assert "📁 <b>/Movies</b>" in context.bot.texts()[-1]
+    await tb.on_button(callback_update(context, _button(detail, "Back").callback_data), context)
+    assert "📁 <b>Files › Movies</b>" in context.bot.texts()[-1]
+
+
+async def test_internal_files_and_empty_folders_are_hidden(download_dir):
+    _write(download_dir, ".aria2.rpc-secret", b"secret")
+    _write(download_dir, "_torrents/x.torrent")
+    (download_dir / "Adult").mkdir()
+    _write(download_dir, "Spotify/song.mp3")
+    context = make_context()
+
+    await tb.files_cmd(text_update(context, "/files"), context)
+    labels = " ".join(b.text for b in _buttons(context.bot.calls[-1]))
+
+    assert "Spotify" in labels and "song.mp3" in labels  # folder, and under Recent
+    assert "rpc-secret" not in labels and "_torrents" not in labels and "Adult" not in labels
+    assert tb.get_all_files_in_folder("") == ["Spotify/song.mp3"]
+
+
+async def test_send_here_sends_by_type(download_dir):
+    _write(download_dir, "song.mp3")
+    _write(download_dir, "notes.txt")
+    context = make_context()
+
+    for name in ("song.mp3", "notes.txt"):
+        await tb.send_file_here(context.application, 1, name)
+
+    assert [c.method for c in context.bot.calls] == ["send_audio", "send_document"]
+
+
+async def test_rename_keeps_the_extension(download_dir):
+    _write(download_dir, "Movies/clip [abc123xyz].mp4")
+    context = make_context()
+    token = tb.encode_path("Movies/clip [abc123xyz].mp4")
+
+    await tb.on_button(callback_update(context, f"fb:ren:0:{token}"), context)
+    assert "Send the new name" in context.bot.texts()[-1]
+
+    await tb.on_text(text_update(context, "a/b"), context)
+    assert "no slashes" in context.bot.texts()[-1]
+
+    await tb.on_text(text_update(context, "Holiday"), context)
+    assert (download_dir / "Movies/Holiday.mp4").exists()
+    assert "🎬 <b>Holiday.mp4</b>" in context.bot.texts()[-1]
+    assert "files_wait" not in context.user_data
+
+
+async def test_find_searches_every_folder(download_dir):
+    _write(download_dir, "Gallery/reddit/cat.gif")
+    _write(download_dir, "Spotify/Cat Stevens - Wild World.mp3")
+    _write(download_dir, "dog.jpg")
+    context = make_context()
+
+    await tb.on_button(callback_update(context, "fb:find:0:"), context)
+    await tb.on_text(text_update(context, "CAT"), context)
+
+    result = context.bot.calls[-1]
+    assert "2 matches" in result.kwargs["text"]
+    labels = [b.text for b in _buttons(result)]
+    assert any("cat.gif" in label for label in labels)
+    assert not any("dog" in label for label in labels)
+
+
+async def test_a_link_cancels_a_pending_rename(download_dir, monkeypatch):
+    _write(download_dir, "a.txt")
+    context = make_context()
+    await tb.on_button(callback_update(context, f"fb:ren:0:{tb.encode_path('a.txt')}"), context)
+
+    started = []
+
+    async def fake_aria2(app, chat_id, source, user_id=None):
+        started.append(source)
+        return {"id": 1, "name": "x", "status": "queued", "chat_id": chat_id}
+
+    async def no_card(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(tb, "start_aria2_download", fake_aria2)
+    monkeypatch.setattr(tb, "attach_job_card", no_card)
+    await tb.on_text(text_update(context, "magnet:?xt=urn:btih:abc&dn=x"), context)
+
+    assert started and (download_dir / "a.txt").exists()
+    assert "files_wait" not in context.user_data
 
 
 async def test_delete_file_asks_then_returns_to_the_folder(download_dir):
@@ -131,7 +248,7 @@ async def test_old_browser_buttons_still_work(download_dir):
     await tb.on_button(callback_update(context, f"fb:dirinfo:0:{token}"), context)
     assert "⋯ <b>/Movies</b>" in context.bot.texts()[-1]
     await tb.on_button(callback_update(context, f"fb:dir:0:{token}"), context)
-    assert "📁 <b>/Movies</b>" in context.bot.texts()[-1]
+    assert "📁 <b>Files › Movies</b>" in context.bot.texts()[-1]
 
 
 # ---------------------------------------------------------------- selection
@@ -146,13 +263,14 @@ async def test_select_toggle_all_and_delete(download_dir):
     screen = context.bot.calls[-1]
     assert "0 of 3 selected" in screen.kwargs["text"]
 
-    await tb.on_button(callback_update(context, _button(screen, "2").callback_data), context)
+    await tb.on_button(callback_update(context, _button(screen, "b.txt").callback_data), context)
     assert "1 of 3 selected" in context.bot.texts()[-1]
+    assert "✅ 📄 \u2068b.txt\u2069 · 1 B" in [b.text for b in _buttons(context.bot.calls[-1])]
     await tb.on_button(callback_update(context, "fb:sall"), context)
     screen = context.bot.calls[-1]
     assert "3 of 3 selected" in screen.kwargs["text"]
     assert [b.text for b in _buttons(screen) if b.text.startswith(("📤", "📦", "🗑"))] == [
-        "📤 Upload 3",
+        "📤 Send 3",
         "📦 Zip 3",
         "🗑 Delete 3",
     ]
