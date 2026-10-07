@@ -132,6 +132,7 @@ from app.services.manga import (
     list_manga_images,
     remove_manga_folder_if_empty,
 )
+from app.services.gallery import download_gallery, gallery_category, site_label
 from app.services.job_store import JobStore
 from app.services.organize import OrganizePlan, apply_organize, plan_organize
 from app.services.pornhub_model import (
@@ -184,6 +185,7 @@ ADULT_VIDEO_DIR = BASE_DIR / "Download" / "Adult"
 ADULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 HENTAI_VIDEO_DIR = BASE_DIR / "Download" / "Hentai"
 HENTAI_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+GALLERY_DIR = BASE_DIR / "Download" / "Gallery"
 
 
 def parse_env_int(name: str, default: int) -> int:
@@ -1562,6 +1564,8 @@ async def restart_job(app: Application, job: dict) -> dict | None:
         return await start_spotify_download(app, chat_id, job["url"], user_id)
     if provider == "manga":
         return await start_manga_download(app, chat_id, job["url"], user_id)
+    if provider == "gallery-dl":
+        return await start_gallery_download(app, chat_id, job["url"], job.get("category", "gallery"), user_id)
     if not provider and job.get("source"):
         return await start_aria2_download(app, chat_id, job["source"], user_id)
     return None
@@ -2681,6 +2685,94 @@ async def start_manga_download(app: Application, chat_id: int, url: str, user_id
     return job
 
 
+async def start_gallery_download(
+    app: Application, chat_id: int, url: str, category: str, user_id: int = None
+):
+    """Download an image gallery/post with gallery-dl into Download/Gallery/<site>/."""
+    global job_counter
+
+    async with jobs_lock:
+        job_counter += 1
+        job_id = job_counter
+
+    job = {
+        "id": job_id,
+        "provider": "gallery-dl",
+        "category": category,
+        "name": f"{site_label(category)} · {shorten(url.split('://', 1)[-1], 60)}",
+        "url": url,
+        "chat_id": chat_id,
+        "user_id": user_id or 0,
+        "pid": None,
+        "process": None,
+        "status": "starting",
+        "progress": 0.0,
+        "completed_length": 0,
+        "total_length": 0,
+        "download_speed": 0,
+        "eta": "Unknown",
+        "started_at": now_ts(),
+        "finished_at": None,
+        "last_line": "Looking for files…",
+        "outputs": [],
+    }
+    download_jobs[job_id] = job
+
+    def set_process(process):
+        job["process"] = process
+        job["pid"] = process.pid
+
+    def on_file(path: Path):
+        job["status"] = "downloading"
+        job["outputs"].append(str(path))
+        try:
+            job["completed_length"] += path.stat().st_size
+        except OSError:
+            pass
+        job["last_line"] = f"{len(job['outputs'])} file(s) so far · {path.name}"
+
+    async def run_job():
+        refresher = asyncio.create_task(_refresh_while_active(app, job))
+        try:
+            files = await download_gallery(
+                url,
+                GALLERY_DIR,
+                on_file=on_file,
+                set_process=set_process,
+                cookies_file=YTDLP_COOKIES_FILE if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists() else None,
+                proxy=YTDLP_PROXY or None,
+            )
+            if job.get("status") == "cancelled":
+                return
+            job["outputs"] = [str(f) for f in files]
+            job["status"] = "completed"
+            job["progress"] = 100.0
+            job["finished_at"] = now_ts()
+            job["last_line"] = f"{len(files)} file(s)"
+            await finish_job_card(app, job)
+        except Exception as exc:
+            if job.get("status") == "cancelled":
+                return
+            logger.warning("gallery-dl download failed: %s", exc)
+            job["status"] = "failed"
+            job["finished_at"] = now_ts()
+            job["last_line"] = str(exc)
+            await finish_job_card(app, job)
+        finally:
+            job["process"] = None
+            refresher.cancel()
+
+    job["task"] = run_in_background(run_job(), name=f"gallery-{job_id}")
+    return job
+
+
+async def _refresh_while_active(app: Application, job: dict):
+    """Refresh a job's card while it runs, for providers without their own progress loop."""
+    while job.get("status") in JOB_ACTIVE_STATES:
+        await maybe_auto_update_status_message(app, job)
+        await asyncio.sleep(2)
+
+
 async def start_spotify_download(app: Application, chat_id: int, url: str, user_id: int = None):
     global job_counter, download_jobs
 
@@ -3381,6 +3473,8 @@ async def handle_link_request_callback(update: Update, context: ContextTypes.DEF
         job = await start_pornhub_model_download(app, chat_id, request["playlist"], user_id=user_id)
     elif kind == "aria2":
         job = await start_aria2_download(app, chat_id, request["source"], user_id)
+    elif kind == "gallery":
+        job = await start_gallery_download(app, chat_id, request["url"], request["category"], user_id)
     else:
         return
     await attach_job_card(app, job, message=query.message)
@@ -4274,7 +4368,7 @@ async def cancel_job(job_id: int):
         return False, f"Job #{job_id} is already {job['status']}."
 
     process = job.get("process")
-    if process is not None and job.get("provider") == "spotify":
+    if process is not None and job.get("provider") in ("spotify", "gallery-dl"):
         try:
             process.terminate()
             try:
@@ -4810,6 +4904,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             provider_key = normalized.split()[0] if normalized != "search" else None
             provider_key = "rarbg" if provider_key == "rargb" else provider_key
             await search_ui.open(context, update.message, provider_key, edit=False)
+
+        elif is_http_url(text) and (
+            category := await asyncio.to_thread(gallery_category, extract_http_url(text))
+        ):
+            gallery_url = extract_http_url(text)
+            rid = store_link_request("gallery", chat_id, url=gallery_url, category=category)
+            await update.message.reply_text(
+                f"🖼 <b>{html.escape(site_label(category))}</b> link\n\n"
+                "Download it with gallery-dl into Download/Gallery?",
+                reply_markup=link_request_markup(rid, [("📥 Download", "go")]),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
 
         elif is_http_url(text):
             text_, markup = home_views.sites_screen(SUPPORTED_SITES_URL)

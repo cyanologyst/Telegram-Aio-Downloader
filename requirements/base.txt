@@ -6,6 +6,8 @@ yt-dlp[default]
 curl-cffi>=0.10.0
 hanime-plugin==2026.5.10
 spotdl
+# Image/gallery sites nothing else handles (Pixiv, boorus, Imgur, Reddit, ...)
+gallery-dl>=1.30
 Pillow
 pyzipper
 py7zr

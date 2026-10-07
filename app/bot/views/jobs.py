@@ -13,6 +13,7 @@ from telegram import InlineKeyboardMarkup
 
 from app.bot.views.common import Screen, button, e, home_button, human_size, progress_bar, short
 from app.services.batch_download import BatchDownloadMode, normalize_batch_download_mode
+from app.services.gallery import site_label
 
 ACTIVE = {
     "starting",
@@ -30,6 +31,7 @@ ENGINE_LABELS = {
     "yt-dlp": "Video",
     "spotify": "Spotify",
     "manga": "Gallery",
+    "gallery-dl": "Gallery",
     "hentai-playlist": "Playlist",
     "pornhub-model": "Model page",
 }
@@ -63,6 +65,8 @@ def engine_label(job: dict[str, Any]) -> str:
         label = ENGINE_LABELS[provider]
         if provider == "yt-dlp" and job.get("platform"):
             label = str(job["platform"])
+        if provider == "gallery-dl" and job.get("category"):
+            label = f"Gallery · {site_label(job['category'])}"
         if job.get("audio_only"):
             label += " · MP3"
         elif job.get("max_height"):
@@ -115,7 +119,7 @@ def _progress_lines(job: dict[str, Any]) -> list[str]:
         lines.append(e(short(job["last_line"], 90)))
     if job.get("source_type") in ("magnet", "torrent") and status == "downloading":
         lines.append(f"Peers {job.get('connections', 0)} · seeders {job.get('num_seeders', 0)}")
-    elif job.get("provider") in ("spotify", "manga") and job.get("last_line"):
+    elif job.get("provider") in ("spotify", "manga", "gallery-dl") and job.get("last_line"):
         lines.append(e(short(job["last_line"], 90)))
     return lines
 
