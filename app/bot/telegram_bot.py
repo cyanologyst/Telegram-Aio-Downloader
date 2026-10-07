@@ -53,6 +53,7 @@ except RuntimeError:
 from pyrogram import Client
 from pyrogram import StopTransmission
 from pyrogram.errors import FloodWait, RPCError
+import httpx
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -6199,6 +6200,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_screen(query.message, build_archive_settings_screen(user_id, context))
 
     except Exception as e:
+        if isinstance(e, NetworkError) and not isinstance(e, BadRequest):
+            # The connection to Telegram dropped; the screen is unchanged, a new tap works.
+            logger.warning("Button %r failed: Telegram connection error: %s", data, e)
+            await answer_once(
+                query, "Couldn't reach Telegram just now. Tap again.", show_alert=True
+            )
+            return
         logger.exception("Button %r failed", data)
         if isinstance(e, (ValueError, FileNotFoundError, NotADirectoryError, IsADirectoryError)):
             # Usually an expired path token or a file deleted since the menu was drawn.
@@ -6410,6 +6418,24 @@ async def post_shutdown(app: Application):
     await stop_pyrogram_client()
 
 
+class RetryingRequest(HTTPXRequest):
+    """Retry a Bot API call once when the connection could not be opened.
+
+    Only failures before anything was sent (connect errors, connect timeouts)
+    are retried, so a message is never sent twice.
+    """
+
+    async def do_request(self, *args, **kwargs):
+        try:
+            return await super().do_request(*args, **kwargs)
+        except NetworkError as exc:
+            if not isinstance(exc.__cause__, (httpx.ConnectError, httpx.ConnectTimeout)):
+                raise
+            logger.info("Telegram connection failed (%s); retrying once", exc)
+            await asyncio.sleep(1)
+            return await super().do_request(*args, **kwargs)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
     if isinstance(err, (TimedOut, NetworkError)):
@@ -6452,7 +6478,7 @@ def main():
         )
 
     # Configure HTTP request with proper timeouts
-    request = HTTPXRequest(
+    request = RetryingRequest(
         connect_timeout=30.0,
         read_timeout=30.0,
         write_timeout=30.0,

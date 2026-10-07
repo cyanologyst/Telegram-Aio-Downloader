@@ -523,3 +523,48 @@ async def test_a_failed_start_keeps_the_prompt_for_another_tap(monkeypatch):
         await tb.handle_link_request_callback(callback_update(context, f"lp:{rid}:best"), context)
 
     assert rid in tb.link_requests
+
+
+async def test_connect_failures_are_retried_once(monkeypatch):
+    import httpx
+    from telegram.error import NetworkError
+    from telegram.request import HTTPXRequest
+
+    calls = []
+
+    async def flaky(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise NetworkError("httpx.ConnectError") from httpx.ConnectError("proxy")
+        return 200, b"{}"
+
+    monkeypatch.setattr(HTTPXRequest, "do_request", flaky)
+    monkeypatch.setattr(tb.asyncio, "sleep", _no_sleep)
+    assert await tb.RetryingRequest().do_request("https://x", "POST") == (200, b"{}")
+    assert len(calls) == 2
+
+    async def dropped(self, *args, **kwargs):
+        raise NetworkError("disconnected") from httpx.RemoteProtocolError("gone")
+
+    monkeypatch.setattr(HTTPXRequest, "do_request", dropped)
+    with pytest.raises(NetworkError):  # may have been delivered: never resent
+        await tb.RetryingRequest().do_request("https://x", "POST")
+
+
+async def _no_sleep(*args, **kwargs):
+    return None
+
+
+async def test_buttons_survive_a_dropped_connection(monkeypatch):
+    from telegram.error import NetworkError
+
+    async def offline(*args, **kwargs):
+        raise NetworkError("httpx.ConnectError")
+
+    monkeypatch.setattr(tb, "show_screen", offline)
+    context = make_context()
+    update = callback_update(context, "nav:home")
+
+    await tb.on_button(update, context)
+
+    assert "Tap again" in update.callback_query.answers[0]["text"]
