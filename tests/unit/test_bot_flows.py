@@ -476,3 +476,50 @@ async def test_blocked_video_shows_the_reason_instead_of_a_picker(monkeypatch):
     assert "Can't download this" in final and "Cookies" in final
     assert "Choose a quality" not in final
     assert tb.link_requests == {}
+
+
+async def test_a_dropped_connection_on_tap_still_starts_the_download(monkeypatch):
+    from telegram.error import NetworkError
+
+    started = []
+
+    async def fake_ytdlp(app, chat_id, url, **kwargs):
+        started.append((url, kwargs.get("gif")))
+        job = {
+            "id": 1,
+            "name": url,
+            "status": "starting",
+            "provider": "yt-dlp",
+            "chat_id": chat_id,
+            "user_id": 1,
+        }
+        tb.download_jobs[1] = job
+        return job
+
+    monkeypatch.setattr(tb, "start_ytdlp_download", fake_ytdlp)
+    context = make_context()
+    rid = tb.store_link_request("video", 1, url="https://x.com/a/status/1")
+    update = callback_update(context, f"lp:{rid}:gif")
+
+    async def disconnected(*args, **kwargs):
+        raise NetworkError("Server disconnected without sending a response.")
+
+    update.callback_query.answer = disconnected
+
+    await tb.handle_link_request_callback(update, context)
+
+    assert started == [("https://x.com/a/status/1", True)]
+
+
+async def test_a_failed_start_keeps_the_prompt_for_another_tap(monkeypatch):
+    async def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tb, "start_ytdlp_download", broken)
+    context = make_context()
+    rid = tb.store_link_request("video", 1, url="https://x.com/a/status/1")
+
+    with pytest.raises(RuntimeError):
+        await tb.handle_link_request_callback(callback_update(context, f"lp:{rid}:best"), context)
+
+    assert rid in tb.link_requests

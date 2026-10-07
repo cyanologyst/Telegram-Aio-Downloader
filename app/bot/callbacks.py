@@ -22,7 +22,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
-from telegram.error import BadRequest
+from telegram.error import NetworkError
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +52,10 @@ async def answer_once(query: Any, text: str | None = None, *, show_alert: bool =
         _answered.popitem(last=False)
     try:
         await query.answer(text, show_alert=show_alert)
-    except BadRequest as exc:
-        # Usually the query expired while the handler was busy; nothing to show.
+    except NetworkError as exc:
+        # BadRequest (a subclass): usually the query expired while the handler was
+        # busy. A dropped connection must not abort the handler either: the
+        # answer only stops the button's spinner, the work that follows matters.
         logger.debug("Could not answer callback %s: %s", key, exc)
         return False
     return True

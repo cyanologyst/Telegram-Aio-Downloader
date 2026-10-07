@@ -3850,6 +3850,15 @@ async def handle_link_request_callback(update: Update, context: ContextTypes.DEF
             query, "This prompt has expired or was already used. Send the link again.", show_alert=True
         )
         return
+    try:
+        await _run_link_request(query, context, request, action, user_id)
+    except Exception:
+        # Nothing started: keep the prompt usable so another tap can retry.
+        link_requests.setdefault(rid, request)
+        raise
+
+
+async def _run_link_request(query, context, request: dict, action: str, user_id: int):
     await answer_once(query)
     app = context.application
     chat_id = request["chat_id"]
