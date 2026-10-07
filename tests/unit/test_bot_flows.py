@@ -208,13 +208,18 @@ async def test_torrent_picker_keeps_the_session_when_nothing_is_selected(monkeyp
 
     async def fake_start(app, chat_id, source, user_id=None):
         started.append(source)
-        return {"id": 3}
-
-    async def no_status(*args, **kwargs):
-        return None
+        job = {
+            "id": 3,
+            "name": "Show",
+            "status": "starting",
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "source_type": "torrent",
+        }
+        tb.download_jobs[3] = job
+        return job
 
     monkeypatch.setattr(tb, "start_aria2_download", fake_start)
-    monkeypatch.setattr(tb, "update_status_message", no_status)
     context = make_context()
 
     empty = callback_update(context, "tconfirm")
@@ -224,10 +229,16 @@ async def test_torrent_picker_keeps_the_session_when_nothing_is_selected(monkeyp
 
     await tb.on_button(callback_update(context, "tselall"), context)
     await tb.on_button(callback_update(context, "tsel:2"), context)
-    await tb.on_button(callback_update(context, "tconfirm"), context)
+    picker = callback_update(context, "tconfirm")
+    await tb.on_button(picker, context)
 
     assert started == ["/tmp/x.torrent --select-file=1,3"]
-    assert "Files: 2 of 3" in context.bot.texts()[-1]
+    card = context.bot.calls[-1]
+    assert (
+        card.kwargs["message_id"] == picker.callback_query.message.message_id
+    )  # picker became the card
+    assert "#3 · Torrent · 2 of 3 files selected" in card.kwargs["text"]
+    assert tb.download_jobs[3]["card"]["message_id"] == picker.callback_query.message.message_id
 
 
 async def test_torrent_picker_expired_session_says_so():
@@ -242,32 +253,88 @@ async def test_torrent_picker_expired_session_says_so():
 # ---------------------------------------------------------------- link prompts
 
 
-async def test_each_video_prompt_downloads_its_own_link(monkeypatch):
+async def test_each_video_prompt_downloads_its_own_link(monkeypatch, tmp_path):
+    from app.services import user_settings
+
+    monkeypatch.setattr(user_settings, "SETTINGS_DIR", tmp_path)
     started = []
 
-    async def fake_ytdlp(app, chat_id, url, audio_only=False, user_id=None, **kwargs):
-        started.append((url, audio_only))
-        return {"id": 1}
+    async def fake_ytdlp(
+        app, chat_id, url, audio_only=False, user_id=None, max_height=None, **kwargs
+    ):
+        started.append((url, audio_only, max_height))
+        job = {
+            "id": len(started),
+            "name": url,
+            "status": "starting",
+            "provider": "yt-dlp",
+            "chat_id": chat_id,
+            "user_id": user_id,
+        }
+        tb.download_jobs[job["id"]] = job
+        return job
 
     monkeypatch.setattr(tb, "start_ytdlp_download", fake_ytdlp)
+    monkeypatch.setattr(
+        tb, "probe_video", lambda url: {"title": url, "duration": 75, "heights": [360, 720]}
+    )
     monkeypatch.setattr(tb, "search_ui", None)
     context = make_context()
 
     await tb.on_text(text_update(context, "https://youtu.be/first"), context)
     await tb.on_text(text_update(context, "https://youtu.be/second"), context)
-    first, second = (
-        c for c in context.bot.called("reply_text") if "link detected" in c.kwargs["text"]
-    )
-    first_mp3 = next(b.callback_data for b in _buttons(first) if "MP3" in b.text)
+    await _drain_background()
 
-    await tb.handle_link_request_callback(callback_update(context, first_mp3), context)
+    pickers = [
+        c
+        for c in context.bot.calls
+        if c.method == "edit_text" and "Choose a quality" in c.kwargs["text"]
+    ]
+    assert len(pickers) == 2
+    first = next(c for c in pickers if "first" in c.kwargs["text"])
+    labels = [b.text for b in _buttons(first)]
+    assert labels == ["⭐ Best (720p)", "480p", "🎵 MP3", "✖ Cancel"]  # 1080/720 caps hidden
 
-    assert started == [("https://youtu.be/first", True)]
-    assert any(b.text == "✖ Cancel" for b in _buttons(second))
+    capped = next(b.callback_data for b in _buttons(first) if b.text == "480p")
+    await tb.handle_link_request_callback(callback_update(context, capped), context)
+    assert started == [("https://youtu.be/first", False, 480)]
 
-    reused = callback_update(context, first_mp3)
+    reused = callback_update(context, capped)
     await tb.handle_link_request_callback(reused, context)
     assert "already used" in reused.callback_query.answers[0]["text"]
+
+
+async def test_video_default_setting_skips_the_picker(monkeypatch, tmp_path):
+    from app.services import user_settings
+
+    monkeypatch.setattr(user_settings, "SETTINGS_DIR", tmp_path)
+    await user_settings.update_setting(1, "video_default", "mp3")
+    started = []
+
+    async def fake_ytdlp(
+        app, chat_id, url, audio_only=False, user_id=None, max_height=None, **kwargs
+    ):
+        started.append((audio_only, max_height))
+        job = {
+            "id": 9,
+            "name": "x",
+            "status": "starting",
+            "provider": "yt-dlp",
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "audio_only": audio_only,
+        }
+        tb.download_jobs[9] = job
+        return job
+
+    monkeypatch.setattr(tb, "start_ytdlp_download", fake_ytdlp)
+    monkeypatch.setattr(tb, "search_ui", None)
+    context = make_context()
+
+    await tb.on_text(text_update(context, "https://youtu.be/x"), context)
+
+    assert started == [(True, None)]
+    assert "#9 · Video · MP3" in context.bot.texts()[-1]
 
 
 async def test_old_style_prompt_buttons_explain_themselves():

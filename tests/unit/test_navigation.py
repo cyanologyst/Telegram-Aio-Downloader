@@ -146,7 +146,7 @@ async def test_status_moves_to_the_bottom_and_removes_the_old_one():
     assert tb.status_messages[1]["message_id"] != first_id
     deleted = context.bot.called("delete_message")
     assert deleted and deleted[-1].kwargs["message_id"] == first_id
-    assert "No active downloads" in context.bot.texts()[-1]
+    assert "Nothing downloading" in context.bot.texts()[-1]
 
 
 async def test_start_installs_the_keyboard():
