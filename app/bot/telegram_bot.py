@@ -51,6 +51,7 @@ except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 from pyrogram import Client
+from pyrogram import StopTransmission
 from pyrogram.errors import FloodWait, RPCError
 from telegram import (
     InlineKeyboardButton,
@@ -293,20 +294,29 @@ dashboard_messages = {}  # {chat_id: {"message_id": int, "last_update": float}}
 live_dashboard_tasks = {}  # {chat_id: asyncio.Task}
 pinned_dashboard_messages = {}  # {chat_id: message_id}
 
-# Pending yt-dlp conversion selections
-pending_ytdlp_requests = {}  # {user_id: {"url": str, "chat_id": int}}
+# Link prompts waiting for a button press ("Video or MP3?", "Download all?",
+# "Download anyway?"). Keyed by a request id carried in the buttons, so every
+# prompt acts on its own link even when several are open.
+link_requests: dict[str, dict] = {}
+LINK_REQUEST_TTL = 24 * 3600
 
-# Pending Spotify confirmations
-pending_spotify_requests = {}  # {user_id: {"url": str, "chat_id": int}}
 
-# Pending manga gallery confirmations
-pending_manga_requests = {}  # {user_id: {"url": str, "chat_id": int}}
+def store_link_request(kind: str, chat_id: int, **payload) -> str:
+    now = time.time()
+    for rid in [r for r, req in link_requests.items() if now - req["created"] > LINK_REQUEST_TTL]:
+        link_requests.pop(rid, None)
+    rid = uuid.uuid4().hex[:10]
+    link_requests[rid] = {"kind": kind, "chat_id": chat_id, "created": now, **payload}
+    return rid
 
-# Pending hentai playlist confirmations
-pending_hentai_playlist_requests = {}  # {user_id: {"playlist": HentaiPlaylist, "chat_id": int}}
 
-# Pending PornHub model confirmations
-pending_pornhub_model_requests = {}  # {user_id: {"playlist": PornHubModelPlaylist, "chat_id": int}}
+def link_request_markup(rid: str, actions: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """Buttons for a link prompt: the given (label, action) pairs plus Cancel."""
+    buttons = [InlineKeyboardButton(label, callback_data=f"lp:{rid}:{action}") for label, action in actions]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton("✖ Cancel", callback_data=f"lp:{rid}:cancel")])
+    return InlineKeyboardMarkup(rows)
+
 
 # Dedicated executors for CPU-intensive operations
 # Using ProcessPoolExecutor for py7zr since it's CPU-bound
@@ -2746,24 +2756,56 @@ def get_video_resolution(file_path: str) -> tuple:
     return None, None
 
 
+def parse_ffmpeg_duration(ffmpeg_stderr: str) -> float | None:
+    for line in ffmpeg_stderr.splitlines():
+        if "Duration:" in line:
+            try:
+                h, m, sec = line.split("Duration:")[1].split(",")[0].strip().split(":")
+                return int(h) * 3600 + int(m) * 60 + float(sec)
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def parse_ffmpeg_progress_seconds(line: str) -> float | None:
+    """Seconds encoded so far from an ``-progress`` line (out_time_us/out_time_ms are µs)."""
+    key, _, value = line.strip().partition("=")
+    if key in ("out_time_us", "out_time_ms"):
+        try:
+            return int(value) / 1_000_000
+        except ValueError:
+            return None
+    return None
+
+
 async def convert_video_quality(input_path: str, output_path: str, target_res: str, progress_callback=None):
     """
-    Re‑encode video to given resolution (e.g. '720p').
-    Uses libx264, constant frame rate, CRF 23, preset 'medium'.
-    Progress parsing from ffmpeg stderr (time=...).
+    Re-encode video to given resolution (e.g. '720p') with libx264, CRF 23.
+
+    Progress comes from ``-progress pipe:1``: ffmpeg's normal stderr status line
+    is redrawn with carriage returns, so reading it line by line only returned
+    once the encode had finished and the progress bar stayed at 0%.
     """
-    resolution_map = {
-        "1080p": 1080,
-        "720p": 720,
-        "480p": 480,
-        "360p": 360,
-    }
+    resolution_map = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
     target_h = resolution_map.get(target_res, 720)
-    scale_filter = f"scale=-2:{target_h}"
+
+    probe = await asyncio.to_thread(
+        subprocess.run,
+        [FFMPEG_BIN, "-i", input_path],
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    duration = parse_ffmpeg_duration(probe.stderr)
+
     cmd = [
         FFMPEG_BIN,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostats",
+        "-progress", "pipe:1",
         "-i", input_path,
-        "-vf", scale_filter,
+        "-vf", f"scale=-2:{target_h}",
         "-c:v", "libx264",
         "-crf", "23",
         "-preset", "medium",
@@ -2771,53 +2813,34 @@ async def convert_video_quality(input_path: str, output_path: str, target_res: s
         "-b:a", "128k",
         "-movflags", "+faststart",
         "-y",
-        output_path
+        output_path,
     ]
-
     process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-
-    duration = None
-    # try to get duration from original file
-    probe = await asyncio.to_thread(
-        subprocess.run,
-        [FFMPEG_BIN, "-i", input_path],
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=10,
-    )
-    for line in probe.stderr.splitlines():
-        if "Duration:" in line:
-            time_str = line.split("Duration:")[1].split(",")[0].strip()
-            h, m, s = map(float, time_str.split(":"))
-            duration = h * 3600 + m * 60 + s
-            break
-
-    last_update = 0
-    while True:
-        line = await process.stderr.readline()
-        if not line:
-            break
-        line = line.decode("utf-8", errors="ignore").strip()
-        if progress_callback and "time=" in line and duration:
-            time_part = line.split("time=")[1].split()[0]
-            try:
-                h, m, s = map(float, time_part.split(":"))
-                current = h * 3600 + m * 60 + s
-                pct = min(100, int((current / duration) * 100))
+    stderr_task = asyncio.create_task(process.stderr.read())
+    last_update = 0.0
+    try:
+        while True:
+            raw = await process.stdout.readline()
+            if not raw:
+                break
+            seconds = parse_ffmpeg_progress_seconds(raw.decode("utf-8", errors="ignore"))
+            if progress_callback and duration and seconds is not None:
                 now = time.time()
-                if now - last_update > 1.0:
+                if now - last_update > 3.0:
                     last_update = now
-                    await progress_callback(pct)
-            except (ValueError, IndexError):
-                pass
-
-    await process.wait()
+                    await progress_callback(min(99, int(seconds / duration * 100)))
+        await process.wait()
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        Path(output_path).unlink(missing_ok=True)
+        raise
+    stderr = (await stderr_task).decode("utf-8", errors="ignore").strip()
     if process.returncode != 0:
-        raise RuntimeError("ffmpeg conversion failed")
+        Path(output_path).unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg conversion failed: {stderr[-300:] or process.returncode}")
 
 
 async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel_path: str):
@@ -2828,7 +2851,7 @@ async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel
     full = safe_join(DOWNLOAD_DIR, rel_path)
 
     if not full.exists() or not is_video_file(str(full)):
-        await update.callback_query.answer("Not a valid video file", show_alert=True)
+        await answer_once(update.callback_query, "Not a valid video file", show_alert=True)
         return
 
     tmp_dir = Path(tempfile.gettempdir()) / f"thumb_{uuid.uuid4().hex}"
@@ -2841,11 +2864,11 @@ async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel
         try:
             generate_contact_sheet(str(full), str(output_path))
         except Exception as e:
-            await update.callback_query.answer(f"Thumbnail generation failed: {str(e)}", show_alert=True)
+            await answer_once(update.callback_query, f"Thumbnail generation failed: {str(e)}", show_alert=True)
             return
 
         if not output_path.exists():
-            await update.callback_query.answer("Thumbnail generation failed", show_alert=True)
+            await answer_once(update.callback_query, "Thumbnail generation failed", show_alert=True)
             return
 
         # Send the contact sheet as a photo
@@ -2857,7 +2880,7 @@ async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel
             )
 
     except Exception as e:
-        await update.callback_query.answer(f"Error: {str(e)}", show_alert=True)
+        await answer_once(update.callback_query, f"Error: {str(e)}", show_alert=True)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -3116,7 +3139,7 @@ async def start_manga_download(app: Application, chat_id: int, url: str, user_id
                 disable_web_page_preview=True,
             )
 
-    asyncio.create_task(run_job())
+    job["task"] = run_in_background(run_job(), name=f"manga-{job_id}")
     return job
 
 
@@ -3228,7 +3251,13 @@ async def start_ytdlp_download(
     user_id: int = None,
     run_in_background: bool = False,
     notify: bool = True,
+    parent_job: dict | None = None,
 ):
+    """Download one video with yt-dlp.
+
+    ``parent_job`` is the batch (playlist/model page) this item belongs to;
+    cancelling the batch aborts the item that is downloading.
+    """
     global job_counter, download_jobs
 
     async with jobs_lock:
@@ -3276,7 +3305,18 @@ async def start_ytdlp_download(
 
     loop = asyncio.get_running_loop()
 
+    def is_cancelled() -> bool:
+        return job.get("status") == "cancelled" or bool(
+            parent_job and parent_job.get("status") == "cancelled"
+        )
+
     def progress_hook(d):
+        # Outside the try below: that block logs and swallows exceptions, and
+        # this one has to reach yt-dlp to abort the download.
+        if is_cancelled():
+            raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
+        if d.get("tmpfilename"):
+            job["tmpfile"] = d["tmpfilename"]
         try:
             status = d.get("status")
 
@@ -3336,6 +3376,7 @@ async def start_ytdlp_download(
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
+            "noprogress": True,
             "progress_hooks": [progress_hook],
             "concurrent_fragment_downloads": 4,
             "retries": 10,
@@ -3433,13 +3474,33 @@ async def start_ytdlp_download(
 
             return title, filepath
 
+    def remove_partial_files():
+        tmp = job.get("tmpfile")
+        if not tmp:
+            return
+        tmp_path = Path(tmp)
+        try:
+            for leftover in tmp_path.parent.iterdir():
+                # Prefix match, not glob(): titles often contain "[...]".
+                if leftover.is_file() and leftover.name.startswith(tmp_path.name):
+                    leftover.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove partial download %s: %s", tmp, exc)
+
+    async def finish_cancelled():
+        job["status"] = "cancelled"
+        job["finished_at"] = job.get("finished_at") or now_ts()
+        job["last_line"] = "Cancelled by user"
+        await asyncio.to_thread(remove_partial_files)
+        if notify:
+            await maybe_auto_update_status_message(app, job, force=True)
+
     async def finish_download():
         refresh_task = asyncio.create_task(refresh_ytdlp_status())
         try:
             title, filepath = await loop.run_in_executor(None, run_download)
-            if job.get("status") == "cancelled":
-                if notify:
-                    await maybe_auto_update_status_message(app, job, force=True)
+            if is_cancelled():
+                await finish_cancelled()
                 return
 
             job["status"] = "completed"
@@ -3470,6 +3531,9 @@ async def start_ytdlp_download(
                 )
 
         except Exception as e:
+            if is_cancelled():
+                await finish_cancelled()
+                return
             logger.exception("yt-dlp download failed")
 
             job["status"] = "failed"
@@ -3533,7 +3597,7 @@ async def upload_and_delete_batch_artifact(
 
             async def progress(current, total, *, part=chunk_index, parts=chunk_total):
                 if job.get("status") == "cancelled":
-                    return
+                    raise StopTransmission()
                 percent = (current / total * 100) if total else 0.0
                 part_text = f", part {part}/{parts}" if parts > 1 else ""
                 job["status"] = "uploading"
@@ -3547,7 +3611,10 @@ async def upload_and_delete_batch_artifact(
             job["status"] = "uploading"
             job["last_line"] = f"Uploading {item_index}/{total_items}: {full.name}"
             await maybe_auto_update_status_message(app, job, force=True)
-            await pyrogram_send_file(chunk_rel_path, progress_callback=progress)
+            try:
+                await pyrogram_send_file(chunk_rel_path, progress_callback=progress)
+            except StopTransmission:
+                return False
     finally:
         cleanup_file_chunks(chunks)
 
@@ -3581,6 +3648,7 @@ async def run_video_batch(
             audio_only=False,
             user_id=user_id,
             notify=False,
+            parent_job=job,
         )
         if child.get("status") != "completed":
             reason = child.get("last_line") or child.get("status") or "Unknown error"
@@ -3838,95 +3906,62 @@ async def start_pornhub_model_download(
     return job
 
 
-async def handle_ytdlp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle yt-dlp download format selection."""
+@auto_answer
+async def handle_link_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Buttons on link prompts: lp:<request id>:<action>."""
     query = update.callback_query
-    await query.answer()
-
     user_id = query.from_user.id
-    pending = pending_ytdlp_requests.pop(user_id, None)
-
-    if not pending:
-        await query.edit_message_text(
-            f"{ICON_WARN} No pending yt-dlp request found."
+    _, rid, action = (query.data.split(":", 2) + ["", ""])[:3]
+    request = link_requests.pop(rid, None)
+    if request is None:
+        await answer_once(
+            query, "This prompt has expired or was already used. Send the link again.", show_alert=True
         )
         return
+    await answer_once(query)
+    app = context.application
+    chat_id = request["chat_id"]
+    kind = request["kind"]
 
-    audio_only = query.data == "ytdlp_mp3"
-
-    await query.edit_message_text(
-        f"{ICON_DOWNLOAD} Starting {'MP3' if audio_only else 'video'} download..."
-    )
-
-    await start_ytdlp_download(
-        context.application,
-        pending["chat_id"],
-        pending["url"],
-        audio_only=audio_only,
-        user_id=user_id,
-    )
-
-
-async def handle_hentai_playlist_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    pending = pending_hentai_playlist_requests.pop(user_id, None)
-
-    if query.data == "hentai_playlist_cancel":
-        await query.edit_message_text(f"{ICON_WARN} Playlist download cancelled.")
+    if action == "cancel":
+        await safe_edit_message(query.message, f"{ICON_STOP} Cancelled. Nothing was downloaded.")
         return
 
-    if not pending:
-        await query.edit_message_text(f"{ICON_WARN} No pending playlist request found.")
-        return
+    if kind == "video":
+        audio_only = action == "mp3"
+        await safe_edit_message(
+            query.message, f"{ICON_DOWNLOAD} Starting {'MP3' if audio_only else 'video'} download..."
+        )
+        await start_ytdlp_download(
+            app, chat_id, request["url"], audio_only=audio_only, user_id=user_id, run_in_background=True
+        )
+    elif kind == "manga":
+        job = await start_manga_download(app, chat_id, request["url"], user_id)
+        await safe_edit_message(query.message, build_manga_started_text(job))
+        await update_status_message(app, chat_id, user_id)
+    elif kind == "spotify":
+        job = await start_spotify_download(app, chat_id, request["url"], user_id)
+        await safe_edit_message(query.message, build_spotify_started_text(job))
+        await update_status_message(app, chat_id, user_id)
+    elif kind == "hentai":
+        job = await start_hentai_playlist_download(app, chat_id, request["playlist"], user_id=user_id)
+        await safe_edit_message(query.message, build_hentai_playlist_started_text(job))
+    elif kind == "pornhub":
+        job = await start_pornhub_model_download(app, chat_id, request["playlist"], user_id=user_id)
+        await safe_edit_message(query.message, build_pornhub_model_started_text(job))
+    elif kind == "aria2":
+        job = await start_aria2_download(app, chat_id, request["source"], user_id)
+        await safe_edit_message(query.message, build_download_started_text(job))
+        await update_status_message(app, chat_id, user_id)
 
-    playlist = pending["playlist"]
-    batch_mode = get_user_settings(user_id).get("batch_download_mode")
-    await query.edit_message_text(build_hentai_playlist_started_text({
-        "id": "new",
-        "platform": playlist.site,
-        "name": playlist.title,
-        "episode_count": len(playlist.urls),
-        "batch_download_mode": batch_mode,
-    }))
-    await start_hentai_playlist_download(
-        context.application,
-        pending["chat_id"],
-        playlist,
-        user_id=user_id,
-    )
 
-
-async def handle_pornhub_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    pending = pending_pornhub_model_requests.pop(user_id, None)
-
-    if query.data == "pornhub_model_cancel":
-        await query.edit_message_text(f"{ICON_WARN} PornHub model download cancelled.")
-        return
-
-    if not pending:
-        await query.edit_message_text(f"{ICON_WARN} No pending PornHub model request found.")
-        return
-
-    playlist = pending["playlist"]
-    batch_mode = get_user_settings(user_id).get("batch_download_mode")
-    await query.edit_message_text(build_pornhub_model_started_text({
-        "id": "new",
-        "name": playlist.slug,
-        "video_count": len(playlist.urls),
-        "batch_download_mode": batch_mode,
-    }))
-    await start_pornhub_model_download(
-        context.application,
-        pending["chat_id"],
-        playlist,
-        user_id=user_id,
+@auto_answer
+async def handle_stale_prompt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Buttons from prompts sent by an older version of the bot."""
+    await answer_once(
+        update.callback_query,
+        "This prompt is from an older version of the bot. Send the link again.",
+        show_alert=True,
     )
 
 
@@ -3963,6 +3998,55 @@ async def start_download_from_source(
             run_in_background=True,
         )
     return await start_aria2_download(app, chat_id, source, user_id)
+
+
+# =========================================================
+# Background tasks
+# =========================================================
+
+# Strong references so running tasks are not garbage-collected mid-flight.
+background_tasks: set[asyncio.Task] = set()
+
+
+def run_in_background(coro, *, name: str, on_error=None) -> asyncio.Task:
+    """Run ``coro`` without blocking the handler that started it.
+
+    ``on_error(exc)`` is awaited if the task fails, so the user hears about
+    it; failures are always logged.
+    """
+
+    async def runner():
+        try:
+            return await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Background task %s failed", name)
+            if on_error is not None:
+                try:
+                    await on_error(exc)
+                except Exception:
+                    logger.exception("Error reporter for %s failed", name)
+
+    task = asyncio.create_task(runner(), name=name)
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+    return task
+
+
+def message_error_reporter(app: Application, chat_id: int, message_id: int, what: str):
+    """on_error callback that turns a progress message into a failure notice."""
+
+    async def report(exc: Exception) -> None:
+        await _edit_dashboard_message(
+            app,
+            chat_id,
+            message_id,
+            f"{ICON_FAIL} {what} failed.\n\nReason:\n{shorten(str(exc), 600)}",
+            InlineKeyboardMarkup([[InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")]]),
+        )
+
+    return report
 
 
 # =========================================================
@@ -4126,39 +4210,167 @@ async def pyrogram_send_file(rel_path: str, progress_callback=None):
                 pass
 
 
-async def update_upload_progress(app: Application, chat_id: int, message_id: int, upload_id: str, file_label: str, sent: int, total: int):
-    now = time.time()
-    
-    if upload_id not in upload_jobs:
-        return
-    
-    job = upload_jobs[upload_id]
-    last_update = job.get("last_update", 0)
+PYROGRAM_BOT_SESSION_HINT = (
+    "Pyrogram is logged in as a bot.\n"
+    f'Delete "{PYRO_SESSION_NAME}.session" and restart the script.\n'
+    "Then log in with your personal Telegram account."
+)
 
-    if now - last_update < 3.0 and sent < total:
-        return
 
-    job["last_update"] = now
-    progress_bar = build_progress_bar(sent, total, width=15)
+def _raise_if_bot_session(exc: RPCError) -> None:
+    msg = str(exc)
+    if "USER_IS_BOT" in msg or "A bot cannot send messages to other bots or to itself" in msg:
+        raise RuntimeError(PYROGRAM_BOT_SESSION_HINT) from exc
 
-    text = (
-        f"{ICON_UPLOAD} Uploading\n\n"
-        f"{file_label}\n"
-        f"{progress_bar}\n\n"
-        f"Target: your own Telegram account\n"
-        f"{ICON_BOX} {human_size(sent)} / {human_size(total)}"
-    )
 
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")]
+def upload_progress_markup(upload_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{ICON_STOP} Cancel upload", callback_data=f"up_cancel:{upload_id}")]
     ])
 
+
+def upload_done_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")]
+    ])
+
+
+def new_upload_job(chat_id: int, message_id: int, files: list) -> str:
+    global upload_counter
+    upload_counter += 1
+    upload_id = f"upload_{upload_counter}"
+    upload_jobs[upload_id] = {
+        "id": upload_id,
+        "status": "uploading",
+        "files": list(files),
+        "current_file": 0,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "sent_count": 0,
+        "last_update": 0,
+        "cancelled": False,
+    }
+    return upload_id
+
+
+def cancel_upload(upload_id: str) -> bool:
+    job = upload_jobs.get(upload_id)
+    if not job or job.get("status") != "uploading":
+        return False
+    job["cancelled"] = True
+    return True
+
+
+async def update_upload_progress(app: Application, chat_id: int, message_id: int, upload_id: str, file_label: str, sent: int, total: int):
+    job = upload_jobs.get(upload_id)
+    if job is None:
+        return
+    if job.get("cancelled"):
+        # Raised inside Pyrogram's progress callback, this aborts the transfer
+        # (the same thing Client.stop_transmission() does).
+        raise StopTransmission()
+
+    now = time.time()
+    if now - job.get("last_update", 0) < 3.0 and sent < total:
+        return
+    job["last_update"] = now
+
+    text = (
+        f"{ICON_UPLOAD} Uploading to Saved Messages\n\n"
+        f"{file_label}\n"
+        f"{build_progress_bar(sent, total, width=15)}\n"
+        f"{ICON_BOX} {human_size(sent)} / {human_size(total)}"
+    )
     try:
-        await _edit_dashboard_message(app, chat_id, message_id, text, markup)
+        await _edit_dashboard_message(app, chat_id, message_id, text, upload_progress_markup(upload_id))
     except _DashboardMessageGone:
         logger.warning("Upload progress message %s no longer exists", message_id)
     except Exception as exc:
         logger.debug("Upload progress edit failed: %s", exc)
+
+
+async def _upload_one_file(app: Application, upload_id: str, rel_path: str, label: str) -> bool:
+    """Upload one file (split into parts above the size limit). False if cancelled."""
+    job = upload_jobs[upload_id]
+    chunks = split_file_into_chunks(rel_path)
+    try:
+        for chunk_path, part, parts in chunks:
+            if job["cancelled"]:
+                return False
+            part_label = f"{label} (part {part}/{parts})" if parts > 1 else label
+
+            async def progress(current, total, part_label=part_label):
+                await update_upload_progress(
+                    app, job["chat_id"], job["message_id"], upload_id, part_label, current, total
+                )
+
+            try:
+                await pyrogram_send_file(chunk_path, progress_callback=progress)
+            except StopTransmission:
+                return False
+            except RPCError as exc:
+                _raise_if_bot_session(exc)
+                raise
+            # Most send_* methods swallow StopTransmission and just return.
+            if job["cancelled"]:
+                return False
+    finally:
+        # Parts are a full second copy of the file on disk.
+        cleanup_file_chunks(chunks)
+    return True
+
+
+async def upload_files_via_pyrogram(
+    app: Application,
+    chat_id: int,
+    message_id: int,
+    files: list,
+    *,
+    title: str,
+    user_id: int = None,
+) -> dict:
+    """Upload ``files`` (paths relative to Download/) to Saved Messages.
+
+    Progress is shown on ``message_id`` with a Cancel button; the message ends
+    as a summary. Returns the upload job.
+    """
+    if not files:
+        raise RuntimeError("No files to upload.")
+    upload_id = new_upload_job(chat_id, message_id, files)
+    job = upload_jobs[upload_id]
+    total_files = len(files)
+    try:
+        for idx, rel in enumerate(files, start=1):
+            if job["cancelled"]:
+                break
+            job["current_file"] = idx
+            name = os.path.basename(rel)
+            label = f"File {idx}/{total_files}: {name}" if total_files > 1 else name
+            if not await _upload_one_file(app, upload_id, rel, label):
+                break
+            job["sent_count"] += 1
+            await maybe_delete_file_after_upload(user_id, rel)
+    except Exception:
+        job["status"] = "failed"
+        raise
+
+    sent = job["sent_count"]
+    if job["cancelled"]:
+        job["status"] = "cancelled"
+        text = (
+            f"{ICON_STOP} Upload cancelled\n\n{title}\n"
+            f"Uploaded before cancelling: {sent}/{total_files}"
+        )
+    else:
+        job["status"] = "completed"
+        text = f"{ICON_OK} Upload complete\n\n{title}\nSent to: Saved Messages"
+        if total_files > 1:
+            text += f"\nFiles: {sent}/{total_files}"
+    try:
+        await _edit_dashboard_message(app, chat_id, message_id, text, upload_done_markup())
+    except _DashboardMessageGone:
+        await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=upload_done_markup())
+    return job
 
 
 async def send_single_file_via_pyrogram(
@@ -4166,86 +4378,10 @@ async def send_single_file_via_pyrogram(
     chat_id: int,
     message_id: int,
     rel_path: str,
-    upload_id: str = None,
     user_id: int = None,
 ):
-    if upload_id is None:
-        async with upload_lock:
-            global upload_counter
-            upload_counter += 1
-            upload_id = f"upload_{upload_counter}"
-        upload_jobs[upload_id] = {
-            "status": "uploading",
-            "files": [rel_path],
-            "current_file": 0,
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "last_update": 0,
-        }
-    
-    job = upload_jobs[upload_id]
-    full = safe_join(DOWNLOAD_DIR, rel_path)
-    
-    # Check if file needs to be split
-    chunks = split_file_into_chunks(str(full))
-    
-    async def progress(current, total, chunk_idx=1, chunk_total=1):
-        label = os.path.basename(rel_path)
-        if chunk_total > 1:
-            label = f"{label} (Part {chunk_idx}/{chunk_total})"
-        await update_upload_progress(app, chat_id, message_id, upload_id, label, current, total)
-
-    try:
-        if len(chunks) > 1:
-            # File was split, upload each chunk
-            for chunk_path, chunk_num, total_chunks in chunks:
-                async def progress_chunk(current, total, part=chunk_num, parts=total_chunks):
-                    await progress(current, total, part, parts)
-                
-                try:
-                    await pyrogram_send_file(chunk_path, progress_callback=progress_chunk)
-                except RPCError as e:
-                    msg = str(e)
-                    if "USER_IS_BOT" in msg or "A bot cannot send messages to other bots or to itself" in msg:
-                        raise RuntimeError(
-                            f"Pyrogram is logged in as a bot.\n"
-                            f'Delete "{PYRO_SESSION_NAME}.session" and restart the script.\n'
-                            "Then log in with your personal Telegram account."
-                        )
-                    raise
-        else:
-            # Normal file upload
-            await pyrogram_send_file(rel_path, progress_callback=progress)
-            
-    except RPCError as e:
-        msg = str(e)
-        if "USER_IS_BOT" in msg or "A bot cannot send messages to other bots or to itself" in msg:
-            raise RuntimeError(
-                f"Pyrogram is logged in as a bot.\n"
-                f'Delete "{PYRO_SESSION_NAME}.session" and restart the script.\n'
-                "Then log in with your personal Telegram account."
-            )
-        raise
-    finally:
-        # These parts are a full second copy of the file on disk.
-        cleanup_file_chunks(chunks)
-
-    job["status"] = "completed"
-
-    await maybe_delete_file_after_upload(user_id, rel_path)
-
-    await app.bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=message_id,
-        text=(
-            f"{ICON_OK} Upload Complete\n\n"
-            f"Name: {os.path.basename(rel_path)}\n"
-            f"Target: your own Telegram account\n"
-            f"Parts sent: {len(chunks)}" if len(chunks) > 1 else f"{ICON_OK} Upload Complete\n\nName: {os.path.basename(rel_path)}\nTarget: your own Telegram account"
-        ),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
-        ]),
+    return await upload_files_via_pyrogram(
+        app, chat_id, message_id, [rel_path], title=f"Name: {os.path.basename(rel_path)}", user_id=user_id
     )
 
 
@@ -4257,123 +4393,12 @@ async def send_folder_files_via_pyrogram(
     file_list: list = None,
     user_id: int = None,
 ):
-    """Upload files from folder. If file_list is provided, upload only those files."""
-    if file_list is None:
-        files = get_all_files_in_folder(rel_path)
-    else:
-        files = file_list
-    
-    if not files:
-        raise RuntimeError("No files to upload.")
-
-    async with upload_lock:
-        global upload_counter
-        upload_counter += 1
-        upload_id = f"upload_{upload_counter}"
-    
-    upload_jobs[upload_id] = {
-        "status": "uploading",
-        "files": files,
-        "current_file": 0,
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "sent_count": 0,
-        "last_update": 0,
-    }
-
-    sent_count = 0
-    skipped = []
-    total_files = len(files)
-
-    for idx, file_rel in enumerate(files, start=1):
-        full = safe_join(DOWNLOAD_DIR, file_rel)
-        size = full.stat().st_size
-
-        if size > MAX_SEND_SIZE:
-            skipped.append(f"{file_rel} ({human_size(size)})")
-            continue
-
-        upload_jobs[upload_id]["current_file"] = idx
-
-        try:
-            await app.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=(
-                    f"{ICON_UPLOAD} Uploading Folder Files\n\n"
-                    f"Folder: /{rel_path.lstrip('/')}\n"
-                    f"File {idx}/{total_files}\n"
-                    f"Now: {os.path.basename(file_rel)}\n"
-                    f"Target: your own Telegram account"
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")]
-                ]),
-            )
-        except Exception:
-            pass
-
-        async def progress(current, total, file_label=os.path.basename(file_rel), i=idx):
-            await update_upload_progress(
-                app,
-                chat_id,
-                message_id,
-                upload_id,
-                f"File {i}/{total_files}: {file_label}",
-                current,
-                total
-            )
-
-        chunks = []
-        try:
-            chunks = split_file_into_chunks(str(full))
-            for chunk_path, chunk_num, total_chunks in chunks:
-                async def progress_chunk(current, total, chunk_n=chunk_num, total_c=total_chunks, file_l=os.path.basename(file_rel), i_val=idx):
-                    label = f"File {i_val}/{total_files}: {file_l}"
-                    if total_c > 1:
-                        label += f" (Part {chunk_n}/{total_c})"
-                    await update_upload_progress(app, chat_id, message_id, upload_id, label, current, total)
-                
-                await pyrogram_send_file(chunk_path, progress_callback=progress_chunk)
-
-            sent_count += 1
-            upload_jobs[upload_id]["sent_count"] = sent_count
-            await maybe_delete_file_after_upload(user_id, file_rel)
-        except RPCError as e:
-            msg = str(e)
-            if "USER_IS_BOT" in msg or "A bot cannot send messages to other bots or to itself" in msg:
-                raise RuntimeError(
-                    f"Pyrogram is logged in as a bot.\n"
-                    f'Delete "{PYRO_SESSION_NAME}.session" and restart the script.\n'
-                    "Then log in with your personal Telegram account."
-                )
-            raise
-        finally:
-            cleanup_file_chunks(chunks)
-
-    upload_jobs[upload_id]["status"] = "completed"
-
-    text = (
-        f"{ICON_OK} Folder Upload Complete\n\n"
-        f"Folder: /{rel_path.lstrip('/')}\n"
-        f"Target: your own Telegram account\n"
-        f"Uploaded: {sent_count}/{total_files}"
+    """Upload every file in a folder, or only ``file_list`` when given."""
+    files = get_all_files_in_folder(rel_path) if file_list is None else file_list
+    title = (
+        f"Folder: /{rel_path.lstrip('/')}" if file_list is None else f"{len(files)} selected file(s)"
     )
-
-    if skipped:
-        preview = "\n".join(skipped[:10])
-        if len(skipped) > 10:
-            preview += f"\n... and {len(skipped) - 10} more skipped"
-        text += f"\n\n{ICON_WARN} Skipped oversized files:\n{preview}"
-
-    await app.bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=message_id,
-        text=text,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
-        ]),
-    )
+    return await upload_files_via_pyrogram(app, chat_id, message_id, files, title=title, user_id=user_id)
 
 
 async def upload_mini_app_selection(
@@ -4859,9 +4884,14 @@ async def cancel_job(job_id: int):
         return True, f"Cancelled job #{job_id}: {job['name']}"
 
     if job.get("provider") in {"manga", "yt-dlp", "hentai-playlist", "pornhub-model"}:
+        # yt-dlp items (including the one a batch is on) see this status in
+        # their progress hook and abort; manga downloads are cancelled directly.
         job["status"] = "cancelled"
         job["finished_at"] = now_ts()
         job["last_line"] = "Cancelled by user"
+        task = job.get("task")
+        if task is not None and not task.done():
+            task.cancel()
         return True, f"Cancelled job #{job_id}: {job['name']}"
 
     errors = []
@@ -4926,7 +4956,7 @@ def clear_finished_jobs():
 
 async def refresh_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_once(query)
 
     await status_cmd(update, context)
 
@@ -5071,6 +5101,28 @@ async def clear_jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Commands
 # =========================================================
 
+async def cancel_input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/cancel: stop whatever the bot is waiting for you to type or pick."""
+    user_id = update.effective_user.id
+    cancelled = []
+    zip_session = zip_select_sessions.get(user_id)
+    if zip_session and zip_session.pop("waiting_for", None):
+        cancelled.append("archive password entry")
+    if pending_zip_name_sessions.pop(user_id, None):
+        cancelled.append("archive naming")
+    if search_ui is not None and search_ui.is_waiting(context):
+        search_ui.cancel_waiting(context)
+        cancelled.append("torrent search")
+    if torrent_select_sessions.pop(user_id, None):
+        cancelled.append("torrent file selection")
+    text = (
+        f"{ICON_OK} Cancelled: {', '.join(cancelled)}."
+        if cancelled
+        else "Nothing to cancel. To stop a download, use Cancel on the 📊 Status card."
+    )
+    await update.message.reply_text(text, reply_markup=build_reply_menu(user_id))
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -5158,7 +5210,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not is_authorized_user(user_id):
-        await update.message.reply_text("â›” Unauthorized")
+        await update.message.reply_text("⛔ Unauthorized")
         return
 
     await update.message.reply_text(
@@ -5186,7 +5238,7 @@ async def forwarded_posts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
 
     if not is_authorized_user(user_id):
-        await update.message.reply_text("â›” Unauthorized")
+        await update.message.reply_text("⛔ Unauthorized")
         return
 
     args = context.args or []
@@ -5531,9 +5583,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if lower.startswith("magnet:"):
             name = extract_bt_name(text)
             if is_duplicate_name(name):
+                rid = store_link_request("aria2", chat_id, source=text)
                 await update.message.reply_text(
-                    f"{ICON_WARN} {get_lang(user_id, 'duplicate_detected')} {name}",
-                    reply_markup=build_reply_menu(user_id)
+                    f"{ICON_WARN} A file named “{name}” is already in your downloads.",
+                    reply_markup=link_request_markup(rid, [("📥 Download anyway", "go")]),
                 )
                 return
 
@@ -5548,35 +5601,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif is_manga_url(text):
             manga_url = extract_manga_url(text)
-            pending_manga_requests[user_id] = {
-                "url": manga_url,
-                "chat_id": chat_id,
-            }
+            rid = store_link_request("manga", chat_id, url=manga_url)
             await update.message.reply_text(
                 build_manga_prompt_text(manga_url),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("Continue", callback_data="manga_confirm"),
-                        InlineKeyboardButton("Cancel", callback_data="manga_cancel"),
-                    ],
-                ]),
+                reply_markup=link_request_markup(rid, [("📥 Download", "go")]),
                 disable_web_page_preview=True,
             )
 
         elif is_spotify_url(text):
             spotify_url = extract_spotify_url(text)
-            pending_spotify_requests[user_id] = {
-                "url": spotify_url,
-                "chat_id": chat_id,
-            }
+            rid = store_link_request("spotify", chat_id, url=spotify_url)
             await update.message.reply_text(
                 build_spotify_prompt_text(spotify_url),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("Continue", callback_data="spotify_confirm"),
-                        InlineKeyboardButton("Cancel", callback_data="spotify_cancel"),
-                    ],
-                ]),
+                reply_markup=link_request_markup(rid, [("📥 Download", "go")]),
                 disable_web_page_preview=True,
             )
 
@@ -5597,18 +5634,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            pending_hentai_playlist_requests[user_id] = {
-                "playlist": playlist,
-                "chat_id": chat_id,
-            }
+            rid = store_link_request("hentai", chat_id, playlist=playlist)
             await update.message.reply_text(
                 build_hentai_playlist_prompt_text(playlist, user_id),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("Download all", callback_data="hentai_playlist_confirm"),
-                        InlineKeyboardButton("Cancel", callback_data="hentai_playlist_cancel"),
-                    ],
-                ]),
+                reply_markup=link_request_markup(rid, [(f"📥 Download all {len(playlist.urls)}", "go")]),
                 disable_web_page_preview=True,
             )
 
@@ -5637,27 +5666,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            pending_pornhub_model_requests[user_id] = {
-                "playlist": playlist,
-                "chat_id": chat_id,
-            }
+            rid = store_link_request("pornhub", chat_id, playlist=playlist)
             await update.message.reply_text(
                 build_pornhub_model_prompt_text(playlist, user_id),
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("Download all", callback_data="pornhub_model_confirm"),
-                        InlineKeyboardButton("Cancel", callback_data="pornhub_model_cancel"),
-                    ],
-                ]),
+                reply_markup=link_request_markup(rid, [(f"📥 Download all {len(playlist.urls)}", "go")]),
                 disable_web_page_preview=True,
             )
 
         elif is_video_url(text):
             video_url = extract_http_url(text)
-            pending_ytdlp_requests[user_id] = {
-                "url": video_url,
-                "chat_id": chat_id,
-            }
+            rid = store_link_request("video", chat_id, url=video_url)
             platform = video_platform_label(video_url)
             target_folder = (
                 HENTAI_VIDEO_DIR / video_platform_slug(video_url)
@@ -5671,12 +5689,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{ICON_DOWNLOAD} {platform} link detected\n\n"
                 "Choose download format:\n\n"
                 f"Folder:\n{target_folder}",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🎬 Video", callback_data="ytdlp_video"),
-                        InlineKeyboardButton("🎵 MP3", callback_data="ytdlp_mp3"),
-                    ],
-                ]),
+                reply_markup=link_request_markup(rid, [("🎬 Video", "video"), ("🎵 MP3", "mp3")]),
                 disable_web_page_preview=True,
             )
 
@@ -5684,9 +5697,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             direct_url = extract_http_url(text)
             name = extract_http_filename(direct_url)
             if is_duplicate_name(name):
+                rid = store_link_request("aria2", chat_id, source=direct_url)
                 await update.message.reply_text(
-                    f"{ICON_WARN} {get_lang(user_id, 'duplicate_detected')} {name}",
-                    reply_markup=build_reply_menu(user_id)
+                    f"{ICON_WARN} A file named “{name}” is already in your downloads.",
+                    reply_markup=link_request_markup(rid, [("📥 Download anyway", "go")]),
                 )
                 return
 
@@ -5874,16 +5888,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 async def on_torrent_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
-    await update.message.reply_text(f"{ICON_MAGNET} Torrent file received.")
-
     torrents_dir = DOWNLOAD_DIR / "_torrents"
     torrents_dir.mkdir(exist_ok=True)
 
     file = await doc.get_file()
-    torrent_path = torrents_dir / doc.file_name
+    torrent_path = torrents_dir / Path(doc.file_name or f"upload_{doc.file_unique_id}.torrent").name
     await file.download_to_drive(str(torrent_path))
 
     return await start_torrent_file_selection(update, context, torrent_path, doc.file_name)
+
+
+TORRENT_FILES_PER_PAGE = 8
 
 
 async def start_torrent_file_selection(
@@ -5892,11 +5907,11 @@ async def start_torrent_file_selection(
     torrent_path: Path,
     title: str | None = None,
 ):
-    files = get_torrent_file_list(torrent_path)
+    files = await asyncio.to_thread(get_torrent_file_list, torrent_path)
+    target = update.callback_query.message if update.callback_query else update.message
 
     if not files:
-        target = update.callback_query.message if update.callback_query else update.message
-        await target.reply_text(f"{ICON_FAIL} Could not read torrent file list.")
+        await target.reply_text(f"{ICON_FAIL} Could not read the file list of this torrent.")
         return
 
     user_id = update.effective_user.id
@@ -5907,12 +5922,29 @@ async def start_torrent_file_selection(
         "page": 0,
         "title": title or torrent_path.name,
     }
-
-    target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text(
-        f"{ICON_MAGNET} Select files to download:\n\n{shorten(clean_download_name(title or torrent_path.name), 90)}",
+        build_torrent_select_text(user_id),
         reply_markup=build_torrent_select_keyboard(user_id, 0),
     )
+
+
+def parse_aria2_show_files(output: str) -> list[dict]:
+    """Parse ``aria2c --show-files`` output into [{"index", "path", "size"}].
+
+    Each file is printed as ``  1|./path`` followed by ``   |230MiB (241,172,480)``.
+    """
+    files: list[dict] = []
+    for line in output.splitlines():
+        if "|" not in line:
+            continue
+        left, right = line.split("|", 1)
+        left = left.strip()
+        if left.isdigit():
+            files.append({"index": left, "path": right.strip(), "size": ""})
+        elif not left and files and not files[-1]["size"]:
+            files[-1]["size"] = right.strip().split(" (")[0]
+    return files
+
 
 def get_torrent_file_list(torrent_path: Path):
     try:
@@ -5925,49 +5957,56 @@ def get_torrent_file_list(torrent_path: Path):
         )
     except Exception:
         return []
+    return parse_aria2_show_files(result.stdout)
 
-    files = []
-    for line in result.stdout.splitlines():
-        if "|" in line and line.strip()[0].isdigit():
-            idx, path = line.split("|", 1)
-            files.append({
-                "index": idx.strip(),
-                "path": path.strip()
-            })
-    return files
+
+def build_torrent_select_text(user_id: int) -> str:
+    session = torrent_select_sessions[user_id]
+    total = len(session["files"])
+    return (
+        f"{ICON_MAGNET} Choose files to download\n\n"
+        f"{shorten(clean_download_name(session['title']), 90)}\n"
+        f"Selected: {len(session['selected'])} of {total} file(s)"
+    )
+
 
 def build_torrent_select_keyboard(user_id: int, page: int):
     session = torrent_select_sessions[user_id]
     files = session["files"]
     selected = session["selected"]
-
-    per_page = 8
-    start = page * per_page
-    end = start + per_page
-    shown = files[start:end]
+    pages = max(1, math.ceil(len(files) / TORRENT_FILES_PER_PAGE))
+    page = max(0, min(page, pages - 1))
+    session["page"] = page
+    start = page * TORRENT_FILES_PER_PAGE
 
     rows = []
-
-    for f in shown:
-        idx = f["index"]
-        checked = "✅" if idx in selected else "⬜"
-        name = Path(f["path"]).name
+    for f in files[start:start + TORRENT_FILES_PER_PAGE]:
+        checked = "✅" if f["index"] in selected else "⬜"
+        size = f" · {f['size']}" if f.get("size") else ""
         rows.append([
             InlineKeyboardButton(
-                f"{checked} {idx}. {shorten(name, 32)}",
-                callback_data=f"tsel:{idx}"
+                f"{checked} {shorten(Path(f['path']).name, 34)}{size}",
+                callback_data=f"tsel:{f['index']}",
             )
         ])
 
-    rows.append([
-        InlineKeyboardButton("✅ Download Selected", callback_data="tconfirm"),
-        InlineKeyboardButton("📦 Download All", callback_data="tall"),
-    ])
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀", callback_data=f"tpage:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("▶", callback_data=f"tpage:{page + 1}"))
+        rows.append(nav)
 
     rows.append([
-        InlineKeyboardButton("❌ Cancel", callback_data="tcancel")
+        InlineKeyboardButton("☑️ Select all", callback_data="tselall"),
+        InlineKeyboardButton("⬜ Clear", callback_data="tselnone"),
     ])
-
+    if selected:
+        rows.append([InlineKeyboardButton(f"✅ Download {len(selected)} selected", callback_data="tconfirm")])
+    rows.append([InlineKeyboardButton("📦 Download everything", callback_data="tall")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tcancel")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -5975,9 +6014,9 @@ def build_torrent_select_keyboard(user_id: int, page: int):
 # Callback handler
 # =========================================================
 
+@auto_answer
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     user_id = query.from_user.id
     chat_id = query.message.chat_id
@@ -5986,6 +6025,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "menu_home":
             await safe_edit_message(query.message, build_home_text(user_id), build_reply_menu(user_id))
         
+        elif data.startswith("up_cancel:"):
+            if cancel_upload(data.split(":", 1)[1]):
+                await answer_once(query, "Cancelling upload...")
+            else:
+                await answer_once(query, "This upload already finished.", show_alert=True)
+
         elif data == "refresh_status":
             await update_status_message(context.application, chat_id, user_id)
         
@@ -6079,7 +6124,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_settings_menu_text(user_id),
                 build_settings_menu_markup(user_id),
             )
-            await query.answer(f"Forwarded posts: {'ON' if enabled else 'OFF'}")
+            await answer_once(query, f"Forwarded posts: {'ON' if enabled else 'OFF'}")
 
         elif data == "menu:batch_mode":
             settings = get_user_settings(user_id)
@@ -6095,7 +6140,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_settings_menu_text(user_id),
                 build_settings_menu_markup(user_id),
             )
-            await query.answer(f"Batch mode: {batch_download_mode_label(next_mode)}")
+            await answer_once(query, f"Batch mode: {batch_download_mode_label(next_mode)}")
 
         elif data == "menu:clear":
             text, markup = build_clear_jobs_prompt()
@@ -6118,7 +6163,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     build_reply_menu(user_id)
                 )
             else:
-                await query.answer("Invalid language", show_alert=True)
+                await answer_once(query, "Invalid language", show_alert=True)
         
         elif data.startswith("cancel_confirm:"):
             jid = int(data.split(":")[1])
@@ -6129,50 +6174,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{ICON_OK} {msg}",
                 )
             else:
-                await query.answer(msg, show_alert=True)
+                await answer_once(query, msg, show_alert=True)
 
         elif data.startswith("job_cancel:"):
             jid = int(data.split(":")[1])
             ok, msg = await cancel_job(jid)
             await update_status_message(context.application, chat_id, user_id)
-            await query.answer(msg, show_alert=not ok)
+            await answer_once(query, msg, show_alert=not ok)
 
         elif data.startswith("job_pause:"):
             jid = int(data.split(":")[1])
             ok, msg = await pause_job(jid)
             await update_status_message(context.application, chat_id, user_id)
-            await query.answer(msg, show_alert=not ok)
+            await answer_once(query, msg, show_alert=not ok)
 
         elif data.startswith("job_resume:"):
             jid = int(data.split(":")[1])
             ok, msg = await resume_job(jid)
             await update_status_message(context.application, chat_id, user_id)
-            await query.answer(msg, show_alert=not ok)
-
-        elif data == "manga_confirm":
-            pending = pending_manga_requests.pop(user_id, None)
-            if not pending:
-                await safe_edit_message(query.message, f"{ICON_WARN} No pending manga link found.")
-                return
-
-            job = await start_manga_download(
-                context.application,
-                pending["chat_id"],
-                pending["url"],
-                user_id,
-            )
-            await safe_edit_message(
-                query.message,
-                build_manga_started_text(job),
-            )
-            await update_status_message(context.application, chat_id, user_id)
-
-        elif data == "manga_cancel":
-            pending_manga_requests.pop(user_id, None)
-            await safe_edit_message(
-                query.message,
-                f"{ICON_STOP} Manga download cancelled.",
-            )
+            await answer_once(query, msg, show_alert=not ok)
 
         elif data.startswith("manga_setting:"):
             setting_key = data.split(":", 1)[1]
@@ -6181,7 +6201,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "remove_images": "manga_remove_images_after_conversion",
             }.get(setting_key)
             if not setting_name:
-                await query.answer("Unknown manga setting", show_alert=True)
+                await answer_once(query, "Unknown manga setting", show_alert=True)
                 return
             settings = get_user_settings(user_id)
             await update_setting(user_id, setting_name, not settings.get(setting_name, False))
@@ -6191,31 +6211,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 build_manga_settings_markup(user_id),
             )
 
-        elif data == "spotify_confirm":
-            pending = pending_spotify_requests.pop(user_id, None)
-            if not pending:
-                await safe_edit_message(query.message, f"{ICON_WARN} No pending Spotify link found.")
-                return
-
-            job = await start_spotify_download(
-                context.application,
-                pending["chat_id"],
-                pending["url"],
-                user_id,
-            )
-            await safe_edit_message(
-                query.message,
-                build_spotify_started_text(job),
-            )
-            await update_status_message(context.application, chat_id, user_id)
-
-        elif data == "spotify_cancel":
-            pending_spotify_requests.pop(user_id, None)
-            await safe_edit_message(
-                query.message,
-                f"{ICON_STOP} Spotify download cancelled.",
-            )
-        
         elif data == "clear_confirm":
             removed = clear_finished_jobs()
             await safe_edit_message(query.message, f"{ICON_OK} Cleared {removed} finished job(s).")
@@ -6224,54 +6219,55 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_message(query.message, "Nothing was cleared.")
         
         # ===== Torrent Selection =====
-        elif data.startswith("tsel:"):
-            idx = data.split(":")[1]
-            session = torrent_select_sessions[user_id]
-
-            if idx in session["selected"]:
-                session["selected"].remove(idx)
-            else:
-                session["selected"].add(idx)
-
-            await query.edit_message_reply_markup(
-                build_torrent_select_keyboard(user_id, session["page"])
-            )
-
-        elif data == "tconfirm":
-            session = torrent_select_sessions.pop(user_id)
-
-            selected = sorted(session["selected"], key=int)
-
-            if not selected:
-                await query.answer(get_lang(user_id, 'select_at_least'), show_alert=True)
+        elif data in ("tconfirm", "tall", "tcancel", "tselall", "tselnone") or data.startswith(("tsel:", "tpage:")):
+            session = torrent_select_sessions.get(user_id)
+            if session is None:
+                await answer_once(
+                    query, "This file list has expired. Send the .torrent file again.", show_alert=True
+                )
                 return
 
-            await start_aria2_download(
-                context.application,
-                chat_id,
-                session["torrent_path"] + f" --select-file={','.join(selected)}",
-                user_id,
+            if data == "tcancel":
+                torrent_select_sessions.pop(user_id, None)
+                await safe_edit_message(query.message, "Torrent download cancelled.")
+                return
+
+            if data in ("tconfirm", "tall"):
+                if data == "tconfirm" and not session["selected"]:
+                    await answer_once(query, get_lang(user_id, 'select_at_least'), show_alert=True)
+                    return
+                torrent_select_sessions.pop(user_id, None)
+                source = session["torrent_path"]
+                count = len(session["files"])
+                if data == "tconfirm":
+                    selected = sorted(session["selected"], key=int)
+                    source += f" --select-file={','.join(selected)}"
+                    count = len(selected)
+                job = await start_aria2_download(context.application, chat_id, source, user_id)
+                await safe_edit_message(
+                    query.message,
+                    f"{ICON_OK} Download started · Job #{job['id']}\n\n"
+                    f"{shorten(clean_download_name(session['title']), 90)}\n"
+                    f"Files: {count} of {len(session['files'])}",
+                )
+                await update_status_message(context.application, chat_id, user_id)
+                return
+
+            if data.startswith("tsel:"):
+                idx = data.split(":", 1)[1]
+                session["selected"].symmetric_difference_update({idx})
+            elif data == "tselall":
+                session["selected"] = {f["index"] for f in session["files"]}
+            elif data == "tselnone":
+                session["selected"] = set()
+            else:
+                session["page"] = int(data.split(":", 1)[1])
+
+            await safe_edit_message(
+                query.message,
+                build_torrent_select_text(user_id),
+                build_torrent_select_keyboard(user_id, session["page"]),
             )
-            await update_status_message(context.application, chat_id, user_id)
-
-            await query.edit_message_text(f"{ICON_SPEED} {get_lang(user_id, 'preparing')}...")
-
-        elif data == "tall":
-            session = torrent_select_sessions.pop(user_id)
-
-            await start_aria2_download(
-                context.application,
-                chat_id,
-                session["torrent_path"],
-                user_id,
-            )
-            await update_status_message(context.application, chat_id, user_id)
-
-            await query.edit_message_text(f"{ICON_SPEED} {get_lang(user_id, 'preparing')}...")
-
-        elif data == "tcancel":
-            torrent_select_sessions.pop(user_id, None)
-            await query.edit_message_text(get_lang(user_id, 'cancelled'))
 
         # ===== File Browser =====
         elif data.startswith("fb:"):
@@ -6316,8 +6312,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rel_path = decode_path(encoded) if encoded else ""
                 folder = safe_join(DOWNLOAD_DIR, rel_path)
                 if not is_manga_gallery_folder(folder):
-                    await query.answer("No manga images found in this folder.", show_alert=True)
+                    await answer_once(query, "No manga images found in this folder.", show_alert=True)
                     return
+                await answer_once(query)
 
                 await safe_edit_message(
                     query.message,
@@ -6413,20 +6410,20 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_message(
                     query.message,
                     f"{ICON_UPLOAD} Preparing upload...\nPlease wait.",
-                    InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent_encoded}"),
-                            InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:"),
-                        ]
-                    ]),
                 )
 
-                await send_single_file_via_pyrogram(
-                    context.application,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    rel_path,
-                    user_id=user_id,
+                run_in_background(
+                    send_single_file_via_pyrogram(
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        rel_path,
+                        user_id=user_id,
+                    ),
+                    name="upload",
+                    on_error=message_error_reporter(
+                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                    ),
                 )
 
             elif action == "send_folder_confirm":
@@ -6461,17 +6458,20 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_message(
                     query.message,
                     f"{ICON_UPLOAD} Preparing folder upload...\nPlease wait.",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")]
-                    ]),
                 )
 
-                await send_folder_files_via_pyrogram(
-                    context.application,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    rel_path,
-                    user_id=user_id,
+                run_in_background(
+                    send_folder_files_via_pyrogram(
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        rel_path,
+                        user_id=user_id,
+                    ),
+                    name="upload",
+                    on_error=message_error_reporter(
+                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                    ),
                 )
             
             # NEW: Inline Upload Confirmation
@@ -6501,14 +6501,19 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_message(
                     query.message,
                     f"{ICON_UPLOAD} Preparing upload...\nPlease wait.",
-                    InlineKeyboardMarkup([[InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent_encoded}")]])
                 )
-                await send_single_file_via_pyrogram(
-                    context.application,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    rel_path,
-                    user_id=user_id,
+                run_in_background(
+                    send_single_file_via_pyrogram(
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        rel_path,
+                        user_id=user_id,
+                    ),
+                    name="upload",
+                    on_error=message_error_reporter(
+                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                    ),
                 )
             
             # NEW: Inline Delete Confirmation
@@ -6610,9 +6615,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             InlineKeyboardButton(
                                 get_lang(user_id, "cancel_btn"),
                                 callback_data=f"fb:list:{page}:{encoded}",
-                            ),
-                            InlineKeyboardButton(
-                                get_lang(user_id, "home_btn"),
                             ),
                         ],
                     ]),
@@ -6725,13 +6727,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "bdelete_confirm":
                 if user_id not in batch_select_sessions:
-                    await query.answer("Session expired", show_alert=True)
+                    await answer_once(query, "Session expired", show_alert=True)
                     return
 
                 session = batch_select_sessions[user_id]
                 selected = list(session["selected"])
                 if not selected:
-                    await query.answer(get_lang(user_id, "select_at_least"), show_alert=True)
+                    await answer_once(query, get_lang(user_id, "select_at_least"), show_alert=True)
                     return
 
                 total_size = 0
@@ -6771,7 +6773,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "bdelete_yes":
                 if user_id not in batch_select_sessions:
-                    await query.answer("Session expired", show_alert=True)
+                    await answer_once(query, "Session expired", show_alert=True)
                     return
 
                 session = batch_select_sessions.pop(user_id)
@@ -6808,35 +6810,38 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "bupload":
                 user_id = query.from_user.id
                 if user_id not in batch_select_sessions:
-                    await query.answer("Session expired", show_alert=True)
+                    await answer_once(query, "Session expired", show_alert=True)
                     return
                 
                 session = batch_select_sessions.pop(user_id)
                 selected = list(session["selected"])
                 
                 if not selected:
-                    await query.answer("Select at least one file", show_alert=True)
+                    await answer_once(query, "Select at least one file", show_alert=True)
                     return
                 
                 await safe_edit_message(
                     query.message,
                     f"{ICON_UPLOAD} Preparing batch upload ({len(selected)} files)...\nPlease wait.",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")]
-                    ]),
                 )
                 
-                await send_folder_files_via_pyrogram(
-                    context.application,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    session["rel_path"],
-                    file_list=selected,
-                    user_id=user_id,
+                run_in_background(
+                    send_folder_files_via_pyrogram(
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        session["rel_path"],
+                        file_list=selected,
+                        user_id=user_id,
+                    ),
+                    name="upload",
+                    on_error=message_error_reporter(
+                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                    ),
                 )
             
             elif action == "bupload_empty":
-                await query.answer(get_lang(user_id, "select_at_least"), show_alert=True)
+                await answer_once(query, get_lang(user_id, "select_at_least"), show_alert=True)
 
             # New: Video conversion menu
             elif action == "conv_menu":
@@ -6855,67 +6860,79 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "conv_start":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                target_res = parts[4] if len(parts) > 4 else "720p"
+                # data.split(":", 3) keeps "<token>:<resolution>" together in parts[3].
+                encoded, _, target_res = (parts[3] if len(parts) > 3 else "").partition(":")
+                force = target_res.endswith("!")
+                target_res = target_res.rstrip("!") or "720p"
                 rel_path = decode_path(encoded) if encoded else ""
                 input_path = safe_join(DOWNLOAD_DIR, rel_path)
                 if not input_path.exists() or not is_video_file(str(input_path)):
-                    await query.edit_message_text("❌ Not a valid video file.")
+                    await answer_once(query, "This is not a video file (any more).", show_alert=True)
                     return
+                await answer_once(query)
 
-                # Prepare output filename
-                stem = input_path.stem
-                ext = input_path.suffix
-                output_path = input_path.parent / f"{stem}_{target_res}{ext}"
-                temp_output = output_path
-                # Avoid re‑converting if already exists
-                if temp_output.exists():
-                    await query.edit_message_text(
-                        f"⏩ Converted file already exists: {temp_output.name}\nDo you want to upload it?",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("📤 Upload", callback_data=f"fb:conv_upload:{page}:{encoded}:{encode_path(str(temp_output.relative_to(DOWNLOAD_DIR)))}")],
-                            [InlineKeyboardButton("🗑 Delete & Re-convert", callback_data=f"fb:conv_start:{page}:{encoded}:{target_res}")],
-                            [InlineKeyboardButton("🔙 Back", callback_data=f"fb:file:{page}:{encoded}")]
-                        ])
+                output_path = input_path.parent / f"{input_path.stem}_{target_res}{input_path.suffix}"
+                back_to_file = InlineKeyboardButton("🔙 Back to file", callback_data=f"fb:file:{page}:{encoded}")
+                if output_path.exists() and not force:
+                    await safe_edit_message(
+                        query.message,
+                        f"⏩ A {target_res} version already exists:\n{output_path.name}",
+                        InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📤 Upload it", callback_data=f"fb:conv_upload:{page}:{encoded}:{encode_path(file_rel_path(output_path))}")],
+                            [InlineKeyboardButton("🔁 Convert again (replace it)", callback_data=f"fb:conv_start:{page}:{encoded}:{target_res}!")],
+                            [back_to_file],
+                        ]),
                     )
                     return
+                if force:
+                    output_path.unlink(missing_ok=True)
 
-                # Show progress message
-                msg = await query.edit_message_text(f"🔄 Converting to {target_res}... 0%")
-                async def progress_callback(pct):
-                    try:
-                        await msg.edit_text(f"🔄 Converting to {target_res}... {pct}%")
-                    except Exception as exc:
-                        logger.debug("Conversion progress edit failed: %s", exc)
-                # convert_video_quality is already fully async (it drives
-                # ffmpeg through create_subprocess_exec), so run it on this
-                # loop. Wrapping it in asyncio.run() inside an executor thread
-                # handed progress_callback a foreign event loop, so every
-                # edit_text() raised and the bar sat at 0% for the whole encode.
-                await convert_video_quality(
-                    str(input_path), str(temp_output), target_res, progress_callback
-                )
-                # After conversion
-                await msg.edit_text(
-                    f"✅ Conversion finished!\nOutput: {temp_output.name}\nSize: {human_size(temp_output.stat().st_size)}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📤 Upload converted file", callback_data=f"fb:conv_upload:{page}:{encoded}:{encode_path(str(temp_output.relative_to(DOWNLOAD_DIR)))}")],
-                        [InlineKeyboardButton("🔙 Back to file", callback_data=f"fb:file:{page}:{encoded}")]
-                    ])
+                msg = query.message
+                await safe_edit_message(msg, f"🔄 Converting to {target_res}... 0%")
+
+                async def run_conversion():
+                    async def progress_callback(pct):
+                        try:
+                            await msg.edit_text(f"🔄 Converting to {target_res}... {pct}%")
+                        except Exception as exc:
+                            logger.debug("Conversion progress edit failed: %s", exc)
+
+                    await convert_video_quality(
+                        str(input_path), str(output_path), target_res, progress_callback
+                    )
+                    await msg.edit_text(
+                        f"✅ Conversion finished!\nOutput: {output_path.name}\nSize: {human_size(output_path.stat().st_size)}",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📤 Upload converted file", callback_data=f"fb:conv_upload:{page}:{encoded}:{encode_path(file_rel_path(output_path))}")],
+                            [back_to_file],
+                        ]),
+                    )
+
+                run_in_background(
+                    run_conversion(),
+                    name="convert",
+                    on_error=message_error_reporter(
+                        context.application, msg.chat_id, msg.message_id, "Conversion"
+                    ),
                 )
 
             elif action == "conv_upload":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                original_encoded = parts[3] if len(parts) > 3 else ""
-                converted_encoded = parts[4] if len(parts) > 4 else ""
+                original_encoded, _, converted_encoded = (parts[3] if len(parts) > 3 else "").partition(":")
                 converted_rel = decode_path(converted_encoded) if converted_encoded else ""
                 await safe_edit_message(query.message, f"{ICON_UPLOAD} Uploading converted file...")
-                await send_single_file_via_pyrogram(
-                    context.application,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    converted_rel,
-                    user_id=user_id,
+                run_in_background(
+                    send_single_file_via_pyrogram(
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        converted_rel,
+                        user_id=user_id,
+                    ),
+                    name="upload",
+                    on_error=message_error_reporter(
+                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                    ),
                 )
 
             # New: Send thumbnail (multiple frames)
@@ -6944,7 +6961,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     all_files = filter_files_for_archiving(collect_download_files())
 
                     if not all_files:
-                        await query.answer(get_lang(user_id, 'no_files'), show_alert=True)
+                        await answer_once(query, get_lang(user_id, 'no_files'), show_alert=True)
                         return
 
                     settings = get_user_settings(user_id)
@@ -6993,14 +7010,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "confirm":
                 if not session or not session.get("selected"):
                     # FIX #7: Use translated string instead of hardcoded
-                    await query.answer(get_lang(user_id, 'select_at_least'), show_alert=True)
+                    await answer_once(query, get_lang(user_id, 'select_at_least'), show_alert=True)
                     return
 
                 try:
                     selected_files = resolve_selected_zip_files(session)
 
                     if not selected_files:
-                        await query.answer(get_lang(user_id, 'select_at_least'), show_alert=True)
+                        await answer_once(query, get_lang(user_id, 'select_at_least'), show_alert=True)
                         return
 
                     settings = get_user_settings(user_id)
@@ -7073,8 +7090,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 zip_select_sessions[user_id] = session
                 # FIX #1: Make password waiting state clearer to user
                 await query.edit_message_text(
-                    "🔐 <b>Waiting for password input</b>\n\n"
-                    "Send your desired password (or send 'none' to remove the password)"
+                    "🔐 Send the archive password as your next message.\n\n"
+                    "Send none to remove the password, or /cancel to keep the current one."
                 )
             
             elif setting_key == "batch_mode":
@@ -7137,16 +7154,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     value = int(value)
                 except ValueError:
                     # FIX #7: Use translated string instead of hardcoded
-                    await query.answer(get_lang(user_id, 'invalid_value'), show_alert=True)
+                    await answer_once(query, get_lang(user_id, 'invalid_value'), show_alert=True)
                     return
             elif setting_name == "zip_method":
                 value = value.lower()
                 if value not in ("zip", "7z"):
-                    await query.answer(get_lang(user_id, 'invalid_archive_method'), show_alert=True)
+                    await answer_once(query, get_lang(user_id, 'invalid_archive_method'), show_alert=True)
                     return
                 fmt_err = check_archive_format_support(value)
                 if fmt_err:
-                    await query.answer(fmt_err, show_alert=True)
+                    await answer_once(query, fmt_err, show_alert=True)
                     return
             elif setting_name in (
                 "auto_delete_files_after_zip",
@@ -7157,17 +7174,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if setting_name == "zip_part_size":
                 if not validate_part_size(value // (1024 * 1024)):
-                    await query.answer(get_lang(user_id, 'part_size_error'), show_alert=True)
+                    await answer_once(query, get_lang(user_id, 'part_size_error'), show_alert=True)
                     return
             elif setting_name == "compression_level":
                 if not validate_compression_level(value):
                     # FIX #7: Use translated string instead of hardcoded
-                    await query.answer(get_lang(user_id, 'compression_error'), show_alert=True)
+                    await answer_once(query, get_lang(user_id, 'compression_error'), show_alert=True)
                     return
 
             ok = await update_setting(user_id, setting_name, value)
             if not ok:
-                await query.answer(get_lang(user_id, 'invalid_value'), show_alert=True)
+                await answer_once(query, get_lang(user_id, 'invalid_value'), show_alert=True)
                 return
 
             text = build_zip_settings_text(user_id)
@@ -7175,13 +7192,21 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_message(query.message, text, markup)
 
     except Exception as e:
-        await safe_edit_message(
-            query.message,
-            f"{ICON_FAIL} Error\n{type(e).__name__}: {e}",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
-            ]),
-        )
+        logger.exception("Button %r failed", data)
+        if isinstance(e, (ValueError, FileNotFoundError, NotADirectoryError, IsADirectoryError)):
+            # Usually an expired path token or a file deleted since the menu was drawn.
+            text = "That item is gone or this menu is too old. Open Files again."
+        else:
+            text = f"Something went wrong: {shorten(str(e), 150)}"
+        # Prefer a pop-up so the current screen stays usable.
+        if not await answer_once(query, text, show_alert=True):
+            await safe_edit_message(
+                query.message,
+                f"{ICON_WARN} {text}",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")],
+                ]),
+            )
 
 
 
@@ -7347,6 +7372,9 @@ def main():
         .request(request)
         .post_init(_wrapped_post_init)
         .post_shutdown(post_shutdown)
+        # Handle updates concurrently so one slow action (a big search, a
+        # conversion) never freezes the rest of the bot.
+        .concurrent_updates(True)
         .build()
     )
 
@@ -7371,6 +7399,7 @@ def main():
 
     # Core commands
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_input_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("sites", supported_sites_cmd))
     app.add_handler(CommandHandler("files", files_cmd))
@@ -7404,9 +7433,13 @@ def main():
     app.add_handler(CallbackQueryHandler(search_ui.on_callback, pattern=r"^srch:"))
 
     # Legacy handlers
-    app.add_handler(CallbackQueryHandler(handle_ytdlp_callback, pattern=r"^ytdlp_"))
-    app.add_handler(CallbackQueryHandler(handle_hentai_playlist_callback, pattern=r"^hentai_playlist_"))
-    app.add_handler(CallbackQueryHandler(handle_pornhub_model_callback, pattern=r"^pornhub_model_"))
+    app.add_handler(CallbackQueryHandler(handle_link_request_callback, pattern=r"^lp:"))
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_stale_prompt_callback,
+            pattern=r"^(ytdlp_|hentai_playlist_|pornhub_model_|manga_confirm$|manga_cancel$|spotify_confirm$|spotify_cancel$)",
+        )
+    )
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.Document.FileExtension("torrent"), on_torrent_file))
 
