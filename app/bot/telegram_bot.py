@@ -87,7 +87,7 @@ from app.downloaders.torrents.tpb import TPBCrawler, TPBHandlers
 from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
 
 # Import post downloader module for handling forwarded posts
-from app.handlers.forwarded_media import setup_pyrogram_forwarded_downloads
+from app.handlers.forwarded_media import bot_id_from_token, setup_pyrogram_forwarded_downloads
 from app.infrastructure.aria2_rpc import Aria2DaemonConfig, Aria2RpcClient, Aria2RpcError
 from app.services.adult_video_resolver import (
     resolve_adult_video_url,
@@ -7362,10 +7362,28 @@ def main():
     async def _wrapped_post_init(app_ref: Application):
         await post_init(app_ref)
 
+        async def notify_forwarded(user_id: int, text: str, message_id: int | None):
+            """Send (or edit) forwarded-media status as the bot, in the owner's bot chat."""
+            try:
+                if message_id is None:
+                    msg = await app_ref.bot.send_message(chat_id=user_id, text=text)
+                    return msg.message_id
+                await app_ref.bot.edit_message_text(
+                    chat_id=user_id, message_id=message_id, text=text
+                )
+            except Exception as exc:
+                logger.warning("Forwarded-media status message failed: %s", exc)
+            return message_id
+
         # Start Pyrogram eagerly and register forwarded-media handler
         try:
             client = await get_pyrogram_client()
-            setup_pyrogram_forwarded_downloads(client, str(TELEGRAM_DIR))
+            setup_pyrogram_forwarded_downloads(
+                client,
+                str(TELEGRAM_DIR),
+                bot_id=bot_id_from_token(BOT_TOKEN),
+                notify=notify_forwarded,
+            )
         except Exception as exc:
             logger.warning("Pyrogram forwarded-media handler not registered: %s", exc)
 
