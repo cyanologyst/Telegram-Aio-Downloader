@@ -54,6 +54,7 @@ from pyrogram import Client
 from pyrogram import StopTransmission
 from pyrogram.errors import FloodWait, RPCError
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -62,6 +63,7 @@ from telegram import (
     Update,
     WebAppInfo,
 )
+from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
@@ -80,6 +82,9 @@ from app.downloaders.spotify import SpotifyDownloader, is_spotify_url
 
 from app.bot.callbacks import answer_once, auto_answer
 from app.bot.search import SearchUI
+from app.bot.views import home as home_views
+from app.bot.views import settings as settings_views
+from app.bot.views.common import Screen
 from app.downloaders.torrents.prowlarr.client import ProwlarrClient
 from app.downloaders.torrents.rarbg.crawler import RARBGCrawler
 from app.downloaders.torrents.tpb.crawler import TPBCrawler
@@ -277,8 +282,6 @@ zip_select_sessions = {}  # {user_id: {"selected": set(), "page": int}}
 # Pending zip name sessions (waiting for user to provide zip file name)
 pending_zip_name_sessions = {}  # {user_id: {"mode": "all"|"selected", "session": {...}}}
 
-# User language preferences
-user_languages = {}  # {user_id: "en" or "fa"}
 DEFAULT_LANGUAGE = "en"
 
 # Status refresh tracking - one dashboard per chat
@@ -554,203 +557,13 @@ LANGUAGES = {
         "error_fetching_link": "Error fetching torrent details.",
         "send_magnet": "Send Magnet",
         "no_magnet_stored": "No magnet link stored for this bookmark.",
-    },
-    "fa": {
-        "home": "🏠 منوی اصلی",
-        "home_desc": "از صفحه کلید زیر استفاده کنید.",
-        "folder": "📁 پوشه‌ی دانلود:",
-        "target": "📤 مقصد آپلود:",
-        "target_val": "حساب تلگرام شخصی خود (Saved Messages / من)",
-        "help": "❓ راهنما",
-        "magnet_help": "🧲 برای شروع دانلود، لینک مگنت یا لینک مستقیم فایل ارسال کنید.",
-        "status_help": "📊 وضعیت: نمایش دانلودهای فعال.",
-        "queue_help": "📋 صف: نمایش تمام کارها.",
-        "cancel_help": "🛑 انصراف: نمایش کارهای فعال.",
-        "cancel_help2": "- ارسال: cancel <job_id> برای انصراف از یکی.",
-        "clear_help": "🧹 پاک‌کردن: حذف کارهای تمام‌شده از حافظه.",
-        "files_help": "📁 فایل‌ها: مرور پوشه‌ی دانلود.",
-        "upload_help": "📤 آپلود فایل: یک فایل انتخاب و آپلود کنید.",
-        "upload_folder_help": "📤 آپلود پوشه: یک پوشه انتخاب و تمام فایل‌ها را آپلود کنید.",
-        "notes": "ℹ️ یادداشت‌ها:",
-        "upload_account": "- مقصد آپلود حساب شخصی تلگرام شما است.",
-        "pyrogram_user": "- Pyrogram باید با حساب کاربری وارد شود، نه ربات.",
-        "pyrogram_first_run": "- در اولین اجرا، Pyrogram ممکن است از شما برای تلفن/کد/2FA در کنسول بپرسد.",
-        "status": "📊 وضعیت",
-        "no_active": "دانلود فعالی نیست.",
-        "active_jobs": "کارهای فعال:",
-        "queue": "📋 صف",
-        "no_jobs": "هیچ کاری موجود نیست.",
-        "upload_complete": "✅ آپلود تکمیل شد",
-        "folder_upload_complete": "✅ آپلود پوشه تکمیل شد",
-        "downloading": "📥 در حال دانلود",
-        "name": "نام:",
-        "state": "وضعیت:",
-        "progress": "پیشرفت:",
-        "speed": "سرعت:",
-        "eta": "زمان تخمینی:",
-        "confirm_delete": "⚠️ تأیید حذف",
-        "delete_type_folder": "نوع: پوشه",
-        "delete_type_file": "نوع: فایل",
-        "delete_warning_folder": "⚠️ اخطار: این موارد را در داخل حذف می‌کند.",
-        "delete_warning_file": "⚠️ اخطار: این فایل به‌طور دائمی حذف خواهد شد.",
-        "file_details": "📄 جزئیات فایل",
-        "folder_details": "📁 جزئیات پوشه",
-        "path": "📍 مسیر:",
-        "size": "📊 اندازه:",
-        "modified": "📅 ویرایش‌شده:",
-        "subfolders": "زیرپوشه‌ها:",
-        "files": "فایل‌ها:",
-        "total_size": "📊 اندازه کل:",
-        "uploaded": "آپلود‌شده:",
-        "yes_upload": "✅ بله، آپلود کنید",
-        "yes_delete": "🗑 بله، حذف کنید",
-        "yes_upload_all": "✅ بله، تمام را آپلود کنید",
-        "yes_delete_folder": "🗑 بله، پوشه را حذف کنید",
-        "cancelled": "لغو شد.",
-        "unknown_input": "ورودی نامعلوم.\nاز صفحه کلید زیر استفاده کنید یا لینک مگنت، لینک مستقیم فایل، یا لینک رسانه پشتیبانی‌شده ارسال کنید.",
-        "usage": "نحوه استفاده: cancel <job_id>",
-        "not_found": "پیدا نشد.",
-        "deleted_successfully": "✅ با موفقیت حذف شد",
-        "batch_upload": "📤 آپلود دسته‌ای",
-        "batch_delete": "🗑 حذف دسته‌ای",
-        "delete_all": "🗑 حذف همه",
-        "delete_all_confirm": "⚠️ حذف همه در پوشه",
-        "delete_all_warning": "این کار همه فایل‌ها و پوشه‌های این مسیر را برای همیشه حذف می‌کند.",
-        "yes_delete_all": "🗑 بله، حذف همه",
-        "batch_delete_files": "حذف {} فایل",
-        "batch_delete_confirm": "⚠️ تأیید حذف دسته‌ای",
-        "yes_batch_delete": "🗑 بله، حذف انتخاب‌شده‌ها",
-        "deleted_count": "حذف شد: {} فایل",
-        "delete_all_done": "{} فایل و {} پوشه حذف شد.",
-        "select_files": "فایل‌ها را بزنید تا انتخاب/لغو انتخاب شود.",
-        "upload_files": "آپلود {} فایل",
-        "select_at_least": "حداقل یک فایل انتخاب کنید",
-        "preparing": "آماده‌سازی برای آپلود...",
-        "duplicate_detected": "⚠️ تکراری شناسایی شد:",
-        "job_started": "کار #",
-        "job_id": "شناسه کار:",
-        "job_status": "[{}]",
-        "magnet_received": "🧲 لینک مغناطیسی دریافت شد",
-        "started": "کار شروع شد #",
-        "pid": "PID:",
-        "file_browser": "📁 مرورگر فایل",
-        "items": "مورد",
-        "page": "صفحه",
-        "tap_file": "روی فایل یا پوشه‌ای در زیر بزنید.",
-        "back": "⬅️ بازگشت",
-        "next": "بعدی ➡️",
-        "prev": "⬅️ قبلی",
-        "root": "📁 ریشه",
-        "refresh": "🔄 بازخوانی",
-        "up": "⬆️ بالا",
-        "home_btn": "🏠 خانه",
-        "open_folder": "📁 باز کردن پوشه",
-        "upload_file": "📤 آپلود فایل",
-        "upload_all": "📤 آپلود تمام فایل‌ها",
-        "delete_btn": "🗑 حذف",
-        "delete_folder": "🗑 حذف پوشه",
-        "cancel_btn": "❌ انصراف",
-        "delete_label": "📋 داشبورد زنده",
-        "job_number": "کار #{}",
-        "part": "قسمت",
-        "uploading": "📤 در حال آپلود",
-        "target_account": "مقصد: حساب شخصی تلگرام",
-        "parts_sent": "قسمت‌های ارسال‌شده:",
-        "language": "🌐 زبان",
-        "select_language": "زبان خود را انتخاب کنید:",
-        "first": "⏮️ اول",
-        "last": "⏭️ آخر",
-        "live_dashboard": "📊 داشبورد زنده",
-        "toggle_language": "🌐 تعویض زبان",
-        "en": "English 🇺🇸",
-        "fa": "فارسی 🇮🇷",
-        "delete_cancelled": "حذف لغو شد.",
-        "confirm_cancel_job": "⚠️ تأیید لغو کار",
-        "confirm_clear": "⚠️ تأیید پاک‌کردن",
-        "clear_warning": "⚠️ اخطار: این تمام کارهای تمام‌شده را حذف می‌کند.",
-        "cleared": "پاک شد",
-        "clear": "پاک‌کردن",
-        "convert": "🎬 تبدیل کیفیت",
-        "send_thumbnail": "📸 ارسال ریزنمونه",
-        "zip_menu": "📦 منوی فشرده‌سازی",
-        "list_files": "📋 فهرست فایل‌ها",
-        "select_files_zip": "☑️ انتخاب فایل‌ها برای فشرده‌سازی",
-        "zip_all": "📦 فشرده‌سازی تمام",
-        "settings": "⚙️ تنظیمات",
-        "zip_part_size": "اندازه قسمت فشرده‌سازی (مگابایت)",
-        "zip_method": "روش فشرده‌سازی",
-        "zip_password": "رمز فشرده‌سازی",
-        "auto_delete_files": "حذف خودکار پس از فشرده‌سازی",
-        "auto_delete_zips": "حذف خودکار فایل‌های فشرده بعد از ارسال",
-        "auto_delete_upload": "حذف خودکار پس از آپلود",
-        "compression_level": "سطح فشرده‌سازی",
-        "confirm_changes": "✅ تأیید تغییرات",
-        "cancel": "❌ لغو",
-        "zip_settings": "⚙️ تنظیمات فشرده‌سازی",
-        "files_selected": "فایل‌های انتخاب‌شده",
-        "select_save": "فایل‌ها را در زیر انتخاب کنید، سپس ذخیره کنید",
-        "no_files": "فایلی برای فشرده‌سازی وجود ندارد",
-        "zipping": "ایجاد بایگانی فشرده‌سازی شده...",
-        "zip_complete": "✅ فشرده‌سازی کامل شد!",
-        "zip_error": "❌ خطای فشرده‌سازی",
-        "sending_zip": "ارسال فایل‌های فشرده...",
-        "uploading_volume": "📤 در حال ارسال جلد {}/{}: {}",
-        "upload_progress": "{} {} ({}%) ⏱ {}",
-        "file_count": "{} فایل",
-        "invalid_value": "مقدار نامعتبر",
-        "invalid_archive_method": "روش بایگانی نامعتبر",
-        "part_size_error": "اندازه قسمت باید 100 مگابایت تا 5 گیگابایت باشد",
-        "compression_error": "سطح فشرده‌سازی باید 1 تا 9 باشد",
-        "password_too_long": "رمز بسیار طولانی است (حداکثر 100 کاراکتر)",
-        "enter_zip_name": "📦 یک نام برای فایل فشرده وارد کنید:",
-        "zip_name_cancelled": "ورود نام فشرده‌سازی لغو شد.",
-        "error_occurred": "An error occurred. Please try again.",
-        # TPB crawler strings
-        "tpb_search": "🏴‍☠️ جستجوی TPB",
-        "tpb_welcome": "جستجوی The Pirate Bay",
-        "tpb_send_query": "یک عبارت جستجو برای یافتن تورنت در The Pirate Bay ارسال کنید.",
-        "tpb_fetching": "در حال دریافت جزئیات تورنت...",
-        "tpb_starting_download": "در حال شروع دانلود...",
-        "tpb_download_started": "دانلود شروع شد!",
-        "tpb_paste_to_download": "این لینک مغناطیسی را برای شروع دانلود ارسال کنید.",
-        "tpb_tap_download": "برای دانلود فوری 📥 را بزنید",
-        "rarbg_search": "🧲 جستجوی RARBG",
-        "rarbg_welcome": "جستجوی RARBG",
-        "rarbg_send_query": "یک عبارت جستجو برای یافتن تورنت در میرور RARBG تنظیم‌شده ارسال کنید.",
-        "rarbg_fetching": "در حال دریافت جزئیات تورنت...",
-        "rarbg_download_started": "دانلود شروع شد!",
-        "rarbg_paste_to_download": "این لینک مغناطیسی را برای شروع دانلود ارسال کنید.",
-        "rarbg_tap_download": "برای دانلود فوری 📥 را بزنید",
-        "prowlarr_search": "🧭 جستجوی Prowlarr",
-        "prowlarr_welcome": "جستجوی Prowlarr",
-        "prowlarr_send_query": "یک عبارت برای جستجو در همه ایندکسرهای تنظیم‌شده Prowlarr ارسال کنید.",
-        "prowlarr_not_configured": "Prowlarr هنوز تنظیم نشده است. PROWLARR_URL و PROWLARR_API_KEY را در .env تنظیم کنید.",
-        "prowlarr_download_started": "دانلود شروع شد!",
-        "prowlarr_tap_download": "برای همه فایل‌ها 📥 یا برای انتخاب فایل‌های تورنت ☑️ را بزنید.",
-        "select_category": "🔍 دسته‌بندی را انتخاب کنید: {}",
-        "searching_query": "🔍 در حال جستجو: {}",
-        "no_results": "نتیجه‌ای یافت نشد.",
-        "results_for": "نتایج برای: {}",
-        "link": "لینک",
-        "seeders": "سیدر",
-        "leechers": "لیچر",
-        "uploaded_on": "آپلود شده",
-        "error_fetching_link": "خطا در دریافت جزئیات تورنت.",
-        "send_magnet": "ارسال لینک مغناطیسی",
-        "no_magnet_stored": "لینک مغناطیسی برای این نشانک ذخیره نشده.",
     }
 }
 
 
 def get_lang(user_id: int, key: str) -> str:
-    """Get translated string for user."""
-    lang = user_languages.get(user_id, DEFAULT_LANGUAGE)
-    return LANGUAGES.get(lang, LANGUAGES[DEFAULT_LANGUAGE]).get(key, key)
-
-
-def get_lang_for_all(key: str, lang: str = DEFAULT_LANGUAGE) -> str:
-    """Get translated string for a specific language."""
-    return LANGUAGES.get(lang, LANGUAGES[DEFAULT_LANGUAGE]).get(key, key)
+    """UI string by key. The bot is English-only; user_id is kept for call sites."""
+    return LANGUAGES[DEFAULT_LANGUAGE].get(key, key)
 
 
 def is_authorized_user(user_id: int) -> bool:
@@ -1507,6 +1320,46 @@ async def _update_status_message_unlocked(app: Application, chat_id: int, user_i
         logger.warning("Unable to send status message: %s", exc)
 
 
+async def show_status_dashboard(app: Application, chat_id: int, user_id: int = None, replace=None):
+    """Show the status dashboard where the user is looking.
+
+    From the keyboard or /status it is sent fresh at the bottom of the chat and
+    the previous dashboard is deleted, so pressing Status always shows
+    something. From an inline menu (``replace``) that message becomes the
+    dashboard. Either way it is the one message auto-updates edit from then on.
+    """
+    u = user_id or 0
+    text = build_status_text(u)
+    markup = build_status_controls_markup()
+    lock = status_message_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        previous = status_messages.pop(chat_id, None)
+        message_id = None
+        if replace is not None:
+            try:
+                await replace.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+                message_id = replace.message_id
+            except BadRequest as exc:
+                if "not modified" in str(exc).lower():
+                    message_id = replace.message_id
+        if message_id is None:
+            msg = await app.bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=markup, disable_web_page_preview=True
+            )
+            message_id = msg.message_id
+        if previous and previous.get("message_id") != message_id:
+            try:
+                await app.bot.delete_message(chat_id=chat_id, message_id=previous["message_id"])
+            except Exception as exc:
+                logger.debug("Old status message not deleted: %s", exc)
+        status_messages[chat_id] = {
+            "message_id": message_id,
+            "last_update": time.time(),
+            "user_id": u,
+            "text_hash": _hash_content(text),
+        }
+
+
 async def maybe_auto_update_status_message(app: Application, job: dict, force: bool = False):
     if not job.get("status_visible", True):
         return
@@ -1659,180 +1512,67 @@ async def safe_edit_message(message, text, reply_markup=None):
             pass
 
 
-def mini_app_inline_button(label: str = "Open File Browser"):
-    """HTTPS-aware inline Mini-App button; falls back to a plain URL button."""
-    if not mini_app_enabled():
-        return None
-    if mini_app_url_is_https():
-        return InlineKeyboardButton(label, web_app=WebAppInfo(url=WEB_APP_URL))
-    return InlineKeyboardButton(f"{label} (browser)", url=WEB_APP_URL)
+MINI_APP = home_views.MiniApp(url=WEB_APP_URL, enabled=WEB_APP_ENABLE)
 
 
-def mini_app_url_is_https() -> bool:
-    return bool(WEB_APP_URL) and WEB_APP_URL.lower().startswith("https://")
-
-
-def mini_app_enabled() -> bool:
-    return bool(WEB_APP_ENABLE and WEB_APP_URL)
-
-
-def mini_app_reply_rows(label: str = "Mini-App"):
-    """Rows for a ReplyKeyboardMarkup - must contain KeyboardButton/str only.
-
-    Telegram clients only open native WebApp buttons over public HTTPS. Reply
-    keyboards have no URL button type at all, so over plain HTTP there is
-    nothing useful to show here; the browser link lives on the inline Files
-    menu instead (see mini_app_inline_rows).
-    """
-    if not mini_app_enabled() or not mini_app_url_is_https():
-        return []
-    return [[KeyboardButton(f"📱 {label}", web_app=WebAppInfo(url=WEB_APP_URL))]]
-
-
-def mini_app_inline_rows(label: str = "Mini-App"):
-    """Rows for an InlineKeyboardMarkup - must contain InlineKeyboardButton only."""
-    button = mini_app_inline_button(label)
-    return [[button]] if button else []
+def mini_app_inline_button(label: str = "📱 Mini App"):
+    """HTTPS-aware inline Mini App button; falls back to a plain URL button."""
+    return MINI_APP.inline_button(label)
 
 
 def build_reply_menu(user_id: int = None):
-    u = user_id or 0
-    rows = [
-        [f"{ICON_STATUS} Status"],
-        [f"{ICON_DOWNLOAD} Downloads", f"{ICON_FOLDER} Files"],
-        [f"{ICON_ARCHIVE} Tools", f"{ICON_SETTINGS} Settings"],
-        [f"{ICON_HELP} Help"],
-    ]
-    for extra_row in reversed(mini_app_reply_rows()):
-        rows.insert(0, extra_row)
+    return home_views.reply_keyboard(MINI_APP)
 
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder=get_lang(u, 'magnet_help'),
-    )
 
-def build_downloads_menu_text(user_id: int = None) -> str:
-    return (
-        f"{ICON_DOWNLOAD} Downloads\n\n"
-        "Send a magnet, torrent file, direct URL, Spotify link, manga/gallery link, "
-        "or supported video link to start a download.\n\n"
-        "Use the buttons below for status, search, and cleanup."
+def free_disk_bytes() -> int | None:
+    try:
+        return shutil.disk_usage(DOWNLOAD_DIR).free
+    except OSError:
+        return None
+
+
+def active_job_count() -> int:
+    return sum(
+        1
+        for job in download_jobs.values()
+        if job.get("status") in JOB_ACTIVE_STATES and job.get("status_visible", True)
     )
 
 
-def build_downloads_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ICON_STATUS} Live Status", callback_data="menu:status")],
-        [InlineKeyboardButton("Supported Sites", url=SUPPORTED_SITES_URL)],
-        [InlineKeyboardButton("🔍 Search torrents", callback_data="srch:p:")],
-        [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
-        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
-    ])
+def build_home_screen() -> Screen:
+    return home_views.home_screen(active_job_count(), free_disk_bytes(), MINI_APP)
 
 
-def build_supported_sites_markup(user_id: int = None) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Open Supported Sites", url=SUPPORTED_SITES_URL)],
-        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
-    ])
+def build_settings_screen(user_id: int) -> Screen:
+    return settings_views.settings_screen(get_user_settings(user_id))
 
 
-def build_files_menu_text(user_id: int = None) -> str:
-    return (
-        f"{ICON_FOLDER} Files\n\n"
-        "Browse downloads, upload selected files to Telegram, delete files, or open "
-        "the Mini-App for the cleanest file manager experience."
-    )
+def build_archive_settings_screen(user_id: int, context=None) -> Screen:
+    back = (context.user_data.get("archive_settings_back") if context else None) or "nav:settings"
+    return settings_views.archive_settings_screen(get_user_settings(user_id), back)
 
 
-def build_files_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
-    rows = []
-    rows.extend(mini_app_inline_rows("Open Mini-App"))
-    rows.extend([
-        [InlineKeyboardButton(f"{ICON_FOLDER} Chat File Browser", callback_data="menu:file_browser")],
-        [InlineKeyboardButton(f"{ICON_ARCHIVE} Archive / Zip Menu", callback_data="menu:zip")],
-        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def build_tools_menu_text(user_id: int = None) -> str:
-    return (
-        f"{ICON_ARCHIVE} Tools\n\n"
-        "Archive files, search torrents, adjust manga PDF behavior, or manage finished jobs."
-    )
-
-
-def build_tools_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ICON_ARCHIVE} Zip Menu", callback_data="menu:zip")],
-        [InlineKeyboardButton("🔍 Search torrents", callback_data="srch:p:")],
-        [InlineKeyboardButton(f"{ICON_IMAGE} Manga Settings", callback_data="menu:manga_settings")],
-        [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
-        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
-    ])
-
-
-def build_settings_menu_text(user_id: int = None) -> str:
-    return (
-        f"{ICON_SETTINGS} Settings\n\n"
-        "Tune archive behavior, batch downloads, manga PDF automation, forwarded-post downloads, "
-        "and language from one place."
-    )
-
-
-def build_settings_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
-    settings = get_user_settings(user_id or 0)
-    forwarded = "ON" if settings.get("auto_download_forwarded_posts") else "OFF"
-    batch_mode = batch_download_mode_label(settings.get("batch_download_mode"))
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ICON_SETTINGS} Archive Settings", callback_data="menu:zip_settings")],
-        [InlineKeyboardButton(f"{ICON_IMAGE} Manga Settings", callback_data="menu:manga_settings")],
-        [InlineKeyboardButton(f"{ICON_DOWNLOAD} Batch: {batch_mode}", callback_data="menu:batch_mode")],
-        [InlineKeyboardButton(f"{ICON_DOWNLOAD} Forwarded Posts: {forwarded}", callback_data="menu:forwarded_posts")],
-        [InlineKeyboardButton(f"{ICON_LANGUAGE} Language", callback_data="menu:language")],
-        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
-    ])
-
-
-# =========================================================
-# Main texts
-# =========================================================
-
-def build_home_text(user_id: int = None):
-    return (
-        f"{get_lang(user_id or 0, 'home')}\n\n"
-        f"{get_lang(user_id or 0, 'home_desc')}\n\n"
-        f"{ICON_FOLDER} {clean_emoji_prefix(get_lang(user_id or 0, 'folder'))}\n{DOWNLOAD_DIR}\n\n"
-        f"{ICON_UPLOAD} {clean_emoji_prefix(get_lang(user_id or 0, 'target'))}\n{get_lang(user_id or 0, 'target_val')}"
-    )
-
-
-def build_help_text(user_id: int = None):
-    u = user_id or 0
-    return (
-        f"{ICON_HELP} {clean_emoji_prefix(get_lang(u, 'help'))}\n\n"
-        f"{ICON_MAGNET} {clean_emoji_prefix(get_lang(u, 'magnet_help'))}\n"
-        f"{ICON_STATUS} {clean_emoji_prefix(get_lang(u, 'status_help'))}\n"
-        f"{ICON_STOP} Pause/resume/cancel active downloads from the status card.\n"
-        f"{ICON_BROOM} {clean_emoji_prefix(get_lang(u, 'clear_help'))}\n"
-        f"{ICON_FOLDER} {clean_emoji_prefix(get_lang(u, 'files_help'))}\n"
-        f"{ICON_UPLOAD} {clean_emoji_prefix(get_lang(u, 'upload_help'))}\n"
-        f"{ICON_UPLOAD} {clean_emoji_prefix(get_lang(u, 'upload_folder_help'))}\n\n"
-        f"{ICON_DOWNLOAD} Forwarded posts: /forwardedposts on|off controls automatic forwarded media downloads.\n\n"
-        f"{ICON_INFO} {clean_emoji_prefix(get_lang(u, 'notes'))}\n"
-        f"- {get_lang(u, 'upload_account')}\n"
-        f"- {get_lang(u, 'pyrogram_user')}\n"
-        f"- {get_lang(u, 'pyrogram_first_run')}"
+async def show_screen(message, screen: Screen, *, edit: bool = True):
+    """Show an HTML view: edit ``message`` in place, or reply with a new message."""
+    text, markup = screen
+    if edit:
+        try:
+            return await message.edit_text(
+                text, reply_markup=markup, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+            )
+        except BadRequest as exc:
+            if "not modified" in str(exc).lower():
+                return message
+            logger.debug("Screen edit failed (%s); sending a new message", exc)
+    return await message.reply_text(
+        text, reply_markup=markup, parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 
 def format_forwarded_posts_setting(user_id: int) -> str:
     settings = get_user_settings(user_id)
     enabled = settings.get("auto_download_forwarded_posts", False)
-    return f"Forwarded post auto-download: {'ON' if enabled else 'OFF'}"
+    return f"Forwarded media auto-download: {'ON' if enabled else 'OFF'}"
 
 
 def build_status_text(user_id: int = None):
@@ -1948,7 +1688,11 @@ def build_status_controls_markup():
                 toggle,
                 InlineKeyboardButton(f"{ICON_STOP} Cancel #{jid}", callback_data=f"job_cancel:{jid}"),
             ])
-    return InlineKeyboardMarkup(rows) if rows else None
+    rows.append([
+        InlineKeyboardButton(f"{ICON_REFRESH} Refresh", callback_data="nav:status"),
+        InlineKeyboardButton(f"{ICON_HOME} Menu", callback_data="nav:home"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_live_dashboard_text(user_id: int = None):
@@ -3013,36 +2757,6 @@ def build_manga_completed_text(job: dict) -> str:
     if job.get("pdf_path"):
         lines.extend(["", f"PDF:\n{job['pdf_path']}"])
     return "\n".join(lines)
-
-
-def build_manga_settings_text(user_id: int) -> str:
-    settings = get_user_settings(user_id)
-    return (
-        f"{ICON_IMAGE} Manga Settings\n\n"
-        f"Auto convert manga to PDF: {'ON' if settings.get('manga_auto_convert_pdf') else 'OFF'}\n"
-        f"Remove images after conversion: {'ON' if settings.get('manga_remove_images_after_conversion') else 'OFF'}\n\n"
-        f"Downloaded galleries go to:\n{MANGA_DIR}\n\n"
-        "PDF files are created in the main Download folder."
-    )
-
-
-def build_manga_settings_markup(user_id: int) -> InlineKeyboardMarkup:
-    settings = get_user_settings(user_id)
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                f"Auto convert PDF: {'ON' if settings.get('manga_auto_convert_pdf') else 'OFF'}",
-                callback_data="manga_setting:auto_convert",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "Remove images after PDF: "
-                f"{'ON' if settings.get('manga_remove_images_after_conversion') else 'OFF'}",
-                callback_data="manga_setting:remove_images",
-            )
-        ],
-    ])
 
 
 async def convert_manga_folder_to_pdf_job(folder: Path, user_id: int) -> Path:
@@ -5124,44 +4838,29 @@ async def cancel_input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_authorized_user(user_id):
-        await update.message.reply_text("Unauthorized")
-        return
-
     await update.message.reply_text(
-        build_home_text(user_id), 
-        reply_markup=build_reply_menu(user_id)
+        home_views.welcome_text(),
+        reply_markup=build_reply_menu(update.effective_user.id),
+        parse_mode=ParseMode.HTML,
     )
-    
-    # Show the file browser mini-app button
-    button = mini_app_inline_button("Open Modern File Browser")
-    if button:
-        await update.message.reply_text(
-            "Or use our modern file browser:",
-            reply_markup=InlineKeyboardMarkup([[button]]),
-        )
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_screen(update.message, build_home_screen(), edit=False)
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_screen(update.message, home_views.help_screen(SUPPORTED_SITES_URL), edit=False)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    await update_status_message(context.application, chat_id, user_id)
+    await show_status_dashboard(
+        context.application, update.effective_chat.id, update.effective_user.id
+    )
 
 
 async def supported_sites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_authorized_user(user_id):
-        await update.message.reply_text("Unauthorized")
-        return
-
-    await update.message.reply_text(
-        "Supported Sites\n\nOpen the live support matrix for video, adult video, hentai, manga/gallery, torrent, and music inputs.",
-        reply_markup=build_supported_sites_markup(user_id),
-        disable_web_page_preview=True,
-    )
+    await show_screen(update.message, home_views.sites_screen(SUPPORTED_SITES_URL), edit=False)
 
 
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5207,31 +4906,8 @@ async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_authorized_user(user_id):
-        await update.message.reply_text("⛔ Unauthorized")
-        return
-
-    await update.message.reply_text(
-        build_zip_settings_text(user_id),
-        reply_markup=build_zip_settings_markup(user_id),
-        disable_web_page_preview=True,
-    )
-
-
-async def manga_settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_authorized_user(user_id):
-        await update.message.reply_text("Unauthorized")
-        return
-
-    await update.message.reply_text(
-        build_manga_settings_text(user_id),
-        reply_markup=build_manga_settings_markup(user_id),
-        disable_web_page_preview=True,
-    )
+    """/settings and /mangasettings: the settings hub."""
+    await show_screen(update.message, build_settings_screen(update.effective_user.id), edit=False)
 
 
 async def forwarded_posts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5285,7 +4961,7 @@ def build_zip_menu_markup(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"{ICON_FILE} {clean_emoji_prefix(get_lang(u, 'list_files'))}", callback_data="zip_menu:list")],
         [InlineKeyboardButton(f"{ICON_OK} {clean_emoji_prefix(get_lang(u, 'select_files_zip'))}", callback_data="zip_menu:select")],
         [InlineKeyboardButton(f"{ICON_ARCHIVE} {clean_emoji_prefix(get_lang(u, 'zip_all'))}", callback_data="zip_menu:zip_all")],
-        [InlineKeyboardButton(f"{ICON_SETTINGS} {clean_emoji_prefix(get_lang(u, 'zip_settings'))}", callback_data="zip_menu:settings")],
+        [InlineKeyboardButton(f"{ICON_SETTINGS} {clean_emoji_prefix(get_lang(u, 'zip_settings'))}", callback_data="nav:archive_settings")],
         [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
     ])
 
@@ -5420,32 +5096,6 @@ def build_zip_file_select_markup(user_id: int, page: int = 0, files_per_page: in
     keyboard.append([InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'home_btn'))}", callback_data="zip_menu:back")])
     
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
-
-
-def build_zip_settings_text(user_id: int) -> str:
-    """Build text for zip settings."""
-    u = user_id or 0
-    return format_settings_text(user_id) + "\n\nTap buttons below to change settings:"
-
-
-def build_zip_settings_markup(user_id: int) -> InlineKeyboardMarkup:
-    """Build buttons for zip settings."""
-    u = user_id or 0
-    settings = get_user_settings(user_id)
-    part_size_mb = settings.get("zip_part_size", 1 * 1024 * 1024 * 1024) // (1024 * 1024)
-    
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📦 Part Size: {part_size_mb}MB", callback_data="zip_setting:part_size")],
-        [InlineKeyboardButton(f"📋 Method: {settings.get('zip_method', 'zip').upper()}", callback_data="zip_setting:method")],
-        [InlineKeyboardButton(f"🔐 Password: {'Set' if settings.get('password') else 'None'}", callback_data="zip_setting:password")],
-        [InlineKeyboardButton(f"🗑 Auto-delete files: {'✅' if settings.get('auto_delete_files_after_zip') else '❌'}", callback_data="zip_setting:auto_del_files")],
-        [InlineKeyboardButton(f"🗑 Auto-delete zips: {'✅' if settings.get('auto_delete_zips_after_send') else '❌'}", callback_data="zip_setting:auto_del_zips")],
-        [InlineKeyboardButton(f"🗑 Auto-delete after upload: {'✅' if settings.get('auto_delete_files_after_upload') else '❌'}", callback_data="zip_setting:auto_del_upload")],
-        [InlineKeyboardButton(f"📥 Forwarded posts: {'✅' if settings.get('auto_download_forwarded_posts') else '❌'}", callback_data="zip_setting:forwarded_posts")],
-        [InlineKeyboardButton(f"Batch: {batch_download_mode_label(settings.get('batch_download_mode'))}", callback_data="zip_setting:batch_mode")],
-        [InlineKeyboardButton(f"🔨 Compression: {settings.get('compression_level', 5)}/9", callback_data="zip_setting:compression")],
-        [InlineKeyboardButton(f"🏠 Back", callback_data="zip_menu:back")],
-    ])
 
 
 # =========================================================
@@ -5713,50 +5363,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update_status_message(context.application, chat_id, user_id)
 
-        elif normalized in ("home", "main menu"):
-            await update.message.reply_text(
-                build_home_text(user_id), 
-                reply_markup=build_reply_menu(user_id)
-            )
+        elif normalized in ("menu", "home", "main menu", "downloads", "download", "tools", "tool"):
+            # "downloads"/"tools" are labels from the old keyboard.
+            await show_screen(update.message, build_home_screen(), edit=False)
 
         elif normalized == "status":
-            await update_status_message(context.application, chat_id, user_id)
+            await show_status_dashboard(context.application, chat_id, user_id)
 
-        elif normalized in ("downloads", "download"):
-            await update.message.reply_text(
-                build_downloads_menu_text(user_id),
-                reply_markup=build_downloads_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("tools", "tool"):
-            await update.message.reply_text(
-                build_tools_menu_text(user_id),
-                reply_markup=build_tools_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("settings", "setting"):
-            await update.message.reply_text(
-                build_settings_menu_text(user_id),
-                reply_markup=build_settings_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
+        elif normalized in ("settings", "setting", "manga settings", "manga"):
+            await show_screen(update.message, build_settings_screen(user_id), edit=False)
 
         elif normalized == "queue":
             await update.message.reply_text(
-                build_queue_text(user_id), 
+                build_queue_text(user_id),
                 reply_markup=build_reply_menu(user_id)
             )
 
-        elif normalized in ("files",):
-            await update.message.reply_text(
-                build_files_menu_text(user_id),
-                reply_markup=build_files_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized == "file browser":
+        elif normalized in ("files", "file browser"):
             await update.message.reply_text(
                 build_files_text("", 0),
                 reply_markup=build_files_markup("", 0),
@@ -5765,80 +5388,43 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif normalized == "cancel":
             active = [j for j in download_jobs.values() if j["status"] in JOB_ACTIVE_STATES]
-
             if not active:
                 await update.message.reply_text(
-                    f"{ICON_STOP} {clean_emoji_prefix(get_lang(user_id, 'no_active'))}",
+                    f"{ICON_STOP} No active downloads to cancel.",
                     reply_markup=build_reply_menu(user_id)
                 )
             else:
-                lines = [f"{ICON_STOP} {clean_emoji_prefix(get_lang(user_id, 'cancel_help'))}", ""]
-                for j in sorted(active, key=lambda x: x["id"]):
-                    lines.append(f"#{j['id']} [{j['status']}] {j['name']}")
-                lines.append("")
-                lines.append(get_lang(user_id, 'cancel_help2'))
-                await update.message.reply_text("\n".join(lines), reply_markup=build_reply_menu(user_id))
+                await show_status_dashboard(context.application, chat_id, user_id)
 
         elif lower.startswith("cancel "):
-            m = re.match(r"cancel\s+(\d+)", lower)
-            if not m:
-                await update.message.reply_text(
-                    get_lang(user_id, 'usage'),
-                    reply_markup=build_reply_menu(user_id)
-                )
-                return
-
-            jid = int(m.group(1))
+            m = re.match(r"cancel\s+#?(\d+)", lower)
+            jid = int(m.group(1)) if m else None
             if jid not in download_jobs:
                 await update.message.reply_text(
-                    f"Job #{jid} {get_lang(user_id, 'not_found')}",
+                    "Usage: cancel <job number>, for example: cancel 3"
+                    if jid is None
+                    else f"Job #{jid} not found.",
                     reply_markup=build_reply_menu(user_id)
                 )
                 return
-            
             job = download_jobs[jid]
             await update.message.reply_text(
-                f"{ICON_WARN} {get_lang(user_id, 'confirm_cancel_job')}\n\n"
-                f"Job #{jid}\n"
-                f"{job['name']}\n\n"
+                f"{ICON_WARN} Cancel job #{jid}?\n\n{shorten(clean_download_name(job['name']), 90)}\n"
                 f"Status: {job['status']}",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(f"{ICON_STOP} Yes, Cancel", callback_data=f"cancel_confirm:{jid}"),
-                    ]
-                ]),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(f"{ICON_STOP} Yes, cancel it", callback_data=f"cancel_confirm:{jid}"),
+                    InlineKeyboardButton("Keep it", callback_data="noop_close"),
+                ]]),
             )
 
-        elif lower in ("clear", f"{ICON_BROOM.lower()} clear", get_lang(user_id, 'clear').lower()):
+        elif normalized == "clear":
             await clear_jobs_cmd(update, context)
 
         elif normalized == "help":
-            await update.message.reply_text(
-                build_help_text(user_id), 
-                reply_markup=build_supported_sites_markup(user_id),
-                disable_web_page_preview=True,
-            )
+            await show_screen(update.message, home_views.help_screen(SUPPORTED_SITES_URL), edit=False)
 
-        elif normalized in ("manga settings", "manga"):
-            await update.message.reply_text(
-                build_manga_settings_text(user_id),
-                reply_markup=build_manga_settings_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("language", "toggle language"):
-            lang_keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(get_lang_for_all("en", "en"), callback_data="set_lang:en"),
-                    InlineKeyboardButton(get_lang_for_all("fa", "fa"), callback_data="set_lang:fa"),
-                ]
-            ])
-            await update.message.reply_text(
-                f"{get_lang(user_id, 'language')}\n\n{get_lang(user_id, 'select_language')}",
-                reply_markup=lang_keyboard,
-            )
-
-        elif normalized in ("zip menu", "zip"):
+        elif normalized in ("zip menu", "zip", "archive"):
+            context.user_data["archive_settings_back"] = "nav:archive"
             await update.message.reply_text(
                 build_zip_menu_text(user_id),
                 reply_markup=build_zip_menu_markup(user_id),
@@ -5850,17 +5436,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await search_ui.open(context, update.message, provider_key, edit=False)
 
         elif is_http_url(text):
+            text_, markup = home_views.sites_screen(SUPPORTED_SITES_URL)
             await update.message.reply_text(
                 f"{ICON_WARN} I don't know how to download this link.\n\n"
                 "Supported: magnets, .torrent files, direct file links (ending in a file "
-                "extension like .zip or .mkv), and the sites listed under Supported Sites.",
-                reply_markup=build_supported_sites_markup(user_id),
+                "extension like .zip or .mkv), and the sites in the Supported sites list.",
+                reply_markup=markup,
                 disable_web_page_preview=True,
             )
 
         else:
             await update.message.reply_text(
-                get_lang(user_id, 'unknown_input'),
+                "I didn't understand that. Send a link, a magnet or a .torrent file to "
+                "start a download, or use the keyboard below.",
                 reply_markup=build_reply_menu(user_id),
             )
 
@@ -6022,9 +5610,72 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
 
     try:
-        if data == "menu_home":
-            await safe_edit_message(query.message, build_home_text(user_id), build_reply_menu(user_id))
-        
+        if data == "noop":
+            pass
+
+        elif data in ("nav:home", "menu_home", "menu:downloads", "menu:tools", "menu:files"):
+            # The last three are buttons from menus that no longer exist.
+            await show_screen(query.message, build_home_screen())
+
+        elif data in ("nav:settings", "menu:settings", "menu:manga_settings"):
+            await show_screen(query.message, build_settings_screen(user_id))
+
+        elif data in ("nav:archive_settings", "menu:zip_settings", "zip_menu:settings"):
+            if data == "zip_menu:settings" and "archive_settings_back" not in context.user_data:
+                context.user_data["archive_settings_back"] = "nav:archive"
+            elif data != "zip_menu:settings":
+                context.user_data["archive_settings_back"] = "nav:settings"
+            await show_screen(query.message, build_archive_settings_screen(user_id, context))
+
+        elif data in ("nav:archive", "menu:zip"):
+            context.user_data["archive_settings_back"] = "nav:archive"
+            await safe_edit_message(
+                query.message, build_zip_menu_text(user_id), build_zip_menu_markup(user_id)
+            )
+
+        elif data == "nav:help":
+            await show_screen(query.message, home_views.help_screen(SUPPORTED_SITES_URL))
+
+        elif data in ("nav:status", "menu:status"):
+            await show_status_dashboard(context.application, chat_id, user_id, replace=query.message)
+
+        elif data.startswith("set:"):
+            key = data.split(":", 1)[1]
+            settings = get_user_settings(user_id)
+            if key in settings_views.HUB_TOGGLES:
+                await update_setting(user_id, key, not settings.get(key, False))
+            elif key == "video_default":
+                await update_setting(
+                    user_id, key, settings_views.next_video_default(settings.get(key))
+                )
+            elif key == "batch_download_mode":
+                current = normalize_batch_download_mode(settings.get(key))
+                next_mode = (
+                    BatchDownloadMode.DOWNLOAD_ONLY
+                    if current is BatchDownloadMode.UPLOAD_AND_DELETE
+                    else BatchDownloadMode.UPLOAD_AND_DELETE
+                )
+                await update_setting(user_id, key, next_mode.value)
+            else:
+                await answer_once(query, "This setting no longer exists.", show_alert=True)
+                return
+            await show_screen(query.message, build_settings_screen(user_id))
+
+        elif data in ("menu:forwarded_posts", "menu:batch_mode", "menu:language") or data.startswith(
+            "set_lang:"
+        ):
+            # Buttons from the old settings menu.
+            if data == "menu:forwarded_posts":
+                settings = get_user_settings(user_id)
+                await update_setting(
+                    user_id,
+                    "auto_download_forwarded_posts",
+                    not settings.get("auto_download_forwarded_posts"),
+                )
+            elif data.startswith(("menu:language", "set_lang:")):
+                await answer_once(query, "The bot is English-only now.", show_alert=True)
+            await show_screen(query.message, build_settings_screen(user_id))
+
         elif data.startswith("up_cancel:"):
             if cancel_upload(data.split(":", 1)[1]):
                 await answer_once(query, "Cancelling upload...")
@@ -6037,110 +5688,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "refresh_dashboard":
             await update_live_dashboard(context.application, chat_id, user_id)
 
-        elif data == "menu:downloads":
-            await safe_edit_message(
-                query.message,
-                build_downloads_menu_text(user_id),
-                build_downloads_menu_markup(user_id),
-            )
-
-        elif data == "menu:files":
-            await safe_edit_message(
-                query.message,
-                build_files_menu_text(user_id),
-                build_files_menu_markup(user_id),
-            )
-
-        elif data == "menu:tools":
-            await safe_edit_message(
-                query.message,
-                build_tools_menu_text(user_id),
-                build_tools_menu_markup(user_id),
-            )
-
-        elif data == "menu:settings":
-            await safe_edit_message(
-                query.message,
-                build_settings_menu_text(user_id),
-                build_settings_menu_markup(user_id),
-            )
-
-        elif data == "menu:status":
-            await safe_edit_message(
-                query.message,
-                build_status_text(user_id),
-                build_status_controls_markup(),
-            )
-            status_messages[chat_id] = {
-                "message_id": query.message.message_id,
-                "last_update": time.time(),
-                "user_id": user_id,
-            }
-
         elif data == "menu:file_browser":
             await safe_edit_message(
                 query.message,
                 build_files_text("", 0),
                 build_files_markup("", 0),
             )
-
-        elif data == "menu:zip":
-            await safe_edit_message(
-                query.message,
-                build_zip_menu_text(user_id),
-                build_zip_menu_markup(user_id),
-            )
-
-        elif data == "menu:zip_settings":
-            await safe_edit_message(
-                query.message,
-                build_zip_settings_text(user_id),
-                build_zip_settings_markup(user_id),
-            )
-
-        elif data == "menu:manga_settings":
-            await safe_edit_message(
-                query.message,
-                build_manga_settings_text(user_id),
-                build_manga_settings_markup(user_id),
-            )
-
-        elif data == "menu:language":
-            await safe_edit_message(
-                query.message,
-                f"{ICON_LANGUAGE} {get_lang(user_id, 'language')}\n\n{get_lang(user_id, 'select_language')}",
-                InlineKeyboardMarkup([[
-                    InlineKeyboardButton(get_lang_for_all("en", "en"), callback_data="set_lang:en"),
-                    InlineKeyboardButton(get_lang_for_all("fa", "fa"), callback_data="set_lang:fa"),
-                ]]),
-            )
-
-        elif data == "menu:forwarded_posts":
-            settings = get_user_settings(user_id)
-            enabled = not bool(settings.get("auto_download_forwarded_posts"))
-            await update_setting(user_id, "auto_download_forwarded_posts", enabled)
-            await safe_edit_message(
-                query.message,
-                build_settings_menu_text(user_id),
-                build_settings_menu_markup(user_id),
-            )
-            await answer_once(query, f"Forwarded posts: {'ON' if enabled else 'OFF'}")
-
-        elif data == "menu:batch_mode":
-            settings = get_user_settings(user_id)
-            current = normalize_batch_download_mode(settings.get("batch_download_mode"))
-            next_mode = (
-                BatchDownloadMode.DOWNLOAD_ONLY
-                if current is BatchDownloadMode.UPLOAD_AND_DELETE
-                else BatchDownloadMode.UPLOAD_AND_DELETE
-            )
-            await update_setting(user_id, "batch_download_mode", next_mode.value)
-            await safe_edit_message(
-                query.message,
-                build_settings_menu_text(user_id),
-                build_settings_menu_markup(user_id),
-            )
-            await answer_once(query, f"Batch mode: {batch_download_mode_label(next_mode)}")
 
         elif data == "menu:clear":
             text, markup = build_clear_jobs_prompt()
@@ -6153,18 +5706,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context, query.message, None if provider_key == "search" else provider_key, edit=True
             )
 
-        elif data.startswith("set_lang:"):
-            lang = data.split(":")[1]
-            if lang in ("en", "fa"):
-                user_languages[user_id] = lang
-                await safe_edit_message(
-                    query.message, 
-                    build_home_text(user_id), 
-                    build_reply_menu(user_id)
-                )
-            else:
-                await answer_once(query, "Invalid language", show_alert=True)
-        
         elif data.startswith("cancel_confirm:"):
             jid = int(data.split(":")[1])
             ok, msg = await cancel_job(jid)
@@ -6195,21 +5736,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await answer_once(query, msg, show_alert=not ok)
 
         elif data.startswith("manga_setting:"):
-            setting_key = data.split(":", 1)[1]
-            setting_name = {
+            # Buttons from the old manga settings screen.
+            key = {
                 "auto_convert": "manga_auto_convert_pdf",
                 "remove_images": "manga_remove_images_after_conversion",
-            }.get(setting_key)
-            if not setting_name:
-                await answer_once(query, "Unknown manga setting", show_alert=True)
-                return
-            settings = get_user_settings(user_id)
-            await update_setting(user_id, setting_name, not settings.get(setting_name, False))
-            await safe_edit_message(
-                query.message,
-                build_manga_settings_text(user_id),
-                build_manga_settings_markup(user_id),
-            )
+            }.get(data.split(":", 1)[1])
+            if key:
+                settings = get_user_settings(user_id)
+                await update_setting(user_id, key, not settings.get(key, False))
+            await show_screen(query.message, build_settings_screen(user_id))
+
+        elif data == "noop_close":
+            await safe_edit_message(query.message, "OK, nothing changed.")
 
         elif data == "clear_confirm":
             removed = clear_finished_jobs()
@@ -6991,9 +6529,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(f"{clean_emoji_prefix(get_lang(user_id, 'zip_error'))}: {e}")
             
             elif action == "settings":
-                text = build_zip_settings_text(user_id)
-                markup = build_zip_settings_markup(user_id)
-                await safe_edit_message(query.message, text, markup)
+                await show_screen(query.message, build_archive_settings_screen(user_id, context))
             
             elif action == "back":
                 await safe_edit_message(
@@ -7063,87 +6599,62 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ===== Zip Settings =====
         elif data.startswith("zip_setting:"):
             setting_key = data.split(":")[1]
-            
+            back = "nav:archive_settings"
+
             if setting_key == "part_size":
-                # Show part size options
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("256 MB", callback_data="zip_set_value:zip_part_size:268435456")],
-                    [InlineKeyboardButton("512 MB", callback_data="zip_set_value:zip_part_size:536870912")],
-                    [InlineKeyboardButton("1 GB", callback_data="zip_set_value:zip_part_size:1073741824")],
-                    [InlineKeyboardButton("2 GB", callback_data="zip_set_value:zip_part_size:2147483648")],
-                    [InlineKeyboardButton("🏠 Back", callback_data="zip_menu:settings")],
-                ])
-                await query.edit_message_reply_markup(keyboard)
-            
+                await show_screen(query.message, settings_views.archive_choice_screen(
+                    "Split archives into parts of",
+                    [
+                        ("256 MB", "zip_set_value:zip_part_size:268435456"),
+                        ("512 MB", "zip_set_value:zip_part_size:536870912"),
+                        ("1 GB", "zip_set_value:zip_part_size:1073741824"),
+                        ("2 GB (largest Telegram upload)", "zip_set_value:zip_part_size:2147483648"),
+                    ],
+                    back,
+                ))
+
             elif setting_key == "method":
-                # Show zip method options
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("ZIP", callback_data="zip_set_value:zip_method:zip")],
-                    [InlineKeyboardButton("7Z", callback_data="zip_set_value:zip_method:7z")],
-                    [InlineKeyboardButton("🏠 Back", callback_data="zip_menu:settings")],
-                ])
-                await query.edit_message_reply_markup(keyboard)
-            
+                await show_screen(query.message, settings_views.archive_choice_screen(
+                    "Archive format",
+                    [
+                        ("ZIP — opens everywhere", "zip_set_value:zip_method:zip"),
+                        ("7Z — smaller, needs 7-Zip", "zip_set_value:zip_method:7z"),
+                    ],
+                    back,
+                ))
+
+            elif setting_key == "compression":
+                await show_screen(query.message, settings_views.archive_choice_screen(
+                    "Compression level (1 = fastest, 9 = smallest)",
+                    [(str(level), f"zip_set_value:compression_level:{level}") for level in range(1, 10)],
+                    back,
+                ))
+
             elif setting_key == "password":
                 session = zip_select_sessions.get(user_id, {"selected": set(), "page": 0})
                 session["waiting_for"] = "password"
                 zip_select_sessions[user_id] = session
-                # FIX #1: Make password waiting state clearer to user
-                await query.edit_message_text(
-                    "🔐 Send the archive password as your next message.\n\n"
-                    "Send none to remove the password, or /cancel to keep the current one."
-                )
-            
-            elif setting_key == "batch_mode":
-                settings = get_user_settings(user_id)
-                current = normalize_batch_download_mode(settings.get("batch_download_mode"))
-                next_mode = (
-                    BatchDownloadMode.DOWNLOAD_ONLY
-                    if current is BatchDownloadMode.UPLOAD_AND_DELETE
-                    else BatchDownloadMode.UPLOAD_AND_DELETE
-                )
-                await update_setting(user_id, "batch_download_mode", next_mode.value)
                 await safe_edit_message(
                     query.message,
-                    build_zip_settings_text(user_id),
-                    build_zip_settings_markup(user_id),
+                    "🔐 Send the archive password as your next message.\n\n"
+                    "Send none to remove the password, or /cancel to keep the current one.",
                 )
 
             elif setting_key in ("auto_del_files", "auto_del_zips", "auto_del_upload", "forwarded_posts"):
-                # Toggle boolean setting
                 setting_name = {
                     "auto_del_files": "auto_delete_files_after_zip",
                     "auto_del_zips": "auto_delete_zips_after_send",
                     "auto_del_upload": "auto_delete_files_after_upload",
                     "forwarded_posts": "auto_download_forwarded_posts",
-                }.get(setting_key)
-                
-                if setting_name:
-                    settings = get_user_settings(user_id)
-                    current_value = settings.get(setting_name, False)
-                    await update_setting(user_id, setting_name, not current_value)
-                    
-                    text = build_zip_settings_text(user_id)
-                    markup = build_zip_settings_markup(user_id)
-                    await safe_edit_message(query.message, text, markup)
-            
-            elif setting_key == "compression":
-                # Show compression level options
-                keyboard = []
-                row = []
-                for level in range(1, 10):
-                    row.append(InlineKeyboardButton(str(level), callback_data=f"zip_set_value:compression_level:{level}"))
-                    if level % 3 == 0:
-                        keyboard.append(row)
-                        row = []
-                
-                if row:
-                    keyboard.append(row)
-                keyboard.append([InlineKeyboardButton("🏠 Back", callback_data="zip_menu:settings")])
-                
-                markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_reply_markup(markup)
-        
+                }[setting_key]
+                settings = get_user_settings(user_id)
+                await update_setting(user_id, setting_name, not settings.get(setting_name, False))
+                await show_screen(query.message, build_archive_settings_screen(user_id, context))
+
+            else:
+                # e.g. batch_mode from the old screen; it lives in Settings now.
+                await show_screen(query.message, build_settings_screen(user_id))
+
         elif data.startswith("zip_set_value:"):
             parts = data.split(":")
             setting_name = parts[1]
@@ -7187,9 +6698,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await answer_once(query, get_lang(user_id, 'invalid_value'), show_alert=True)
                 return
 
-            text = build_zip_settings_text(user_id)
-            markup = build_zip_settings_markup(user_id)
-            await safe_edit_message(query.message, text, markup)
+            await show_screen(query.message, build_archive_settings_screen(user_id, context))
 
     except Exception as e:
         logger.exception("Button %r failed", data)
@@ -7252,6 +6761,14 @@ async def post_init(app: Application):
     
     asyncio.create_task(cleanup_task())
     logger.info("✅ Auto-cleanup task started")
+
+    # The "/" menu Telegram shows next to the message box.
+    try:
+        await app.bot.set_my_commands(
+            [BotCommand(name, description) for name, description in home_views.COMMANDS]
+        )
+    except Exception as exc:
+        logger.warning("Unable to register bot commands: %s", exc)
 
 
     if WEB_APP_ENABLE and WEB_APP_URL:
@@ -7405,7 +6922,9 @@ def main():
     app.add_handler(CommandHandler("files", files_cmd))
     app.add_handler(CommandHandler("browse", browse_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
-    app.add_handler(CommandHandler("mangasettings", manga_settings_cmd))
+    app.add_handler(CommandHandler("mangasettings", settings_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("forwardedposts", forwarded_posts_cmd))
     app.add_handler(CommandHandler("autoforward", forwarded_posts_cmd))
 

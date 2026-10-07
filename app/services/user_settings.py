@@ -27,6 +27,10 @@ DEFAULT_SETTINGS = {
     "batch_download_mode": DEFAULT_BATCH_DOWNLOAD_MODE.value,
     "manga_auto_convert_pdf": False,
     "manga_remove_images_after_conversion": False,
+    # What a video link does: "ask" shows a quality picker; best/1080/720/480/mp3 start at once.
+    "video_default": "ask",
+    # Upload finished downloads to Saved Messages automatically.
+    "auto_upload_after_download": False,
     "compression_level": 3,  # 1-9, reduced from 5 for better responsiveness
 }
 
