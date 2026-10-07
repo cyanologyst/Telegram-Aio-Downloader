@@ -1636,11 +1636,15 @@ async def handle_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     elif action == "retry":
-        await answer_once(query, "Starting again…")
-        new_job = await restart_job(app, job)
+        try:
+            new_job = await restart_job(app, job)
+        except Exception as exc:
+            await answer_once(query, f"Couldn't start it again: {shorten(str(exc), 150)}", show_alert=True)
+            return
         if new_job is None:
             await answer_once(query, "This kind of download can't be retried; send the link again.", show_alert=True)
             return
+        await answer_once(query, "Starting again…")
         await attach_job_card(app, new_job, message=query.message if is_card_message() else None)
 
     elif action == "dismiss":
@@ -1705,6 +1709,15 @@ async def safe_edit_message(message, text, reply_markup=None, parse_mode=None):
 
 
 MINI_APP = home_views.MiniApp(url=WEB_APP_URL, enabled=WEB_APP_ENABLE)
+# Taps on the bottom keyboard: they always act as buttons, even while a prompt waits for text.
+KEYBOARD_LABELS = {
+    home_views.KEY_STATUS,
+    home_views.KEY_FILES,
+    home_views.KEY_SEARCH,
+    home_views.KEY_SETTINGS,
+    home_views.KEY_MENU,
+    home_views.KEY_HELP,
+}
 
 
 def mini_app_inline_button(label: str = "📱 Mini App"):
@@ -1860,16 +1873,21 @@ def folder_info(rel_path: str):
 
 
 # Library folders the bot manages itself; "Organize" at the Download root skips them.
-ORGANIZE_PROTECTED_NAMES = {"Telegram", "Spotify", "Manga", "Adult", "Hentai", "_torrents"}
+ORGANIZE_PROTECTED_NAMES = {"Telegram", "Spotify", "Manga", "Adult", "Hentai", "Gallery", "_torrents"}
 
 
-def build_organize_plan(rel_path: str) -> OrganizePlan:
-    folder = safe_join(DOWNLOAD_DIR, rel_path)
-    busy_names: set[str] = set()
-    for job in download_jobs.values():
+def active_job_names() -> set[str]:
+    """Names of running jobs. Call on the event loop: download_jobs changes there."""
+    names: set[str] = set()
+    for job in list(download_jobs.values()):
         if job.get("status") in JOB_ACTIVE_STATES:
             name = str(job.get("name", ""))
-            busy_names.update({name, clean_download_name(name)})
+            names.update({name, clean_download_name(name)})
+    return names
+
+
+def build_organize_plan(rel_path: str, busy_names: set[str]) -> OrganizePlan:
+    folder = safe_join(DOWNLOAD_DIR, rel_path)
     return plan_organize(
         folder,
         protected_names=ORGANIZE_PROTECTED_NAMES if not rel_path else (),
@@ -2858,7 +2876,7 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
         finally:
             job["process"] = None
 
-    asyncio.create_task(run_job())
+    job["task"] = run_in_background(run_job(), name=f"spotify-{job_id}")
     return job
 
 
@@ -4038,16 +4056,7 @@ async def zip_upload_mini_app_selection(
 # =========================================================
 
 ARIA2_DONE_STATES = {"complete", "error", "removed"}
-JOB_ACTIVE_STATES = {
-    "starting",
-    "downloading",
-    "uploading",
-    "metadata",
-    "allocating",
-    "queued",
-    "paused",
-    "processing",
-}
+JOB_ACTIVE_STATES = job_views.ACTIVE
 
 
 def _parse_int_field(value, default: int = 0) -> int:
@@ -4368,6 +4377,15 @@ async def cancel_job(job_id: int):
         return False, f"Job #{job_id} is already {job['status']}."
 
     process = job.get("process")
+    if process is None and job.get("provider") in ("spotify", "gallery-dl"):
+        # Still starting up: no subprocess yet, so stop the task that would start it.
+        job["status"] = "cancelled"
+        job["finished_at"] = now_ts()
+        job["last_line"] = "Cancelled by user"
+        task = job.get("task")
+        if task is not None and not task.done():
+            task.cancel()
+        return True, f"Cancelled job #{job_id}: {job['name']}"
     if process is not None and job.get("provider") in ("spotify", "gallery-dl"):
         try:
             process.terminate()
@@ -4708,7 +4726,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # A link always wins over a pending search prompt; anything else typed
     # while the search prompt is open is the search query.
     is_link = lower.startswith("magnet:") or is_http_url(text)
-    if is_link and search_ui is not None:
+    is_keyboard_button = text in KEYBOARD_LABELS
+    if (is_link or is_keyboard_button) and search_ui is not None:
         search_ui.cancel_waiting(context)
     elif search_ui is not None and await search_ui.handle_text(update, context):
         return
@@ -5464,7 +5483,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
                 encoded = parts[3] if len(parts) > 3 else ""
                 rel_path = decode_path(encoded) if encoded else ""
-                plan = await asyncio.to_thread(build_organize_plan, rel_path)
+                plan = await asyncio.to_thread(build_organize_plan, rel_path, active_job_names())
                 text, markup = build_organize_preview(rel_path, page, plan)
                 await safe_edit_message(query.message, text, markup)
 
@@ -5474,7 +5493,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rel_path = decode_path(encoded) if encoded else ""
                 await safe_edit_message(query.message, f"{ICON_BROOM} Organizing videos...")
                 # Re-plan so files that changed since the preview are handled correctly.
-                plan = await asyncio.to_thread(build_organize_plan, rel_path)
+                plan = await asyncio.to_thread(build_organize_plan, rel_path, active_job_names())
                 result = await asyncio.to_thread(
                     apply_organize, plan, delete_leftovers=(mode == "purge")
                 )
@@ -5746,11 +5765,17 @@ def save_jobs_now() -> None:
 
 
 async def job_persistence_loop():
+    last_fingerprint = None
     while True:
         await asyncio.sleep(JOB_SAVE_INTERVAL)
         try:
             snapshot = [dict(job) for job in download_jobs.values()]
+            # Skip the write (and its fsync) when nothing changed since the last save.
+            fingerprint = _hash_content(repr([sorted(map(str, job.items())) for job in snapshot]))
+            if fingerprint == last_fingerprint:
+                continue
             await asyncio.to_thread(job_store.sync, snapshot)
+            last_fingerprint = fingerprint
         except Exception:
             logger.exception("Saving jobs failed")
 

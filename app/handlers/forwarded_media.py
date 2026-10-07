@@ -100,6 +100,7 @@ def make_forwarded_media_callback(
     notify: Notifier,
 ) -> Callable[[Any, Any], Awaitable[None]]:
     """Build the Pyrogram callback; split out so it can be tested directly."""
+    notified_groups: set[str] = set()
 
     async def on_forwarded_media(_: Any, message: Any) -> None:
         user_id = message.from_user.id if message.from_user else None
@@ -110,9 +111,19 @@ def make_forwarded_media_callback(
         if media is None:
             return
         kind, original_name = media
+        if kind == "document" and original_name.lower().endswith(".torrent"):
+            return  # the bot itself starts torrents sent to it
 
         settings = get_user_settings(user_id)
         if not settings.get("auto_download_forwarded_posts", False):
+            # One notice per forwarded album, not one per photo in it.
+            group = getattr(message, "media_group_id", None)
+            if group:
+                if group in notified_groups:
+                    return
+                notified_groups.add(group)
+                if len(notified_groups) > 500:
+                    notified_groups.clear()
             await notify(
                 user_id,
                 "Forwarded media is not downloaded because auto-download is off.\n"

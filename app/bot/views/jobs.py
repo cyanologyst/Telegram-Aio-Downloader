@@ -202,8 +202,12 @@ def job_card(
     if status == "failed":
         reason = e(short(job.get("last_line") or "Unknown error", 300))
         text = f"❌ <b>{_title(job)}</b>\n{header} · failed{took}\n\n{reason}"
-        rows = [[button("🔁 Retry", f"job:retry:{jid}"), button("✖ Dismiss", f"job:dismiss:{jid}")]]
-        return text, InlineKeyboardMarkup(rows)
+        row = [button("✖ Dismiss", f"job:dismiss:{jid}")]
+        if (
+            job.get("provider") not in BATCH_PROVIDERS
+        ):  # batches are restarted by resending the link
+            row.insert(0, button("🔁 Retry", f"job:retry:{jid}"))
+        return text, InlineKeyboardMarkup([row])
 
     # cancelled (or anything unexpected)
     return f"🛑 <b>{_title(job)}</b>\n{header} · cancelled", None

@@ -29,6 +29,7 @@ def _message(chat_id=BOT_ID, outgoing=True, forwarded=True, photo=True):
         animation=None,
         video_note=None,
         sticker=None,
+        media_group_id=None,
     )
     return message
 
@@ -102,3 +103,32 @@ async def test_disabled_setting_explains_how_to_enable(tmp_path, monkeypatch):
 
     assert list(tmp_path.iterdir()) == []
     assert len(notify.sent) == 1 and "auto-download is off" in notify.sent[0][1]
+
+
+async def test_torrent_documents_are_left_to_the_bot(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        fm, "get_user_settings", lambda _uid: {"auto_download_forwarded_posts": True}
+    )
+    notify = Notifier()
+    callback = fm.make_forwarded_media_callback(FakeClient(), tmp_path, notify)
+    message = _message(photo=False)
+    message.document = types.Document.__new__(types.Document)
+    message.document.__dict__.update(file_name="show.torrent")
+
+    await callback(None, message)
+
+    assert notify.sent == [] and list(tmp_path.iterdir()) == []
+
+
+async def test_disabled_notice_is_sent_once_per_album(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        fm, "get_user_settings", lambda _uid: {"auto_download_forwarded_posts": False}
+    )
+    notify = Notifier()
+    callback = fm.make_forwarded_media_callback(FakeClient(), tmp_path, notify)
+    for _ in range(3):
+        message = _message()
+        message.media_group_id = "album-1"
+        await callback(None, message)
+
+    assert len(notify.sent) == 1

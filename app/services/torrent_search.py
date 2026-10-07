@@ -222,7 +222,8 @@ class RARBGProvider:
 
 
 def _identity(item: dict[str, Any]) -> tuple[str, ...]:
-    backend_id = str((item.get("raw") or {}).get("id") or "")
+    raw = item.get("raw") or {}
+    backend_id = str(raw.get("id") or raw.get("token") or "")
     if backend_id:
         return ("id", backend_id)
     return ("title", item["title"], item.get("magnet", ""))

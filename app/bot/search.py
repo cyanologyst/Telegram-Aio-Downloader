@@ -300,14 +300,16 @@ class SearchUI:
             f"🔍 Searching “{_e(_short(query, 60))}” on {_e(provider.label)}…",
             parse_mode=ParseMode.HTML,
         )
-        await self._run_search(message, session)
+        await self._run_search(message, session, context)
         return True
 
-    async def _run_search(self, message: Any, session: dict[str, Any]) -> None:
+    async def _run_search(self, message: Any, session: dict[str, Any], context: Any = None) -> None:
         provider = self.providers[session["provider"]]
         try:
             await fetch_until(provider, session, PER_PAGE * (session["page"] + 1) + 1)
         except Exception as exc:
+            if context is not None and context.user_data.get(SESSION_KEY) is not session:
+                return  # superseded (new category or search) while fetching
             logger.warning("Search on %s failed: %s", provider.key, exc)
             await self._show(
                 message,
@@ -322,6 +324,8 @@ class SearchUI:
                 ),
             )
             return
+        if context is not None and context.user_data.get(SESSION_KEY) is not session:
+            return  # superseded while fetching; the newer search draws the screen
         max_page = max(0, (len(session["items"]) - 1) // PER_PAGE)
         session["page"] = min(session["page"], max_page)
         await self._show(message, *self._results(session))
@@ -362,16 +366,26 @@ class SearchUI:
         if action == "pg":
             await answer_once(query)
             session["page"] = max(0, int(parts[3]))
-            await self._run_search(message, session)
+            await self._run_search(message, session, context)
         elif action == "back":
             await self._show(message, *self._results(session))
         elif action == "cat":
             await self._show(message, *self._categories(session))
         elif action == "c":
             await answer_once(query)
-            session.update(category=parts[3], items=[], next_page=0, exhausted=False, page=0)
+            # A fresh dict: a page fetch still running on the old one must not
+            # add the previous category's results to this list.
+            session = {
+                **session,
+                "category": parts[3],
+                "items": [],
+                "next_page": 0,
+                "exhausted": False,
+                "page": 0,
+            }
+            context.user_data[SESSION_KEY] = session
             await self._show(message, f"🔍 Searching “{_e(_short(session['query'], 60))}”…", None)
-            await self._run_search(message, session)
+            await self._run_search(message, session, context)
         elif action in {"o", "dl", "sel", "mag"}:
             try:
                 index = int(parts[3])
