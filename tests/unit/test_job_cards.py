@@ -273,13 +273,16 @@ def test_aria2_status_records_selected_files():
 
 
 def test_quality_actions_hide_caps_the_video_cannot_use():
-    assert [a for _, a in tb.quality_actions([360, 720])] == ["best", "h480", "mp3"]
-    assert [a for _, a in tb.quality_actions([2160, 1080])] == [
+    assert [a for _, a in tb.quality_actions([360, 720], 600)] == ["best", "h480", "mp3"]
+    assert [a for _, a in tb.quality_actions([2160, 1080], 600)] == [
         "best",
         "h1080",
         "h720",
         "h480",
         "mp3",
     ]
-    assert [a for _, a in tb.quality_actions([])] == ["best", "h720", "mp3"]
+    assert [a for _, a in tb.quality_actions([], 600)] == ["best", "h720", "mp3"]
+    # Clips of up to a minute (or of unknown length) can be sent as a GIF.
+    assert [a for _, a in tb.quality_actions([720], 12)] == ["best", "h480", "mp3", "gif"]
+    assert tb.quality_actions([])[-1] == ("🎞 GIF", "gif")
     assert tb.video_format_selector(720) == "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"

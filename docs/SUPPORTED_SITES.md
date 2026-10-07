@@ -19,7 +19,11 @@ These providers use `yt-dlp` and support video downloads plus audio extraction w
 
 Many additional sites supported natively by `yt-dlp` may work through the same downloader even when they are not listed here.
 
-When you send a video link the bot shows its title and length and offers **Best**, lower resolution caps (only those the video actually has) and **MP3**. Settings → *Video links* can skip the question with a default quality.
+YouTube often blocks server IPs ("Sign in to confirm you're not a bot"); send a cookies.txt to the bot in Settings → Cookies to fix it. When a self-hosted [cobalt](https://github.com/imputnet/cobalt) instance is configured (`COBALT_API_URL`), it is tried after yt-dlp fails; it covers Bluesky, Dailymotion, Facebook, Instagram, Loom, Pinterest, Reddit, SoundCloud, Streamable, TikTok, Tumblr, Twitch clips, X/Twitter, Vimeo, VK, YouTube and more.
+
+Short clips without sound and `.gif` files are sent to the chat as Telegram GIFs.
+
+When you send a video link the bot shows its title and length and offers **Best**, lower resolution caps (only those the video actually has), **MP3**, and **🎞 GIF** for clips of up to a minute. Settings → *Video links* can skip the question with a default quality.
 
 ## Spotify
 

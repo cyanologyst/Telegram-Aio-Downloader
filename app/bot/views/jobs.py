@@ -67,7 +67,9 @@ def engine_label(job: dict[str, Any]) -> str:
             label = str(job["platform"])
         if provider == "gallery-dl" and job.get("category"):
             label = f"Gallery · {site_label(job['category'])}"
-        if job.get("audio_only"):
+        if job.get("gif"):
+            label += " · GIF"
+        elif job.get("audio_only"):
             label += " · MP3"
         elif job.get("max_height"):
             label += f" · ≤{job['max_height']}p"
@@ -177,6 +179,8 @@ def job_card(
             lines.append(
                 f"{job['image_count']} images" + (" · PDF made" if job.get("pdf_path") else "")
             )
+        if job.get("gif_note"):
+            lines.append(e(job["gif_note"]))
         if job.get("auto_upload_note"):
             lines.append(e(job["auto_upload_note"]))
         text = "\n".join(lines)
@@ -207,7 +211,10 @@ def job_card(
             job.get("provider") not in BATCH_PROVIDERS
         ):  # batches are restarted by resending the link
             row.insert(0, button("🔁 Retry", f"job:retry:{jid}"))
-        return text, InlineKeyboardMarkup([row])
+        rows = [row]
+        if job.get("needs_cookies"):
+            rows.insert(0, [button("🍪 Add cookies", "nav:cookies")])
+        return text, InlineKeyboardMarkup(rows)
 
     # cancelled (or anything unexpected)
     return f"🛑 <b>{_title(job)}</b>\n{header} · cancelled", None

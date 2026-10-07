@@ -450,7 +450,9 @@ BOT_CHECK = (
 def test_ytdlp_errors_are_explained():
     reason, fatal = tb.explain_ytdlp_error(BOT_CHECK)
     assert (
-        fatal and "blocking downloads from this server" in reason and "YTDLP_COOKIES_FILE" in reason
+        fatal
+        and "blocking downloads from this server" in reason
+        and "Settings → 🍪 Cookies" in reason
     )
 
     reason, fatal = tb.explain_ytdlp_error(
@@ -471,6 +473,6 @@ async def test_blocked_video_shows_the_reason_instead_of_a_picker(monkeypatch):
     await _drain_background()
 
     final = context.bot.texts()[-1]
-    assert "Can't download this" in final and "YTDLP_COOKIES_FILE" in final
+    assert "Can't download this" in final and "Cookies" in final
     assert "Choose a quality" not in final
     assert tb.link_requests == {}

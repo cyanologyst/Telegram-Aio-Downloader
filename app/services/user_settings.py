@@ -31,6 +31,8 @@ DEFAULT_SETTINGS = {
     "video_default": "ask",
     # Upload finished downloads to Saved Messages automatically.
     "auto_upload_after_download": False,
+    # Send short silent clips and GIFs from finished downloads to the bot chat as GIFs.
+    "send_gifs_to_chat": True,
     "compression_level": 3,  # 1-9, reduced from 5 for better responsiveness
 }
 

@@ -134,6 +134,9 @@ from app.services.manga import (
     remove_manga_folder_if_empty,
 )
 from app.services.gallery import download_gallery, gallery_category, site_label
+from app.services import animation
+from app.services import cookies as cookie_store
+from app.services.cobalt import CobaltClient, CobaltError
 from app.services.job_store import JobStore
 from app.services.organize import OrganizePlan, apply_organize, plan_organize
 from app.services.pornhub_model import (
@@ -216,6 +219,11 @@ DENO_BIN = os.getenv("DENO_BIN", "").strip()
 SPOTDL_BIN = os.getenv("SPOTDL_BIN", "spotdl")
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
+# cookies.txt sent to the bot (Settings → Cookies); used before YTDLP_COOKIES_FILE.
+UPLOADED_COOKIES_PATH = BASE_DIR / "data" / "cookies.txt"
+# Your own cobalt instance (https://github.com/imputnet/cobalt), tried when yt-dlp fails.
+COBALT_API_URL = os.getenv("COBALT_API_URL", "").strip()
+COBALT_API_KEY = os.getenv("COBALT_API_KEY", "").strip()
 ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
 ARIA2_RPC_PORT = parse_env_int("ARIA2_RPC_PORT", 6800)
 ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "").strip()
@@ -1484,14 +1492,113 @@ async def refresh_job_card(app: Application, job: dict, force: bool = False, con
         await _send_card(app, job)
 
 
+GIFS_PER_JOB = 10
+GIF_PROVIDERS = {"yt-dlp", "gallery-dl"}
+FFPROBE_BIN = os.getenv("FFPROBE_BIN", "").strip() or str(
+    Path(FFMPEG_BIN).with_name("ffprobe") if os.sep in FFMPEG_BIN else "ffprobe"
+)
+
+
+def gif_candidates(job: dict) -> list[Path]:
+    files: list[Path] = []
+    for rel in job_outputs(job):
+        full = DOWNLOAD_DIR / rel
+        if full.is_dir():
+            files += sorted(p for p in full.rglob("*") if p.is_file())
+        elif full.is_file():
+            files.append(full)
+    return [f for f in files if f.suffix.lower() in animation.VIDEO_SUFFIXES]
+
+
+def prepare_gifs(job: dict, workdir: Path) -> tuple[list[tuple[Path, object]], int, bool]:
+    """Pick the job's GIF-like outputs and make them Telegram-ready.
+
+    Returns (files with their media info, how many were too big, whether a clip was cut).
+    A GIF job (``job["gif"]``) treats every video as a GIF.
+    """
+    forced = bool(job.get("gif"))
+    ready: list[tuple[Path, object]] = []
+    too_big = 0
+    trimmed = False
+    for path in gif_candidates(job):
+        if len(ready) >= GIFS_PER_JOB:
+            break
+        info = animation.probe(path, FFPROBE_BIN)
+        if info is None or not (forced or animation.is_gif_like(path, info)):
+            continue
+        if animation.ready_as_is(path, info):
+            ready.append((path, info))
+            continue
+        trimmed = trimmed or (info.duration or 0) > animation.GIF_MAX_SECONDS
+        target = workdir / f"gif_{len(ready) + too_big}.mp4"
+        animation.convert(path, target, ffmpeg=FFMPEG_BIN)
+        if target.stat().st_size > animation.BOT_ANIMATION_LIMIT:
+            animation.convert(path, target, ffmpeg=FFMPEG_BIN, max_side=480)
+        if target.stat().st_size > animation.BOT_ANIMATION_LIMIT:
+            too_big += 1
+            continue
+        ready.append((target, animation.probe(target, FFPROBE_BIN)))
+    return ready, too_big, trimmed
+
+
+async def send_job_gifs(app: Application, job: dict) -> None:
+    """Send a finished job's GIFs into the chat as Telegram GIFs (animations)."""
+    if job.get("gifs_sent") or job.get("status") != "completed":
+        return
+    if job.get("provider") not in GIF_PROVIDERS:
+        return
+    if not job.get("gif") and not get_user_settings(job.get("user_id") or 0).get(
+        "send_gifs_to_chat", True
+    ):
+        return
+    job["gifs_sent"] = True
+    sent = 0
+    with tempfile.TemporaryDirectory(prefix="gifs-") as tmp:
+        try:
+            gifs, too_big, trimmed = await asyncio.to_thread(prepare_gifs, job, Path(tmp))
+        except Exception as exc:
+            logger.warning("GIF conversion failed for job #%s: %s", job.get("id"), exc)
+            job["gif_note"] = "Couldn't turn it into a GIF; the file is on the server."
+            return
+        for path, info in gifs:
+            try:
+                with open(path, "rb") as fh:
+                    await app.bot.send_animation(
+                        chat_id=job["chat_id"],
+                        animation=fh,
+                        width=getattr(info, "width", None) or None,
+                        height=getattr(info, "height", None) or None,
+                        duration=int(getattr(info, "duration", 0) or 0) or None,
+                        caption=shorten(clean_download_name(job.get("name") or ""), 200) or None,
+                        read_timeout=300,
+                        write_timeout=300,
+                    )
+                sent += 1
+            except Exception as exc:
+                logger.warning("Could not send GIF for job #%s: %s", job.get("id"), exc)
+    notes = []
+    if sent:
+        notes.append(f"🎞 Sent {'as a GIF' if sent == 1 else f'{sent} GIFs'} above")
+    if trimmed:
+        notes.append(f"first {animation.GIF_MAX_SECONDS} s only")
+    if too_big:
+        notes.append(f"{too_big} too big for a GIF")
+    if job.get("gif") and not sent and not too_big:
+        notes.append("Couldn't make a GIF from this")
+    if notes:
+        job["gif_note"] = " · ".join(notes)
+
+
 async def finish_job_card(app: Application, job: dict):
     """Show the job's final state as a fresh card at the bottom of the chat.
 
     A new message (instead of an edit) means Telegram notifies the user that
-    the download finished; the progress card it replaces is deleted.
+    the download finished; the progress card it replaces is deleted. GIFs the
+    job produced are sent first, so the card stays the last message.
     """
     if job.get("card_final") == job.get("status") or not job.get("status_visible", True):
         return
+    await send_job_gifs(app, job)
     old = job.get("card")
     settings = get_user_settings(job.get("user_id") or 0)
     auto_upload = (
@@ -1563,6 +1670,7 @@ async def restart_job(app: Application, job: dict) -> dict | None:
         return await start_ytdlp_download(
             app, chat_id, job["url"], audio_only=bool(job.get("audio_only")),
             user_id=user_id, run_in_background=True, max_height=job.get("max_height"),
+            gif=bool(job.get("gif")),
         )
     if provider == "spotify":
         return await start_spotify_download(app, chat_id, job["url"], user_id)
@@ -1753,7 +1861,70 @@ def build_home_screen() -> Screen:
 
 
 def build_settings_screen(user_id: int) -> Screen:
-    return settings_views.settings_screen(get_user_settings(user_id))
+    return settings_views.settings_screen(get_user_settings(user_id), current_cookies())
+
+
+def current_cookies():
+    path = cookies_file()
+    return cookie_store.read_summary(Path(path)) if path else None
+
+
+def build_cookies_screen(context, *, confirm_delete: bool = False) -> Screen:
+    path = cookies_file()
+    return settings_views.cookies_screen(
+        current_cookies(),
+        waiting=cookies_waiting(context),
+        from_env=bool(path) and Path(path) != UPLOADED_COOKIES_PATH,
+        confirm_delete=confirm_delete,
+    )
+
+
+COOKIE_WAIT_SECONDS = 600
+
+
+def cookies_waiting(context) -> bool:
+    since = context.user_data.get("cookies_wait")
+    return bool(since) and time.time() - since < COOKIE_WAIT_SECONDS
+
+
+def looks_like_cookie_file(name: str | None) -> bool:
+    name = (name or "").lower()
+    return "cookie" in name and name.endswith(".txt")
+
+
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Non-torrent files: only a cookies.txt is expected (Settings → Cookies)."""
+    message = update.message
+    doc = message.document
+    if not (cookies_waiting(context) or looks_like_cookie_file(doc.file_name)):
+        return  # e.g. forwarded files, which the Pyrogram side handles
+    if (doc.file_size or 0) > cookie_store.MAX_BYTES:
+        await message.reply_text("❌ That file is too big for a cookies.txt (over 2 MB).")
+        return
+    file = await doc.get_file()
+    data = bytes(await file.download_as_bytearray())
+    # The file holds a login; don't leave it in the chat history.
+    try:
+        await message.delete()
+        removed = "I deleted your message with the file."
+    except Exception as exc:
+        logger.debug("Could not delete the cookies message: %s", exc)
+        removed = "Delete your message with the file yourself; I couldn't."
+    try:
+        text, summary = cookie_store.parse_cookies(data)
+    except cookie_store.CookieFileError as exc:
+        await message.chat.send_message(f"❌ {exc}\n\n{removed}")
+        return
+    await asyncio.to_thread(cookie_store.save_cookies, UPLOADED_COOKIES_PATH, text)
+    context.user_data.pop("cookies_wait", None)
+    sites = ", ".join(summary.sites[:4])
+    lines = [f"🍪 Saved {summary.count} cookies for {html.escape(sites)}.", removed]
+    if "youtube.com" not in summary.sites:
+        lines.append("⚠️ There are no youtube.com cookies in it, so YouTube stays blocked.")
+    if summary.expired:
+        lines.append(f"⚠️ {summary.expired} have already expired.")
+    lines.append("Send the link again (or tap Retry on a failed card).")
+    await message.chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 def build_archive_settings_screen(user_id: int, context=None) -> Screen:
@@ -2456,6 +2627,21 @@ async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel
 # yt-dlp video downloader
 # =========================================================
 
+def cookies_file() -> str | None:
+    """The cookies.txt to use: the one sent to the bot, else YTDLP_COOKIES_FILE."""
+    if UPLOADED_COOKIES_PATH.is_file():
+        return str(UPLOADED_COOKIES_PATH)
+    if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).is_file():
+        return YTDLP_COOKIES_FILE
+    return None
+
+
+# yt-dlp needs a JavaScript runtime for YouTube; it only looks for Deno by default.
+YTDLP_JS_RUNTIMES = {
+    name: {} for name in ("deno", "node", "bun") if shutil.which(name)
+}
+
+
 def ytdlp_common_options(url: str, resolved_video) -> dict:
     """yt-dlp options shared by downloads and the quality probe."""
     opts = {
@@ -2475,8 +2661,10 @@ def ytdlp_common_options(url: str, resolved_video) -> dict:
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
-    if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists():
-        opts["cookiefile"] = YTDLP_COOKIES_FILE
+    if cookies := cookies_file():
+        opts["cookiefile"] = cookies
+    if YTDLP_JS_RUNTIMES:
+        opts["js_runtimes"] = dict(YTDLP_JS_RUNTIMES)
     if YTDLP_PROXY:
         opts["proxy"] = YTDLP_PROXY
     if requires_ytdlp_generic_impersonation(url):
@@ -2504,17 +2692,14 @@ def probe_video(url: str) -> dict:
 
 
 QUALITY_STEPS = (1080, 720, 480)
+GIF_MAX_HEIGHT = 720
 
-_COOKIE_HINT = (
-    "Set YTDLP_COOKIES_FILE to a cookies.txt exported from a browser that is "
-    "logged in to the site, then try again."
-)
+_COOKIE_HINT = "Add cookies from a logged-in browser in ⚙️ Settings → 🍪 Cookies, then retry."
 # (phrase in yt-dlp's error, plain explanation). These fail the same way on retry.
 YTDLP_KNOWN_ERRORS = (
     (
         "confirm you're not a bot",
-        "YouTube is blocking downloads from this server's IP address. " + _COOKIE_HINT
-        + " Setting YTDLP_PROXY to a residential proxy also works.",
+        "YouTube is blocking downloads from this server's IP address. " + _COOKIE_HINT,
     ),
     ("confirm your age", "This video is age-restricted. " + _COOKIE_HINT),
     ("age-restricted", "This video is age-restricted. " + _COOKIE_HINT),
@@ -2538,8 +2723,74 @@ def explain_ytdlp_error(error) -> tuple[str, bool]:
     return text or "Unknown error", False
 
 
-def quality_actions(heights: list[int]) -> list[tuple[str, str]]:
-    """Picker buttons: Best (with its height when known), lower standard heights, MP3."""
+class DownloadFailed(RuntimeError):
+    """A failure whose readable reason is already worked out."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+cobalt_client = CobaltClient(COBALT_API_URL, COBALT_API_KEY)
+COBALT_UNSUPPORTED = {"error.api.link.unsupported", "error.api.service.unsupported"}
+
+
+async def download_with_cobalt(job: dict, url: str, output_dir: Path, ytdlp_error, is_cancelled):
+    """Second try through cobalt after yt-dlp failed. Returns (title, filepath or None)."""
+    ytdlp_reason, _ = explain_ytdlp_error(ytdlp_error)
+    logger.info("yt-dlp failed for %s (%s); trying cobalt", url, ytdlp_reason)
+    job.update(engine="cobalt", note="via cobalt", status="downloading", last_line="")
+    try:
+        items = await cobalt_client.resolve(
+            url,
+            audio_only=bool(job.get("audio_only")),
+            mute=bool(job.get("gif")),
+            max_height=job.get("max_height"),
+        )
+        destination = output_dir
+        if len(items) > 1:
+            destination = output_dir / f"cobalt_{job['id']}"
+        paths: list[Path] = []
+        finished_bytes = 0
+        for item in items:
+            def progress(done: int, total: int, base: int = finished_bytes):
+                job["completed_length"] = base + done
+                job["total_length"] = base + total if total else 0
+
+            path = await cobalt_client.download(
+                item, destination, progress=progress, is_cancelled=is_cancelled
+            )
+            paths.append(path)
+            finished_bytes += path.stat().st_size
+    except CobaltError as exc:
+        if exc.code == "cancelled":
+            raise
+        if exc.code in COBALT_UNSUPPORTED:
+            raise DownloadFailed(ytdlp_reason) from exc
+        raise DownloadFailed(f"{ytdlp_reason}\n\ncobalt: {exc}") from exc
+    job["completed_length"] = job["total_length"] = finished_bytes
+    if len(paths) == 1:
+        return paths[0].stem, str(paths[0])
+    job["outputs"] = [str(destination)]
+    return f"{len(paths)} files from {job.get('platform') or 'the post'}", None
+
+
+def explain_spotdl_error(error) -> tuple[str, bool]:
+    """(readable reason, whether YouTube cookies would help) for a spotDL failure."""
+    text = " ".join(str(error).split())
+    lowered = text.lower()
+    if any(s in lowered for s in ("audioprovidererror", "yt-dlp download error", "no usable results")):
+        return (
+            "spotDL found the song on Spotify, but it gets the audio from YouTube and YouTube "
+            "refused this server. " + _COOKIE_HINT,
+            True,
+        )
+    return text[-400:] or "spotDL failed", False
+
+
+def quality_actions(heights: list[int], duration: float | None = None) -> list[tuple[str, str]]:
+    """Picker buttons: Best (with its height when known), lower standard heights, MP3,
+    and GIF for clips of up to a minute."""
     top = max(heights) if heights else None
     actions = [(f"⭐ Best ({top}p)" if top else "⭐ Best", "best")]
     for h in QUALITY_STEPS:
@@ -2547,6 +2798,8 @@ def quality_actions(heights: list[int]) -> list[tuple[str, str]]:
         if top is None and h == 720 or (top is not None and top > h):
             actions.append((f"{h}p", f"h{h}"))
     actions.append(("🎵 MP3", "mp3"))
+    if duration is None or duration <= animation.GIF_MAX_SECONDS:
+        actions.append(("🎞 GIF", "gif"))
     return actions
 
 
@@ -2560,10 +2813,16 @@ async def show_quality_picker(message, rid: str, url: str, platform: str):
         if fatal:
             if link_requests.pop(rid, None) is None:
                 return  # cancelled while we were looking
+            markup = None
+            if _COOKIE_HINT in reason:
+                markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🍪 Add cookies", callback_data="nav:cookies")]]
+                )
             await safe_edit_message(
                 message,
                 f"❌ <b>Can't download this {html.escape(platform)} link</b>\n\n"
                 f"{html.escape(reason)}",
+                markup,
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -2580,7 +2839,7 @@ async def show_quality_picker(message, rid: str, url: str, platform: str):
     await safe_edit_message(
         message,
         "\n".join(lines),
-        link_request_markup(rid, quality_actions(info["heights"])),
+        link_request_markup(rid, quality_actions(info["heights"], info.get("duration"))),
         parse_mode=ParseMode.HTML,
     )
 
@@ -2804,7 +3063,7 @@ async def start_gallery_download(
                 GALLERY_DIR,
                 on_file=on_file,
                 set_process=set_process,
-                cookies_file=YTDLP_COOKIES_FILE if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists() else None,
+                cookies_file=cookies_file(),
                 proxy=YTDLP_PROXY or None,
             )
             if job.get("status") == "cancelled":
@@ -2879,7 +3138,12 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
             job["progress"] = percent
 
     async def run_job():
-        provider = SpotifyDownloader(spotdl_bin=SPOTDL_BIN, ffmpeg_bin=FFMPEG_BIN)
+        provider = SpotifyDownloader(
+            spotdl_bin=SPOTDL_BIN,
+            ffmpeg_bin=FFMPEG_BIN,
+            cookie_file=cookies_file(),
+            proxy=YTDLP_PROXY or None,
+        )
         try:
             result = await provider.download(
                 DownloadRequest(
@@ -2904,6 +3168,8 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
             job["completed_length"] = total_size
             job["total_length"] = total_size
             job["artifact_count"] = len(result.artifacts)
+            if not result.artifacts:
+                job["note"] = "already downloaded"
             job["outputs"] = [
                 str(artifact.path) for artifact in result.artifacts if artifact.media_type == "audio"
             ]
@@ -2914,10 +3180,12 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
         except Exception as e:
             if job.get("status") == "cancelled":
                 return
-            logger.exception("spotDL download failed")
+            reason, needs_cookies = explain_spotdl_error(e)
+            logger.warning("spotDL download failed: %s", e)
             job["status"] = "failed"
             job["finished_at"] = now_ts()
-            job["last_line"] = str(e)
+            job["last_line"] = reason
+            job["needs_cookies"] = needs_cookies
             await maybe_auto_update_status_message(app, job, force=True)
             await finish_job_card(app, job)
         finally:
@@ -2937,8 +3205,12 @@ async def start_ytdlp_download(
     notify: bool = True,
     parent_job: dict | None = None,
     max_height: int | None = None,
+    gif: bool = False,
 ):
     """Download one video with yt-dlp (``max_height`` caps the resolution).
+
+    ``gif`` makes a silent clip that is sent to the chat as a GIF. When yt-dlp
+    fails and a cobalt instance is configured, cobalt gets a try.
 
     ``parent_job`` is the batch (playlist/model page) this item belongs to;
     cancelling the batch aborts the item that is downloading.
@@ -2952,6 +3224,8 @@ async def start_ytdlp_download(
     is_hentai = is_hentai_video_url(url)
     is_adult = is_adult_video_url(url)
     platform = video_platform_label(url)
+    if gif:
+        audio_only, max_height = False, min(max_height or GIF_MAX_HEIGHT, GIF_MAX_HEIGHT)
     if is_hentai:
         output_dir = HENTAI_VIDEO_DIR / video_platform_slug(url)
     elif is_adult:
@@ -2986,6 +3260,7 @@ async def start_ytdlp_download(
         "filepath": "",
         "audio_only": audio_only,
         "max_height": None if audio_only else max_height,
+        "gif": gif,
     }
 
     download_jobs[job_id] = job
@@ -3165,7 +3440,14 @@ async def start_ytdlp_download(
     async def finish_download():
         refresh_task = asyncio.create_task(refresh_ytdlp_status())
         try:
-            title, filepath = await loop.run_in_executor(None, run_download)
+            try:
+                title, filepath = await loop.run_in_executor(None, run_download)
+            except Exception as ytdlp_error:
+                if is_cancelled() or not cobalt_client.enabled or is_hentai or is_adult:
+                    raise
+                title, filepath = await download_with_cobalt(
+                    job, url, output_dir, ytdlp_error, is_cancelled
+                )
             if is_cancelled():
                 await finish_cancelled()
                 return
@@ -3190,7 +3472,10 @@ async def start_ytdlp_download(
             if is_cancelled():
                 await finish_cancelled()
                 return
-            reason, fatal = explain_ytdlp_error(e)
+            if isinstance(e, DownloadFailed):
+                reason, fatal = e.reason, True
+            else:
+                reason, fatal = explain_ytdlp_error(e)
             if fatal:
                 logger.warning("yt-dlp download failed: %s", e)
             else:
@@ -3199,6 +3484,7 @@ async def start_ytdlp_download(
             job["status"] = "failed"
             job["finished_at"] = now_ts()
             job["last_line"] = reason
+            job["needs_cookies"] = _COOKIE_HINT in reason
             if notify:
                 await maybe_auto_update_status_message(app, job, force=True)
 
@@ -3530,7 +3816,7 @@ async def handle_link_request_callback(update: Update, context: ContextTypes.DEF
         max_height = int(action[1:]) if action.startswith("h") and action[1:].isdigit() else None
         job = await start_ytdlp_download(
             app, chat_id, request["url"], audio_only=audio_only, user_id=user_id,
-            run_in_background=True, max_height=max_height,
+            run_in_background=True, max_height=max_height, gif=action == "gif",
         )
     elif kind == "manga":
         job = await start_manga_download(app, chat_id, request["url"], user_id)
@@ -3571,7 +3857,7 @@ async def _start_download_from_source(
     if is_pornhub_model_url(http_url):
         playlist = await resolve_pornhub_model_playlist(
             http_url,
-            cookies_file=YTDLP_COOKIES_FILE if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists() else None,
+            cookies_file=cookies_file(),
             proxy=YTDLP_PROXY or None,
         )
         if not playlist.urls:
@@ -4661,6 +4947,8 @@ async def cancel_input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cancelled.append("torrent search")
     if torrent_select_sessions.pop(user_id, None):
         cancelled.append("torrent file selection")
+    if context.user_data.pop("cookies_wait", None):
+        cancelled.append("cookies upload")
     text = (
         f"{ICON_OK} Cancelled: {', '.join(cancelled)}."
         if cancelled
@@ -4897,11 +5185,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 playlist = await resolve_pornhub_model_playlist(
                     model_url,
-                    cookies_file=(
-                        YTDLP_COOKIES_FILE
-                        if YTDLP_COOKIES_FILE and Path(YTDLP_COOKIES_FILE).exists()
-                        else None
-                    ),
+                    cookies_file=cookies_file(),
                     proxy=YTDLP_PROXY or None,
                 )
                 if not playlist.urls:
@@ -5222,6 +5506,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data in ("nav:settings", "menu:settings", "menu:manga_settings"):
             await show_screen(query.message, build_settings_screen(user_id))
+
+        elif data in ("nav:cookies", "ck:cancel"):
+            context.user_data.pop("cookies_wait", None)
+            await show_screen(query.message, build_cookies_screen(context))
+
+        elif data == "ck:send":
+            context.user_data["cookies_wait"] = time.time()
+            await show_screen(query.message, build_cookies_screen(context))
+
+        elif data == "ck:del":
+            await show_screen(query.message, build_cookies_screen(context, confirm_delete=True))
+
+        elif data == "ck:dely":
+            UPLOADED_COOKIES_PATH.unlink(missing_ok=True)
+            await answer_once(query, "Cookies removed.")
+            await show_screen(query.message, build_cookies_screen(context))
 
         elif data in ("nav:archive_settings", "menu:zip_settings", "zip_menu:settings"):
             if data == "zip_menu:settings" and "archive_settings_back" not in context.user_data:
@@ -6202,6 +6502,7 @@ def main():
     )
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.Document.FileExtension("torrent"), on_torrent_file))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
     # Forwarded media is handled natively by Pyrogram (see _wrapped_post_init)
     # DO NOT register a PTB handler for forwarded messages here.

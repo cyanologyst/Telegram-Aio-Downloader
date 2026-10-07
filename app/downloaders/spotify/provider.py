@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 from pathlib import Path
@@ -28,9 +29,17 @@ class SpotifyDownloader(BaseDownloader):
 
     provider_name = "spotify"
 
-    def __init__(self, spotdl_bin: str = "spotdl", ffmpeg_bin: str | None = None) -> None:
+    def __init__(
+        self,
+        spotdl_bin: str = "spotdl",
+        ffmpeg_bin: str | None = None,
+        cookie_file: str | None = None,
+        proxy: str | None = None,
+    ) -> None:
         self.spotdl_bin = spotdl_bin
         self.ffmpeg_bin = ffmpeg_bin
+        self.cookie_file = cookie_file
+        self.proxy = proxy
 
     async def can_handle(self, url: str) -> bool:
         return is_spotify_url(url)
@@ -46,6 +55,8 @@ class SpotifyDownloader(BaseDownloader):
             cwd=str(destination),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # spotDL's console wraps at the terminal width; keep each message on one line.
+            env={**os.environ, "COLUMNS": "400"},
         )
         process_callback = request.options.get("process_callback")
         if callable(process_callback):
@@ -76,6 +87,14 @@ class SpotifyDownloader(BaseDownloader):
             for path in sorted(self._snapshot_files(destination) - before)
             if path.is_file()
         )
+        if not any(a.media_type == "audio" for a in artifacts):
+            # spotDL exits 0 even when every song failed; only "already
+            # downloaded" is a real success with no new files.
+            errors = [line for line in output_lines if self._is_error_line(line)]
+            if errors or not any(self._is_skip_line(line) for line in output_lines):
+                raise RuntimeError(
+                    "\n".join(errors[-4:]) or "spotDL finished without downloading anything."
+                )
         title = self._title_from_artifacts(artifacts) or "Spotify download"
         return DownloadResult(
             provider=self.provider_name,
@@ -100,7 +119,19 @@ class SpotifyDownloader(BaseDownloader):
         ]
         if self.ffmpeg_bin:
             cmd.extend(["--ffmpeg", self.ffmpeg_bin])
+        if self.cookie_file:
+            cmd.extend(["--cookie-file", self.cookie_file])
+        if self.proxy:
+            cmd.extend(["--proxy", self.proxy])
         return cmd
+
+    @staticmethod
+    def _is_error_line(line: str) -> bool:
+        return bool(re.search(r"Error\b|no usable results|could not|failed", line, re.IGNORECASE))
+
+    @staticmethod
+    def _is_skip_line(line: str) -> bool:
+        return "skipping" in line.lower() or "already exists" in line.lower()
 
     @staticmethod
     def _snapshot_files(destination: Path) -> set[Path]:
