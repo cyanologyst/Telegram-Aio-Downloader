@@ -2735,10 +2735,15 @@ cobalt_client = CobaltClient(COBALT_API_URL, COBALT_API_KEY)
 COBALT_UNSUPPORTED = {"error.api.link.unsupported", "error.api.service.unsupported"}
 
 
-async def download_with_cobalt(job: dict, url: str, output_dir: Path, ytdlp_error, is_cancelled):
-    """Second try through cobalt after yt-dlp failed. Returns (title, filepath or None)."""
-    ytdlp_reason, _ = explain_ytdlp_error(ytdlp_error)
-    logger.info("yt-dlp failed for %s (%s); trying cobalt", url, ytdlp_reason)
+async def download_with_cobalt(
+    job: dict, url: str, output_dir: Path, first_reason: str, is_cancelled
+):
+    """Second try through cobalt after the first engine failed with ``first_reason``.
+
+    Returns (title, filepath or None); multi-item posts land in a folder listed in
+    ``job["outputs"]``.
+    """
+    logger.info("First engine failed for %s (%s); trying cobalt", url, first_reason)
     job.update(engine="cobalt", note="via cobalt", status="downloading", last_line="")
     try:
         items = await cobalt_client.resolve(
@@ -2766,13 +2771,35 @@ async def download_with_cobalt(job: dict, url: str, output_dir: Path, ytdlp_erro
         if exc.code == "cancelled":
             raise
         if exc.code in COBALT_UNSUPPORTED:
-            raise DownloadFailed(ytdlp_reason) from exc
-        raise DownloadFailed(f"{ytdlp_reason}\n\ncobalt: {exc}") from exc
+            raise DownloadFailed(first_reason) from exc
+        raise DownloadFailed(f"{first_reason}\n\ncobalt: {exc}") from exc
     job["completed_length"] = job["total_length"] = finished_bytes
     if len(paths) == 1:
         return paths[0].stem, str(paths[0])
     job["outputs"] = [str(destination)]
     return f"{len(paths)} files from {job.get('platform') or 'the post'}", None
+
+
+SITE_BLOCK_PHRASES = ("blocked by network security", "403 forbidden", "http error 403", "'403'")
+
+
+def explain_gallery_error(error, category: str | None) -> tuple[str, bool]:
+    """(readable reason, whether cookies would help) for a gallery-dl failure."""
+    text = " ".join(str(error).split())
+    lowered = text.lower()
+    site = site_label(category) if category else "The site"
+    if any(phrase in lowered for phrase in SITE_BLOCK_PHRASES):
+        return (
+            f"{site} is blocking this server's IP address. Cookies from a browser logged in to "
+            f"{site} usually get through (one cookies.txt can hold several sites). "
+            + _COOKIE_HINT,
+            True,
+        )
+    if any(word in lowered for word in ("authorizationerror", "login required", "log in")):
+        return f"{site} wants you logged in for this. " + _COOKIE_HINT, True
+    text = re.sub(r"^gallery-dl failed:\s*", "", text)
+    text = re.sub(r"\[[\w.-]+\]\[error\]\s*", "", text)
+    return text.strip().strip('"') or "gallery-dl failed", False
 
 
 def explain_spotdl_error(error) -> tuple[str, bool]:
@@ -3078,9 +3105,30 @@ async def start_gallery_download(
             if job.get("status") == "cancelled":
                 return
             logger.warning("gallery-dl download failed: %s", exc)
+            reason, needs_cookies = explain_gallery_error(exc, job.get("category"))
+            if cobalt_client.enabled and not job["outputs"]:
+                try:
+                    title, path = await download_with_cobalt(
+                        job, url, GALLERY_DIR / (job.get("category") or "cobalt"), reason,
+                        lambda: job.get("status") == "cancelled",
+                    )
+                except CobaltError:
+                    return  # cancelled
+                except DownloadFailed as failed:
+                    reason = failed.reason
+                else:
+                    if path:
+                        job["outputs"] = [path]
+                    job.update(
+                        name=title, status="completed", progress=100.0,
+                        finished_at=now_ts(), last_line="",
+                    )
+                    await finish_job_card(app, job)
+                    return
             job["status"] = "failed"
             job["finished_at"] = now_ts()
-            job["last_line"] = str(exc)
+            job["last_line"] = reason
+            job["needs_cookies"] = needs_cookies or _COOKIE_HINT in reason
             await finish_job_card(app, job)
         finally:
             job["process"] = None
@@ -3446,7 +3494,7 @@ async def start_ytdlp_download(
                 if is_cancelled() or not cobalt_client.enabled or is_hentai or is_adult:
                     raise
                 title, filepath = await download_with_cobalt(
-                    job, url, output_dir, ytdlp_error, is_cancelled
+                    job, url, output_dir, explain_ytdlp_error(ytdlp_error)[0], is_cancelled
                 )
             if is_cancelled():
                 await finish_cancelled()

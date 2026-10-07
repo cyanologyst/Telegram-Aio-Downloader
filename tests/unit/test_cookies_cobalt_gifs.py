@@ -198,9 +198,7 @@ async def test_cobalt_takes_over_when_ytdlp_fails(isolated, monkeypatch):
     monkeypatch.setattr(tb, "cobalt_client", FakeCobalt([CobaltItem("u", "clip.mp4", "video")]))
     job = {"id": 5, "platform": "X / Twitter"}
 
-    title, path = await tb.download_with_cobalt(
-        job, "u", isolated, RuntimeError("boom"), lambda: False
-    )
+    title, path = await tb.download_with_cobalt(job, "u", isolated, "boom", lambda: False)
 
     assert title == "clip" and path.endswith("clip.mp4")
     assert job["note"] == "via cobalt" and job["completed_length"] == 4
@@ -213,7 +211,7 @@ async def test_cobalt_failures_explain_both_attempts(isolated, monkeypatch):
     )
     with pytest.raises(tb.DownloadFailed) as failed:
         await tb.download_with_cobalt(
-            {"id": 1}, "u", isolated, RuntimeError(bot_check), lambda: False
+            {"id": 1}, "u", isolated, tb.explain_ytdlp_error(bot_check)[0], lambda: False
         )
     assert "blocking downloads" in failed.value.reason and "cobalt: YouTube" in failed.value.reason
 
@@ -221,8 +219,42 @@ async def test_cobalt_failures_explain_both_attempts(isolated, monkeypatch):
         tb, "cobalt_client", FakeCobalt(error=CobaltError("error.api.link.unsupported"))
     )
     with pytest.raises(tb.DownloadFailed) as failed:
-        await tb.download_with_cobalt({"id": 1}, "u", isolated, RuntimeError("Nope"), lambda: False)
+        await tb.download_with_cobalt({"id": 1}, "u", isolated, "Nope", lambda: False)
     assert failed.value.reason == "Nope"
+
+
+def test_blocked_gallery_sites_are_explained():
+    reason, needs = tb.explain_gallery_error(
+        'gallery-dl failed: [reddit][error] "You\'ve been blocked by network security."', "reddit"
+    )
+    assert needs and reason.startswith("Reddit is blocking this server")
+    reason, needs = tb.explain_gallery_error(
+        "gallery-dl failed: [imgur][error] Album not found", "imgur"
+    )
+    assert not needs and reason == "Album not found"
+
+
+async def test_gallery_jobs_fall_back_to_cobalt(isolated, monkeypatch):
+    async def blocked(url, destination, **kwargs):
+        raise RuntimeError('gallery-dl failed: [reddit][error] "blocked by network security"')
+
+    async def no_card(app, job):
+        return None
+
+    monkeypatch.setattr(tb, "download_gallery", blocked)
+    monkeypatch.setattr(tb, "GALLERY_DIR", isolated / "Gallery")
+    monkeypatch.setattr(tb, "finish_job_card", no_card)
+    monkeypatch.setattr(tb, "_refresh_while_active", no_card)
+    monkeypatch.setattr(tb, "cobalt_client", FakeCobalt([CobaltItem("u", "clip.mp4", "video")]))
+    context = make_context()
+
+    job = await tb.start_gallery_download(
+        context.application, 1, "https://www.reddit.com/r/x/s/abc", "reddit", 1
+    )
+    await job["task"]
+
+    assert job["status"] == "completed" and job["note"] == "via cobalt"
+    assert job["outputs"][0].endswith("Gallery/reddit/clip.mp4")
 
 
 # --- GIFs -------------------------------------------------------------------
