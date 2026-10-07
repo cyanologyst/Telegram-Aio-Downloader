@@ -50,6 +50,7 @@ def _data(markup):
 async def _drain():
     while tb.background_tasks:
         await asyncio.gather(*list(tb.background_tasks), return_exceptions=True)
+        await asyncio.sleep(0)  # let done-callbacks remove finished tasks
 
 
 # ---------------------------------------------------------------- views

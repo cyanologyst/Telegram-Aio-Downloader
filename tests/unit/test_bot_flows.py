@@ -23,6 +23,7 @@ def isolated_state(tmp_path, monkeypatch):
 async def _drain_background():
     while tb.background_tasks:
         await asyncio.gather(*list(tb.background_tasks), return_exceptions=True)
+        await asyncio.sleep(0)  # let done-callbacks remove finished tasks
 
 
 def _buttons(call):

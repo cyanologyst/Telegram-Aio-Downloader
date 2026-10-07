@@ -30,3 +30,6 @@ build/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Saved job list (SQLite)
+data/

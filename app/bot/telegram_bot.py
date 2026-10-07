@@ -132,6 +132,7 @@ from app.services.manga import (
     list_manga_images,
     remove_manga_folder_if_empty,
 )
+from app.services.job_store import JobStore
 from app.services.organize import OrganizePlan, apply_organize, plan_organize
 from app.services.pornhub_model import (
     PornHubModelPlaylist,
@@ -245,6 +246,10 @@ mini_app_zip_jobs = {}
 
 download_jobs = {}
 job_counter = 0
+# Jobs are saved to SQLite so the list, and running aria2 downloads, survive restarts.
+JOB_DB_PATH = Path(os.getenv("JOB_DB_PATH", "").strip() or BASE_DIR / "data" / "bot.sqlite3")
+job_store: "JobStore | None" = None
+JOB_SAVE_INTERVAL = 10
 jobs_lock = asyncio.Lock()
 aria2_client = Aria2RpcClient(
     Aria2DaemonConfig(
@@ -4159,6 +4164,40 @@ async def monitor_aria2_job(app: Application, job_id: int):
         await finish_job_card(app, job)
 
 
+async def aria2_add_source(source_spec: str) -> tuple[str, dict | None, str]:
+    """Add a magnet/URL/.torrent (optionally ``path --select-file=1,2``) to aria2.
+
+    If aria2 already has that torrent, return its existing download instead:
+    (gid, status of the existing download or None, info hash).
+    """
+    source, selected_files = _split_torrent_source(source_spec)
+    info_hash = extract_info_hash(source)
+    options = {
+        "dir": str(DOWNLOAD_DIR),
+        "continue": "true",
+        "follow-torrent": "true",
+        "bt-save-metadata": "true",
+        "bt-metadata-only": "false",
+        "seed-time": "0",
+    }
+    if selected_files:
+        options["select-file"] = selected_files
+    try:
+        if _is_local_torrent_file(source):
+            gid = await aria2_client.add_torrent(Path(source), options)
+        else:
+            gid = await aria2_client.add_uri(source, options)
+        return gid, None, info_hash
+    except Aria2RpcError as exc:
+        duplicate_hash = extract_info_hash(str(exc)) or info_hash
+        if "already registered" not in str(exc).lower() or not duplicate_hash:
+            raise
+        existing = await find_aria2_status_by_info_hash(duplicate_hash)
+        if not existing:
+            raise
+        return existing["gid"], existing, duplicate_hash
+
+
 async def start_aria2_download(app: Application, chat_id: int, magnet: str, user_id: int = None):
     global job_counter, download_jobs
 
@@ -4176,36 +4215,9 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
     else:
         name = "Download"
     info_hash = extract_info_hash(source)
-    options = {
-        "dir": str(DOWNLOAD_DIR),
-        "continue": "true",
-        "follow-torrent": "true",
-        "bt-save-metadata": "true",
-        "bt-metadata-only": "false",
-        "seed-time": "0",
-    }
-    if selected_files:
-        options["select-file"] = selected_files
-
-    initial_status = None
-    reattached = False
-    try:
-        if is_torrent_file:
-            gid = await aria2_client.add_torrent(Path(source), options)
-        else:
-            gid = await aria2_client.add_uri(source, options)
-    except Aria2RpcError as exc:
-        duplicate_hash = extract_info_hash(str(exc)) or info_hash
-        if "already registered" not in str(exc).lower() or not duplicate_hash:
-            raise
-
-        initial_status = await find_aria2_status_by_info_hash(duplicate_hash)
-        if not initial_status:
-            raise
-
-        gid = initial_status["gid"]
-        info_hash = duplicate_hash
-        reattached = True
+    gid, initial_status, found_hash = await aria2_add_source(magnet)
+    reattached = initial_status is not None
+    info_hash = found_hash or info_hash
 
     async with jobs_lock:
         job_counter += 1
@@ -5621,6 +5633,84 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Main
 # =========================================================
 
+def save_jobs_now() -> None:
+    if job_store is not None:
+        job_store.sync([dict(job) for job in download_jobs.values()])
+
+
+async def job_persistence_loop():
+    while True:
+        await asyncio.sleep(JOB_SAVE_INTERVAL)
+        try:
+            snapshot = [dict(job) for job in download_jobs.values()]
+            await asyncio.to_thread(job_store.sync, snapshot)
+        except Exception:
+            logger.exception("Saving jobs failed")
+
+
+async def reattach_aria2_job(app: Application, job: dict) -> None:
+    """Pick a torrent/direct download back up after the bot restarted.
+
+    aria2 keeps its own session file, so the download is usually still there
+    under the same GID; otherwise it is found by info hash or added again
+    (aria2 resumes from the partial files on disk).
+    """
+    try:
+        await aria2_client.ensure_started()
+        status = None
+        for gid in dict.fromkeys([job.get("gid"), *reversed(job.get("gid_history") or [])]):
+            if not gid:
+                continue
+            try:
+                status = await aria2_client.tell_status(gid)
+                break
+            except Aria2RpcError:
+                continue
+        if status is None and job.get("info_hash"):
+            status = await find_aria2_status_by_info_hash(job["info_hash"])
+        if status is not None:
+            job["gid"] = status.get("gid", job.get("gid"))
+        elif job.get("source"):
+            job["gid"], _, _ = await aria2_add_source(job["source"])
+        else:
+            raise RuntimeError("aria2 no longer knows this download")
+        job["monitor_errors"] = 0
+        job["note"] = "resumed after a restart"
+        run_in_background(monitor_aria2_job(app, job["id"]), name=f"aria2-{job['id']}")
+    except Exception as exc:
+        logger.warning("Could not reattach job %s: %s", job.get("id"), exc)
+        job["status"] = "failed"
+        job["last_line"] = f"Could not resume after the bot restarted: {exc}"
+        job["finished_at"] = now_ts()
+        await finish_job_card(app, job)
+
+
+async def restore_jobs(app: Application) -> None:
+    """Load saved jobs: keep finished ones, resume aria2 ones, mark the rest interrupted."""
+    global job_counter
+    try:
+        saved = await asyncio.to_thread(job_store.load)
+    except Exception:
+        logger.exception("Loading saved jobs failed")
+        return
+    for job in saved:
+        download_jobs[job["id"]] = job
+        job_counter = max(job_counter, int(job["id"]))
+    for job in saved:
+        if job.get("status") not in JOB_ACTIVE_STATES:
+            continue
+        if not job.get("provider") and (job.get("gid") or job.get("source")):
+            await reattach_aria2_job(app, job)
+        else:
+            # yt-dlp/Spotify/manga run inside the bot process and stopped with it.
+            job["status"] = "failed"
+            job["last_line"] = "Interrupted by a bot restart. Tap Retry to resume it."
+            job["finished_at"] = now_ts()
+            await finish_job_card(app, job)
+    if saved:
+        logger.info("Restored %d saved job(s)", len(saved))
+
+
 async def post_init(app: Application):
     """Initialize bot - setup pyrogram, executor, and start auto-cleanup task."""
     global zip_executor
@@ -5658,6 +5748,15 @@ async def post_init(app: Application):
     
     asyncio.create_task(cleanup_task())
     logger.info("✅ Auto-cleanup task started")
+
+    global job_store
+    try:
+        job_store = JobStore(JOB_DB_PATH)
+        await restore_jobs(app)
+        run_in_background(job_persistence_loop(), name="job-persistence")
+    except Exception:
+        logger.exception("Job persistence unavailable; jobs will not survive restarts")
+        job_store = None
 
     # The "/" menu Telegram shows next to the message box.
     try:
@@ -5700,6 +5799,12 @@ async def post_shutdown(app: Application):
         zip_executor = None
     
     stop_dashboard_server(getattr(app, "dashboard_server", None))
+    if job_store is not None:
+        try:
+            save_jobs_now()
+            job_store.close()
+        except Exception:
+            logger.exception("Final job save failed")
     await stop_pyrogram_client()
 
 
