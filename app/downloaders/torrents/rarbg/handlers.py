@@ -297,9 +297,7 @@ class RARBGHandlers:
         page: int = 0,
     ):
         try:
-            results, has_more = await self._results_for_page(
-                context, search_query, category, page
-            )
+            results, has_more = await self._results_for_page(context, search_query, category, page)
         except RARBGVerificationError as exc:
             await header_message.edit_text(f"⚠️ {exc}")
             return

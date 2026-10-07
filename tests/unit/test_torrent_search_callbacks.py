@@ -84,7 +84,9 @@ class _StubCrawler:
         if page >= self.total_pages:
             return []
         base = page * self.PAGE_SIZE
-        return [{"id": f"id-{base + i}", "name": f"result {base + i}"} for i in range(self.PAGE_SIZE)]
+        return [
+            {"id": f"id-{base + i}", "name": f"result {base + i}"} for i in range(self.PAGE_SIZE)
+        ]
 
 
 class _Context:

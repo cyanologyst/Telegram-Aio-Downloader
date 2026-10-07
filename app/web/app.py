@@ -27,7 +27,6 @@ from app.services.user_settings import (
     validate_part_size,
 )
 
-
 # Telegram signs initData with a key derived from the bot token. Signatures older
 # than this are rejected so a captured header cannot be replayed indefinitely.
 INIT_DATA_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -341,11 +340,7 @@ def create_web_app(
 
         data = request.get_json(silent=True) or {}
         return int(
-            data.get(field)
-            or request.args.get(field)
-            or user.get("id")
-            or app.default_chat_id
-            or 0
+            data.get(field) or request.args.get(field) or user.get("id") or app.default_chat_id or 0
         )
 
     def request_user_id() -> int:
