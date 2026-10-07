@@ -86,6 +86,7 @@ class FakeMessage:
 class FakeCallbackQuery:
     def __init__(self, bot: FakeBot, data: str, user_id: int, message: FakeMessage) -> None:
         self._bot = bot
+        self.id = str(next(_message_ids))
         self.data = data
         self.from_user = SimpleNamespace(id=user_id)
         self.message = message

@@ -77,13 +77,11 @@ from telegram.request import HTTPXRequest
 from app.downloaders.base import DownloadRequest
 from app.downloaders.spotify import SpotifyDownloader, is_spotify_url
 
-# Import torrent crawler subsystems
-from app.downloaders.torrents.prowlarr import ProwlarrClient, ProwlarrHandlers
-from app.downloaders.torrents.prowlarr.keyboards import prowlarr_categories_keyboard
-from app.downloaders.torrents.rarbg import RARBGCrawler, RARBGHandlers
-from app.downloaders.torrents.rarbg.keyboards import rarbg_categories_keyboard
-from app.downloaders.torrents.tpb import TPBCrawler, TPBHandlers
-from app.downloaders.torrents.tpb.keyboards import tpb_categories_keyboard
+from app.bot.callbacks import answer_once, auto_answer
+from app.bot.search import SearchUI
+from app.downloaders.torrents.prowlarr.client import ProwlarrClient
+from app.downloaders.torrents.rarbg.crawler import RARBGCrawler
+from app.downloaders.torrents.tpb.crawler import TPBCrawler
 
 # Import post downloader module for handling forwarded posts
 from app.handlers.forwarded_media import bot_id_from_token, setup_pyrogram_forwarded_downloads
@@ -140,6 +138,7 @@ from app.services.runtime_dependencies import configure_deno_runtime, get_deno_v
 
 # Import thumbnail generation module
 from app.services.thumbnails import generate_contact_sheet
+from app.services.torrent_search import ProwlarrProvider, RARBGProvider, TPBProvider
 
 # Import zip settings module
 from app.services.user_settings import (
@@ -261,6 +260,9 @@ path_tokens = {}  # {token: (rel_path, timestamp)}
 reverse_path_tokens = {}  # {rel_path: token}
 path_token_counter = 0
 PATH_TOKEN_TIMEOUT = 3600  # Token expires after 1 hour (in seconds)
+
+# Unified torrent search UI, built in main()
+search_ui: SearchUI | None = None
 
 # Torrent file selection sessions
 torrent_select_sessions = {}
@@ -1714,11 +1716,7 @@ def build_downloads_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{ICON_STATUS} Live Status", callback_data="menu:status")],
         [InlineKeyboardButton("Supported Sites", url=SUPPORTED_SITES_URL)],
-        [InlineKeyboardButton("🧭 Prowlarr Search", callback_data="menu:prowlarr")],
-        [
-            InlineKeyboardButton(f"{ICON_MAGNET} TPB Search", callback_data="menu:tpb"),
-            InlineKeyboardButton("🧲 RARBG Search", callback_data="menu:rarbg"),
-        ],
+        [InlineKeyboardButton("🔍 Search torrents", callback_data="srch:p:")],
         [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
         [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
     ])
@@ -1760,11 +1758,7 @@ def build_tools_menu_text(user_id: int = None) -> str:
 def build_tools_menu_markup(user_id: int = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{ICON_ARCHIVE} Zip Menu", callback_data="menu:zip")],
-        [InlineKeyboardButton("🧭 Prowlarr Search", callback_data="menu:prowlarr")],
-        [
-            InlineKeyboardButton(f"{ICON_MAGNET} TPB Search", callback_data="menu:tpb"),
-            InlineKeyboardButton("🧲 RARBG Search", callback_data="menu:rarbg"),
-        ],
+        [InlineKeyboardButton("🔍 Search torrents", callback_data="srch:p:")],
         [InlineKeyboardButton(f"{ICON_IMAGE} Manga Settings", callback_data="menu:manga_settings")],
         [InlineKeyboardButton(f"{ICON_BROOM} Clear Finished Jobs", callback_data="menu:clear")],
         [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
@@ -5522,143 +5516,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         return
 
+    # A link always wins over a pending search prompt; anything else typed
+    # while the search prompt is open is the search query.
+    is_link = lower.startswith("magnet:") or is_http_url(text)
+    if is_link and search_ui is not None:
+        search_ui.cancel_waiting(context)
+    elif search_ui is not None and await search_ui.handle_text(update, context):
+        return
+
     # normalize button text by removing emojis and extra spaces
     normalized = re.sub(r'[^\w\s\u0600-\u06FF]', '', lower).strip()
 
     try:
-        if normalized in ("home", "main menu", "منوی اصلی"):
-            await update.message.reply_text(
-                build_home_text(user_id), 
-                reply_markup=build_reply_menu(user_id)
-            )
-
-        elif normalized in ("status", "?????"):
-            await update_status_message(context.application, chat_id, user_id)
-
-        elif normalized in ("downloads", "download"):
-            await update.message.reply_text(
-                build_downloads_menu_text(user_id),
-                reply_markup=build_downloads_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("tools", "tool"):
-            await update.message.reply_text(
-                build_tools_menu_text(user_id),
-                reply_markup=build_tools_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("settings", "setting"):
-            await update.message.reply_text(
-                build_settings_menu_text(user_id),
-                reply_markup=build_settings_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("queue", "صف"):
-            await update.message.reply_text(
-                build_queue_text(user_id), 
-                reply_markup=build_reply_menu(user_id)
-            )
-
-        elif normalized in ("files",):
-            await update.message.reply_text(
-                build_files_menu_text(user_id),
-                reply_markup=build_files_menu_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("file browser", "مرورگر فایل"):
-            await update.message.reply_text(
-                build_files_text("", 0),
-                reply_markup=build_files_markup("", 0),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("cancel", "انصراف"):
-            active = [j for j in download_jobs.values() if j["status"] in JOB_ACTIVE_STATES]
-
-            if not active:
-                await update.message.reply_text(
-                    f"{ICON_STOP} {clean_emoji_prefix(get_lang(user_id, 'no_active'))}",
-                    reply_markup=build_reply_menu(user_id)
-                )
-            else:
-                lines = [f"{ICON_STOP} {clean_emoji_prefix(get_lang(user_id, 'cancel_help'))}", ""]
-                for j in sorted(active, key=lambda x: x["id"]):
-                    lines.append(f"#{j['id']} [{j['status']}] {j['name']}")
-                lines.append("")
-                lines.append(get_lang(user_id, 'cancel_help2'))
-                await update.message.reply_text("\n".join(lines), reply_markup=build_reply_menu(user_id))
-
-        elif lower.startswith("cancel "):
-            m = re.match(r"cancel\s+(\d+)", lower)
-            if not m:
-                await update.message.reply_text(
-                    get_lang(user_id, 'usage'),
-                    reply_markup=build_reply_menu(user_id)
-                )
-                return
-
-            jid = int(m.group(1))
-            if jid not in download_jobs:
-                await update.message.reply_text(
-                    f"Job #{jid} {get_lang(user_id, 'not_found')}",
-                    reply_markup=build_reply_menu(user_id)
-                )
-                return
-            
-            job = download_jobs[jid]
-            await update.message.reply_text(
-                f"{ICON_WARN} {get_lang(user_id, 'confirm_cancel_job')}\n\n"
-                f"Job #{jid}\n"
-                f"{job['name']}\n\n"
-                f"Status: {job['status']}",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(f"{ICON_STOP} Yes, Cancel", callback_data=f"cancel_confirm:{jid}"),
-                    ]
-                ]),
-            )
-
-        elif lower in ("clear", f"{ICON_BROOM.lower()} clear", get_lang(user_id, 'clear').lower()):
-            await clear_jobs_cmd(update, context)
-
-        elif "help" in normalized or "راهنما" in normalized:
-            await update.message.reply_text(
-                build_help_text(user_id), 
-                reply_markup=build_supported_sites_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("settings", "zip settings"):
-            await update.message.reply_text(
-                build_zip_settings_text(user_id),
-                reply_markup=build_zip_settings_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif normalized in ("manga settings", "manga"):
-            await update.message.reply_text(
-                build_manga_settings_text(user_id),
-                reply_markup=build_manga_settings_markup(user_id),
-                disable_web_page_preview=True,
-            )
-
-        elif get_lang(user_id, 'toggle_language').lower() in lower or "language" in lower or "زبان" in text:
-            lang_keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(get_lang_for_all("en", "en"), callback_data="set_lang:en"),
-                    InlineKeyboardButton(get_lang_for_all("fa", "fa"), callback_data="set_lang:fa"),
-                ]
-            ])
-            await update.message.reply_text(
-                f"{get_lang(user_id, 'language')}\n\n{get_lang(user_id, 'select_language')}",
-                reply_markup=lang_keyboard,
-            )
-
-        elif text.startswith("magnet:?") or text.startswith("magnet:"):
+        if lower.startswith("magnet:"):
             name = extract_bt_name(text)
             if is_duplicate_name(name):
                 await update.message.reply_text(
@@ -5829,111 +5699,150 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update_status_message(context.application, chat_id, user_id)
 
-        elif normalized in ("zip menu", "منوی فشرده‌سازی", "zip", "📦 zip menu"):
+        elif normalized in ("home", "main menu"):
+            await update.message.reply_text(
+                build_home_text(user_id), 
+                reply_markup=build_reply_menu(user_id)
+            )
+
+        elif normalized == "status":
+            await update_status_message(context.application, chat_id, user_id)
+
+        elif normalized in ("downloads", "download"):
+            await update.message.reply_text(
+                build_downloads_menu_text(user_id),
+                reply_markup=build_downloads_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized in ("tools", "tool"):
+            await update.message.reply_text(
+                build_tools_menu_text(user_id),
+                reply_markup=build_tools_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized in ("settings", "setting"):
+            await update.message.reply_text(
+                build_settings_menu_text(user_id),
+                reply_markup=build_settings_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized == "queue":
+            await update.message.reply_text(
+                build_queue_text(user_id), 
+                reply_markup=build_reply_menu(user_id)
+            )
+
+        elif normalized in ("files",):
+            await update.message.reply_text(
+                build_files_menu_text(user_id),
+                reply_markup=build_files_menu_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized == "file browser":
+            await update.message.reply_text(
+                build_files_text("", 0),
+                reply_markup=build_files_markup("", 0),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized == "cancel":
+            active = [j for j in download_jobs.values() if j["status"] in JOB_ACTIVE_STATES]
+
+            if not active:
+                await update.message.reply_text(
+                    f"{ICON_STOP} {clean_emoji_prefix(get_lang(user_id, 'no_active'))}",
+                    reply_markup=build_reply_menu(user_id)
+                )
+            else:
+                lines = [f"{ICON_STOP} {clean_emoji_prefix(get_lang(user_id, 'cancel_help'))}", ""]
+                for j in sorted(active, key=lambda x: x["id"]):
+                    lines.append(f"#{j['id']} [{j['status']}] {j['name']}")
+                lines.append("")
+                lines.append(get_lang(user_id, 'cancel_help2'))
+                await update.message.reply_text("\n".join(lines), reply_markup=build_reply_menu(user_id))
+
+        elif lower.startswith("cancel "):
+            m = re.match(r"cancel\s+(\d+)", lower)
+            if not m:
+                await update.message.reply_text(
+                    get_lang(user_id, 'usage'),
+                    reply_markup=build_reply_menu(user_id)
+                )
+                return
+
+            jid = int(m.group(1))
+            if jid not in download_jobs:
+                await update.message.reply_text(
+                    f"Job #{jid} {get_lang(user_id, 'not_found')}",
+                    reply_markup=build_reply_menu(user_id)
+                )
+                return
+            
+            job = download_jobs[jid]
+            await update.message.reply_text(
+                f"{ICON_WARN} {get_lang(user_id, 'confirm_cancel_job')}\n\n"
+                f"Job #{jid}\n"
+                f"{job['name']}\n\n"
+                f"Status: {job['status']}",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(f"{ICON_STOP} Yes, Cancel", callback_data=f"cancel_confirm:{jid}"),
+                    ]
+                ]),
+            )
+
+        elif lower in ("clear", f"{ICON_BROOM.lower()} clear", get_lang(user_id, 'clear').lower()):
+            await clear_jobs_cmd(update, context)
+
+        elif normalized == "help":
+            await update.message.reply_text(
+                build_help_text(user_id), 
+                reply_markup=build_supported_sites_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized in ("manga settings", "manga"):
+            await update.message.reply_text(
+                build_manga_settings_text(user_id),
+                reply_markup=build_manga_settings_markup(user_id),
+                disable_web_page_preview=True,
+            )
+
+        elif normalized in ("language", "toggle language"):
+            lang_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(get_lang_for_all("en", "en"), callback_data="set_lang:en"),
+                    InlineKeyboardButton(get_lang_for_all("fa", "fa"), callback_data="set_lang:fa"),
+                ]
+            ])
+            await update.message.reply_text(
+                f"{get_lang(user_id, 'language')}\n\n{get_lang(user_id, 'select_language')}",
+                reply_markup=lang_keyboard,
+            )
+
+        elif normalized in ("zip menu", "zip"):
             await update.message.reply_text(
                 build_zip_menu_text(user_id),
                 reply_markup=build_zip_menu_markup(user_id),
             )
 
-        elif normalized in ("tpb search", "جستجوی tpb"):
+        elif normalized in ("search", "tpb search", "rarbg search", "rargb search", "prowlarr search"):
+            provider_key = normalized.split()[0] if normalized != "search" else None
+            provider_key = "rarbg" if provider_key == "rargb" else provider_key
+            await search_ui.open(context, update.message, provider_key, edit=False)
+
+        elif is_http_url(text):
             await update.message.reply_text(
-                f"🏴‍☠️ {get_lang(user_id, 'tpb_welcome')}\n\n"
-                f"{get_lang(user_id, 'tpb_send_query')}",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            text=get_lang(user_id, 'home_btn'),
-                        ),
-                    ],
-                ]),
+                f"{ICON_WARN} I don't know how to download this link.\n\n"
+                "Supported: magnets, .torrent files, direct file links (ending in a file "
+                "extension like .zip or .mkv), and the sites listed under Supported Sites.",
+                reply_markup=build_supported_sites_markup(user_id),
                 disable_web_page_preview=True,
             )
-            context.user_data["tpb_waiting_for_query"] = True
-
-        elif normalized in ("rarbg search", "rargb search", "جستجوی rarbg"):
-            await update.message.reply_text(
-                f"🧲 {get_lang(user_id, 'rarbg_welcome')}\n\n"
-                f"{get_lang(user_id, 'rarbg_send_query')}",
-                disable_web_page_preview=True,
-            )
-            context.user_data["rarbg_waiting_for_query"] = True
-
-        elif normalized in ("prowlarr search", "جستجوی prowlarr"):
-            if not PROWLARR_API_KEY:
-                await update.message.reply_text(get_lang(user_id, "prowlarr_not_configured"))
-                return
-            await update.message.reply_text(
-                f"🧭 {get_lang(user_id, 'prowlarr_welcome')}\n\n"
-                f"{get_lang(user_id, 'prowlarr_send_query')}",
-                disable_web_page_preview=True,
-            )
-            context.user_data["prowlarr_waiting_for_query"] = True
-
-        # Check if user is in TPB search flow (handled before unknown input)
-        elif context.user_data.get("tpb_waiting_for_query"):
-            context.user_data.pop("tpb_waiting_for_query", None)
-            # Clean up any previous TPB result messages
-            old_ids = context.user_data.pop("tpb_result_ids", [])
-            for mid in old_ids:
-                try:
-                    await context.bot.delete_message(chat_id, mid)
-                except Exception:
-                    pass
-            if text:
-                await update.message.reply_text(
-                    f"🔍 {get_lang(user_id, 'select_category').format(text)}",
-                    reply_markup=tpb_categories_keyboard(text),
-                    disable_web_page_preview=True,
-                )
-            else:
-                await update.message.reply_text(
-                    get_lang(user_id, 'tpb_send_query'),
-                )
-                context.user_data["tpb_waiting_for_query"] = True
-
-        # Check if user is in RARBG search flow (handled before unknown input)
-        elif context.user_data.get("rarbg_waiting_for_query"):
-            context.user_data.pop("rarbg_waiting_for_query", None)
-            old_ids = context.user_data.pop("rarbg_result_ids", [])
-            context.user_data.pop("rarbg_result_map", None)
-            for mid in old_ids:
-                try:
-                    await context.bot.delete_message(chat_id, mid)
-                except Exception:
-                    pass
-            if text:
-                await update.message.reply_text(
-                    f"🔍 {get_lang(user_id, 'select_category').format(text)}",
-                    reply_markup=rarbg_categories_keyboard(text),
-                    disable_web_page_preview=True,
-                )
-            else:
-                await update.message.reply_text(
-                    get_lang(user_id, 'rarbg_send_query'),
-                )
-                context.user_data["rarbg_waiting_for_query"] = True
-
-        # Check if user is in Prowlarr search flow (handled before unknown input)
-        elif context.user_data.get("prowlarr_waiting_for_query"):
-            context.user_data.pop("prowlarr_waiting_for_query", None)
-            old_ids = context.user_data.pop("prowlarr_result_ids", [])
-            context.user_data.pop("prowlarr_results", None)
-            for mid in old_ids:
-                try:
-                    await context.bot.delete_message(chat_id, mid)
-                except Exception:
-                    pass
-            if text:
-                await update.message.reply_text(
-                    f"🔍 {get_lang(user_id, 'select_category').format(text)}",
-                    reply_markup=prowlarr_categories_keyboard(text),
-                    disable_web_page_preview=True,
-                )
-            else:
-                await update.message.reply_text(
-                    get_lang(user_id, 'prowlarr_send_query'),
-                )
-                context.user_data["prowlarr_waiting_for_query"] = True
 
         else:
             await update.message.reply_text(
@@ -6192,33 +6101,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, markup = build_clear_jobs_prompt()
             await safe_edit_message(query.message, text, markup)
 
-        elif data == "menu:tpb":
-            context.user_data["tpb_waiting_for_query"] = True
-            await safe_edit_message(
-                query.message,
-                f"{ICON_MAGNET} {get_lang(user_id, 'tpb_welcome')}\n\n"
-                f"{get_lang(user_id, 'tpb_send_query')}",
+        elif data in ("menu:tpb", "menu:rarbg", "menu:prowlarr", "menu:search"):
+            # Buttons from older menus still in the chat history.
+            provider_key = data.split(":", 1)[1]
+            await search_ui.open(
+                context, query.message, None if provider_key == "search" else provider_key, edit=True
             )
 
-        elif data == "menu:rarbg":
-            context.user_data["rarbg_waiting_for_query"] = True
-            await safe_edit_message(
-                query.message,
-                f"🧲 {get_lang(user_id, 'rarbg_welcome')}\n\n"
-                f"{get_lang(user_id, 'rarbg_send_query')}",
-            )
-
-        elif data == "menu:prowlarr":
-            if not PROWLARR_API_KEY:
-                await safe_edit_message(query.message, get_lang(user_id, "prowlarr_not_configured"))
-                return
-            context.user_data["prowlarr_waiting_for_query"] = True
-            await safe_edit_message(
-                query.message,
-                f"🧭 {get_lang(user_id, 'prowlarr_welcome')}\n\n"
-                f"{get_lang(user_id, 'prowlarr_send_query')}",
-            )
-        
         elif data.startswith("set_lang:"):
             lang = data.split(":")[1]
             if lang in ("en", "fa"):
@@ -7383,6 +7272,27 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"Telegram error: {err}", exc_info=err)
 
 
+async def start_search_download(update, context, source: str, force: bool = False) -> dict:
+    """Start an aria2 download for a torrent-search result.
+
+    Returns {"status": "duplicate", "name": ...} instead of starting when a
+    file of that name already exists, unless ``force`` is set.
+    """
+    source_value, _ = _split_torrent_source(source)
+    if _is_local_torrent_file(source_value):
+        name = clean_download_name(Path(source_value).name)
+    elif source_value.lower().startswith(("http://", "https://")):
+        name = extract_http_filename(source_value)
+    else:
+        name = extract_bt_name(source_value)
+    if not force and is_duplicate_name(name):
+        return {"id": 0, "name": name, "status": "duplicate"}
+    user_id = update.effective_user.id if update.effective_user else None
+    job = await start_aria2_download(context.application, update.effective_chat.id, source, user_id)
+    await update_status_message(context.application, update.effective_chat.id, user_id)
+    return job
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN missing")
@@ -7475,79 +7385,23 @@ def main():
     app.add_handler(CommandHandler("list", list_files_cmd))
     app.add_handler(CommandHandler("clear", clear_jobs_cmd))
 
-    # TPB crawler handlers
-    tpb_crawler = TPBCrawler(TPB_API_URL)
-
-    async def torrent_search_start_download(update, context, source: str):
-        """Wrapper to start aria2 downloads from torrent search providers."""
-        source_value, _ = _split_torrent_source(source)
-        if _is_local_torrent_file(source_value):
-            name = clean_download_name(Path(source_value).name)
-        elif source_value.lower().startswith(("http://", "https://")):
-            name = extract_http_filename(source_value)
-        else:
-            name = extract_bt_name(source_value)
-        if is_duplicate_name(name):
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"⚠️ Duplicate detected: {name}",
-            )
-            return {"id": 0, "name": name, "status": "duplicate"}
-        job = await start_aria2_download(
-            context.application,
-            update.effective_chat.id,
-            source,
-            update.effective_user.id if update.effective_user else None,
-        )
-        await update_status_message(context.application, update.effective_chat.id, update.effective_user.id if update.effective_user else None)
-        return job
-
-    tpb_handlers = TPBHandlers(
-        tpb_crawler,
-        lang_func=get_lang,
-        download_func=torrent_search_start_download,
+    # Unified torrent search (Prowlarr, TPB, RARBG-style mirror)
+    global search_ui
+    search_ui = SearchUI(
+        [
+            ProwlarrProvider(
+                ProwlarrClient(PROWLARR_URL, PROWLARR_API_KEY, PROWLARR_SEARCH_LIMIT)
+            ),
+            TPBProvider(TPBCrawler(TPB_API_URL)),
+            RARBGProvider(RARBGCrawler(RARBG_BASE_URL)),
+        ],
+        start_download=start_search_download,
+        select_files=start_torrent_file_selection,
+        torrent_dir=DOWNLOAD_DIR / "_torrents" / "search",
     )
-    app.add_handler(CommandHandler("tpb", tpb_handlers.tpb_cmd))
-    app.add_handler(CommandHandler("tpbget", tpb_handlers.tpb_get_cmd))
-    app.add_handler(CallbackQueryHandler(tpb_handlers.category_callback, pattern=r"^tpb_cat_"))
-    app.add_handler(CallbackQueryHandler(tpb_handlers.page_callback, pattern=r"^tpb_page_"))
-    app.add_handler(CallbackQueryHandler(tpb_handlers.newsearch_callback, pattern=r"^tpb_newsearch$"))
-    app.add_handler(CallbackQueryHandler(tpb_handlers.magnet_callback, pattern=r"^tpb_magnet_"))
-    app.add_handler(CallbackQueryHandler(tpb_handlers.download_callback, pattern=r"^tpb_dl_"))
-    app.add_handler(CallbackQueryHandler(tpb_handlers.info_callback, pattern=r"^tpb_info_"))
-
-    # RARBG-style crawler handlers
-    rarbg_crawler = RARBGCrawler(RARBG_BASE_URL)
-    rarbg_handlers = RARBGHandlers(
-        rarbg_crawler,
-        lang_func=get_lang,
-        download_func=torrent_search_start_download,
-    )
-    app.add_handler(CommandHandler("rarbg", rarbg_handlers.rarbg_cmd))
-    app.add_handler(CommandHandler("rarbgget", rarbg_handlers.rarbg_get_cmd))
-    app.add_handler(CallbackQueryHandler(rarbg_handlers.category_callback, pattern=r"^rarbg_cat_"))
-    app.add_handler(CallbackQueryHandler(rarbg_handlers.page_callback, pattern=r"^rarbg_page_"))
-    app.add_handler(CallbackQueryHandler(rarbg_handlers.newsearch_callback, pattern=r"^rarbg_newsearch$"))
-    app.add_handler(CallbackQueryHandler(rarbg_handlers.magnet_callback, pattern=r"^rarbg_magnet_"))
-    app.add_handler(CallbackQueryHandler(rarbg_handlers.download_callback, pattern=r"^rarbg_dl_"))
-    app.add_handler(CallbackQueryHandler(rarbg_handlers.info_callback, pattern=r"^rarbg_info_"))
-
-    # Prowlarr multi-indexer search handlers
-    prowlarr_client = ProwlarrClient(PROWLARR_URL, PROWLARR_API_KEY, PROWLARR_SEARCH_LIMIT)
-    prowlarr_handlers = ProwlarrHandlers(
-        prowlarr_client,
-        lang_func=get_lang,
-        download_func=torrent_search_start_download,
-        select_torrent_func=start_torrent_file_selection,
-        torrent_dir=DOWNLOAD_DIR / "_torrents" / "prowlarr",
-    )
-    app.add_handler(CommandHandler("prowlarr", prowlarr_handlers.prowlarr_cmd))
-    app.add_handler(CallbackQueryHandler(prowlarr_handlers.category_callback, pattern=r"^prowlarr_cat_"))
-    app.add_handler(CallbackQueryHandler(prowlarr_handlers.page_callback, pattern=r"^prowlarr_page_"))
-    app.add_handler(CallbackQueryHandler(prowlarr_handlers.newsearch_callback, pattern=r"^prowlarr_newsearch$"))
-    app.add_handler(CallbackQueryHandler(prowlarr_handlers.info_callback, pattern=r"^prowlarr_info_"))
-    app.add_handler(CallbackQueryHandler(prowlarr_handlers.download_callback, pattern=r"^prowlarr_dl_"))
-    app.add_handler(CallbackQueryHandler(prowlarr_handlers.select_callback, pattern=r"^prowlarr_select_"))
+    for command in ("search", "prowlarr", "tpb", "rarbg"):
+        app.add_handler(CommandHandler(command, search_ui.command))
+    app.add_handler(CallbackQueryHandler(search_ui.on_callback, pattern=r"^srch:"))
 
     # Legacy handlers
     app.add_handler(CallbackQueryHandler(handle_ytdlp_callback, pattern=r"^ytdlp_"))

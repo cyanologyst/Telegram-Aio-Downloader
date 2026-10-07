@@ -1,6 +1,5 @@
-"""The Pirate Bay crawler subsystem."""
+"""The Pirate Bay crawler (apibay.org). The Telegram UI lives in app.bot.search."""
 
 from app.downloaders.torrents.tpb.crawler import TPBCrawler
-from app.downloaders.torrents.tpb.handlers import TPBHandlers
 
-__all__ = ["TPBCrawler", "TPBHandlers"]
+__all__ = ["TPBCrawler"]
