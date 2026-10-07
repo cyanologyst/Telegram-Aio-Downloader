@@ -82,6 +82,7 @@ from app.downloaders.spotify import SpotifyDownloader, is_spotify_url
 
 from app.bot.callbacks import answer_once, auto_answer
 from app.bot.search import SearchUI
+from app.bot.views import files as file_views
 from app.bot.views import home as home_views
 from app.bot.views import settings as settings_views
 from app.bot.views.common import Screen
@@ -265,7 +266,7 @@ aria2_client = Aria2RpcClient(
 path_tokens = {}  # {token: (rel_path, timestamp)}
 reverse_path_tokens = {}  # {rel_path: token}
 path_token_counter = 0
-PATH_TOKEN_TIMEOUT = 3600  # Token expires after 1 hour (in seconds)
+PATH_TOKEN_TIMEOUT = 24 * 3600  # menus stay usable for a day
 
 # Unified torrent search UI, built in main()
 search_ui: SearchUI | None = None
@@ -800,6 +801,90 @@ def format_archive_progress_text(progress: ZipProgress, prefix: str = "📦") ->
     )
 
 
+def default_archive_name() -> str:
+    return f"archive_{datetime.now().strftime('%Y%m%d_%H%M')}"
+
+
+def sanitize_archive_name(name: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip("._- ")[:100]
+
+
+async def ask_zip_name(message, user_id: int, chat_id: int, paths: list, *, default_name: str, cancel_data: str):
+    """Ask for an archive name (or offer a default) before zipping ``paths``."""
+    paths = sorted(paths, key=lambda path: str(path).lower())
+    pending_zip_name_sessions[user_id] = {
+        "files_to_zip": build_files_to_zip(paths),
+        "source_files": paths,
+        "settings": get_user_settings(user_id),
+        "default_name": sanitize_archive_name(default_name) or default_archive_name(),
+        "chat_id": chat_id,
+    }
+    size = sum(path.stat().st_size for path in paths)
+    await show_screen(message, file_views.zip_name_screen(
+        len(paths), size, pending_zip_name_sessions[user_id]["default_name"], cancel_data
+    ))
+
+
+async def run_named_zip(app: Application, user_id: int, name: str, status_msg) -> None:
+    """Create the archive for a pending zip session and send it to the chat."""
+    session = pending_zip_name_sessions.pop(user_id, None)
+    if session is None:
+        await status_msg.edit_text("This archive request has expired. Start it again from Archive.")
+        return
+    chat_id = session["chat_id"]
+    settings = session["settings"]
+    await status_msg.edit_text(f"📦 Creating {name}...")
+
+    async def on_progress(prog_text: str):
+        try:
+            await status_msg.edit_text(prog_text)
+        except BadRequest:
+            pass
+
+    sent_while_zipping = []
+
+    upload_callback = create_zip_upload_callback(app, chat_id, user_id, settings, status_msg, sent_while_zipping)
+    zip_paths, size_warnings = await run_archive_job(
+        user_id,
+        session["files_to_zip"],
+        DOWNLOAD_DIR,
+        zip_name=name,
+        settings=settings,
+        on_progress=on_progress,
+        upload_callback=upload_callback,
+    )
+    all_ok = True
+    if zip_paths:
+        all_ok = await send_archives_to_chat(app, chat_id, zip_paths, settings, status_msg, user_id)
+
+    deleted_sources = False
+    if all_ok and settings.get("auto_delete_files_after_zip"):
+        for path in session["source_files"]:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not delete zipped file %s: %s", path, exc)
+        deleted_sources = True
+
+    parts = len(sent_while_zipping) + len(zip_paths)
+    lines = [
+        f"{ICON_OK if all_ok else ICON_WARN} Archive {'sent' if all_ok else 'partly sent'}: {name}",
+        f"Files: {len(session['source_files'])} · parts: {parts}",
+    ]
+    if sent_while_zipping:
+        lines.append("Parts were uploaded as they were created and removed from disk.")
+    elif zip_paths and settings.get("auto_delete_zips_after_send") and all_ok:
+        lines.append("The archive was removed from disk after sending.")
+    elif zip_paths:
+        lines.append("The archive is kept in the Download folder.")
+    if deleted_sources:
+        lines.append("The original files were deleted (Archive settings).")
+    if not all_ok:
+        lines.append("Some parts failed to send; check the bot log.")
+    lines += [f"{ICON_WARN} {warning}" for warning in size_warnings]
+    await status_msg.edit_text("\n".join(lines))
+
+
 async def maybe_delete_file_after_upload(user_id: int, rel_path: str) -> None:
     if not user_id:
         return
@@ -815,77 +900,49 @@ async def maybe_delete_file_after_upload(user_id: int, rel_path: str) -> None:
 
 
 def create_zip_upload_callback(
-    context, chat_id: int, user_id: int, settings: dict, status_msg=None
+    context, chat_id: int, user_id: int, settings: dict, status_msg=None, sent: list | None = None
 ):
-    """Create a callback that uploads each zip part immediately after creation and deletes it from disk."""
-    
-    async def upload_and_delete_async(part_path: Path, current_vol: int, total_vols: int):
-        """Async function to upload and delete a part"""
-        try:
-            size = part_path.stat().st_size
-            via = "bot" if size <= BOT_MAX_DOCUMENT_BYTES else "pyrogram"
-            caption = f"📦 Volume {current_vol}/{total_vols}: {part_path.name}\nSize: {zip_human_size(size)}"
-            if total_vols > 1 and current_vol == 1:
-                caption += "\nOpen the .001 file in WinRAR or 7-Zip to extract everything."
-            if via == "pyrogram":
-                caption += "\n(Large volume sent via Pyrogram)"
-            
-            # Update progress message before sending
-            if status_msg and user_id:
-                try:
-                    pct = int((current_vol - 1) / total_vols * 100) if total_vols > 0 else 0
-                    bar = render_progress_bar(pct)
-                    progress_text = (
-                        f"📤 {get_lang(user_id, 'uploading_volume').format(current_vol, total_vols, part_path.name)}\n"
-                        f"{bar} {pct}% - Uploading instantly (auto-deleting from disk)...\n\n"
-                        f"📊 Saving VPS disk space by deleting each part after upload"
-                    )
-                    await status_msg.edit_text(progress_text)
-                except Exception as e:
-                    logger.debug(f"Progress update failed: {e}")
-            
-            # Send the archive
-            ok = await send_archive_document(context, chat_id, part_path, caption)
-            if not ok:
-                return False, f"Failed to send volume {current_vol}"
-            
-            # Delete the part from disk to save space
+    """Upload each archive part as soon as it is written, then delete it.
+
+    The archive is built in a worker thread; this returns a plain function for
+    that thread which schedules the upload on the bot's event loop and waits
+    for it. The loop is captured here, while running on it: the worker thread
+    has no loop of its own, so asking for one there failed and every part
+    piled up on disk until the end.
+    """
+    loop = asyncio.get_running_loop()
+
+    async def upload_and_delete(part_path: Path, current_vol: int, total_vols: int):
+        size = part_path.stat().st_size
+        caption = f"📦 Part {current_vol}/{total_vols}: {part_path.name}\nSize: {zip_human_size(size)}"
+        if total_vols > 1 and current_vol == 1:
+            caption += "\nOpen the .001 file with 7-Zip or WinRAR to extract everything."
+        if status_msg is not None:
             try:
-                part_path.unlink()
-                logger.info(f"Deleted zip part from disk after upload: {part_path.name}")
-            except Exception as e:
-                logger.warning(f"Could not delete zip part {part_path.name}: {e}")
-            
-            # Return True to indicate we handled the deletion
-            return True, None
-        except Exception as e:
-            logger.error(f"Error in upload callback for {part_path.name}: {e}")
-            return False, str(e)
-    
+                await status_msg.edit_text(
+                    f"📤 Sending part {current_vol}/{total_vols}: {part_path.name}\n"
+                    "Each part is removed from disk once it has been sent."
+                )
+            except Exception as exc:
+                logger.debug("Progress update failed: %s", exc)
+        if not await send_archive_document(context, chat_id, part_path, caption):
+            return False, f"Failed to send part {current_vol}"
+        part_path.unlink(missing_ok=True)
+        if sent is not None:
+            sent.append(part_path.name)
+        return True, None
+
     def sync_upload_callback(part_path: Path, current_vol: int, total_vols: int) -> tuple:
-        """Sync wrapper for the async callback - called from executor thread"""
+        future = asyncio.run_coroutine_threadsafe(
+            upload_and_delete(part_path, current_vol, total_vols), loop
+        )
         try:
-            # Get the main event loop
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                # No event loop in this thread
-                logger.warning("Could not get event loop for upload callback")
-                return False, "No event loop available"
-            
-            # Schedule the async function on the main event loop
-            future = asyncio.run_coroutine_threadsafe(
-                upload_and_delete_async(part_path, current_vol, total_vols),
-                loop
-            )
-            
-            # Wait for the result with a reasonable timeout (5 minutes per part)
-            deleted, error = future.result(timeout=300)
-            return deleted, error
-        except Exception as e:
-            logger.error(f"Sync upload callback error: {e}")
-            return False, str(e)
-    
+            # Big parts take a while; never give up on one that is still sending.
+            return future.result()
+        except Exception as exc:
+            logger.error("Archive part upload failed: %s", exc)
+            return False, str(exc)
+
     return sync_upload_callback
 
 
@@ -951,7 +1008,8 @@ async def run_archive_job(
                 pass
         
         paths = await task
-        if not paths:
+        # With an upload callback every part may already be sent and deleted.
+        if not paths and upload_callback is None:
             raise RuntimeError("No archives were created")
         return paths, warnings
 
@@ -1739,12 +1797,20 @@ def list_dir(rel_path: str):
     for entry in full.iterdir():
         try:
             st = entry.stat()
+            is_dir = entry.is_dir()
+            count = 0
+            if is_dir:
+                try:
+                    count = sum(1 for _ in os.scandir(entry))
+                except OSError:
+                    count = 0
             items.append({
                 "name": entry.name,
                 "rel_path": os.path.join(rel_path, entry.name) if rel_path else entry.name,
-                "is_dir": entry.is_dir(),
+                "is_dir": is_dir,
                 "size": st.st_size if entry.is_file() else 0,
                 "mtime": st.st_mtime,
+                "count": count,
             })
         except FileNotFoundError:
             continue
@@ -1795,25 +1861,6 @@ def folder_info(rel_path: str):
         "total_size": total_size,
         "mtime": st.st_mtime,
     }
-
-
-def build_files_text(rel_path: str, page: int = 0) -> str:
-    entries = list_dir(rel_path)
-    total = len(entries)
-    pages = max(1, math.ceil(total / FILES_PER_PAGE))
-    page = max(0, min(page, pages - 1))
-    shown_path = "/" + rel_path.lstrip("/") if rel_path else "/"
-
-    lines = [
-        f"{ICON_FOLDER} File Browser",
-        f"{ICON_PIN} {shown_path}",
-        f"{ICON_BOX} {total} items • Page {page + 1}/{pages}",
-        "",
-        "Tap a file or folder below."
-    ]
-
-    return "\n".join(lines)
-
 
 
 # Library folders the bot manages itself; "Organize" at the Download root skips them.
@@ -1877,273 +1924,109 @@ def build_organize_preview(rel_path: str, page: int, plan: OrganizePlan):
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-def build_files_markup(rel_path: str, page: int = 0):
-    """
-    Fancy file browser layout:
-    Row1: file/folder name
-    Row2: actions (upload/delete/info)
-    """
-    entries = list_dir(rel_path)
-    total = len(entries)
-    pages = max(1, math.ceil(total / FILES_PER_PAGE))
-    page = max(0, min(page, pages - 1))
-    shown = entries[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE]
-
-    rows = []
-
-    for item in shown:
-        encoded = encode_path(item["rel_path"])
-        icon = item_icon(item["name"], item["is_dir"])
-        name_short = shorten(item["name"], 40)
-
-        # NAME ROW
-        if item["is_dir"]:
-            rows.append([
-                InlineKeyboardButton(
-                    f"{icon} {name_short}",
-                    callback_data=f"fb:dir:{page}:{encoded}"
-                )
-            ])
-            rows.append([
-                InlineKeyboardButton("📂 Open", callback_data=f"fb:dir:{page}:{encoded}"),
-                InlineKeyboardButton("ℹ️ Info", callback_data=f"fb:dirinfo:{page}:{encoded}")
-            ])
-        else:
-            rows.append([
-                InlineKeyboardButton(
-                    f"{icon} {name_short}",
-                    callback_data=f"fb:file:{page}:{encoded}"
-                )
-            ])
-            rows.append([
-                InlineKeyboardButton("📤 Upload", callback_data=f"fb:upload_file_confirm:{page}:{encoded}"),
-                InlineKeyboardButton("🗑 Delete", callback_data=f"fb:delete_file_confirm:{page}:{encoded}"),
-                InlineKeyboardButton("ℹ️ Info", callback_data=f"fb:file:{page}:{encoded}")
-            ])
-
-    # pagination
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⏮", callback_data=f"fb:list:0:{encode_path(rel_path)}"))
-        nav.append(InlineKeyboardButton("◀", callback_data=f"fb:list:{page-1}:{encode_path(rel_path)}"))
-
-    nav.append(InlineKeyboardButton(f"{page+1}/{pages}", callback_data="noop"))
-
-    if page < pages-1:
-        nav.append(InlineKeyboardButton("▶", callback_data=f"fb:list:{page+1}:{encode_path(rel_path)}"))
-        nav.append(InlineKeyboardButton("⏭", callback_data=f"fb:list:{pages-1}:{encode_path(rel_path)}"))
-
-    rows.append(nav)
-
-    # navigation row
-    rows.append([
-        InlineKeyboardButton("⬆ Up", callback_data=f"fb:list:0:{encode_path(rel_parent(rel_path))}") if rel_path else InlineKeyboardButton("📁 Root", callback_data="fb:list:0:"),
-        InlineKeyboardButton("🔄 Refresh", callback_data=f"fb:list:{page}:{encode_path(rel_path)}"),
-    ])
-
-    rows.append([
-        InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(0, 'batch_upload'))}", callback_data=f"fb:batch:{page}:{encode_path(rel_path)}"),
-        InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(0, 'batch_delete'))}", callback_data=f"fb:batchdel:{page}:{encode_path(rel_path)}"),
-    ])
-    rows.append([
-        InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(0, 'delete_all'))}", callback_data=f"fb:deleteall_confirm:{page}:{encode_path(rel_path)}"),
-    ])
-    # Quick organizer for downloaded videos
-    rows.append([
-        InlineKeyboardButton(f"🧹 Organize videos", callback_data=f"fb:organize:{page}:{encode_path(rel_path)}"),
-    ])
-
-    return InlineKeyboardMarkup(rows)
-
-
-
-def build_batch_select_text(rel_path: str, page: int = 0, user_id: int = None) -> str:
-    """Text for batch file selection mode (upload or delete)."""
-    entries = list_dir(rel_path)
-    files = [e for e in entries if not e["is_dir"]]
-    shown_path = "/" + rel_path.lstrip("/") if rel_path else "/"
-
-    session = batch_select_sessions.get(user_id, {}) if user_id else {}
-    mode = session.get("mode", "upload")
-    selected_count = len(session.get("selected", set()))
-
-    u = user_id or 0
-    title = get_lang(u, "batch_delete") if mode == "delete" else get_lang(u, "batch_upload")
-
-    lines = [
-        title,
-        f"{ICON_PIN} {shown_path}",
-        f"Files: {len(files)} • Selected: {selected_count}",
-        "",
-        get_lang(u, "select_files"),
-    ]
-
-    return "\n".join(lines)
-
-
-def build_batch_select_markup(rel_path: str, user_id: int, page: int = 0):
-    """Keyboard for batch file selection."""
-    entries = list_dir(rel_path)
-    files = [e for e in entries if not e["is_dir"]]
-
-    session = batch_select_sessions.get(user_id, {})
-    mode = session.get("mode", "upload")
-    selected = session.get("selected", set())
-    
-    total = len(files)
-    pages = max(1, math.ceil(total / FILES_PER_PAGE))
-    page = max(0, min(page, pages - 1))
-    shown = files[page * FILES_PER_PAGE:(page + 1) * FILES_PER_PAGE]
-    
-    rows = []
-    
-    for idx, item in enumerate(shown, start=1):
-        encoded = encode_path(item["rel_path"])
-        is_selected = item["rel_path"] in selected
-        checkbox = "✅" if is_selected else "⬜"
-        size_text = human_size(item["size"])
-        label = f"{checkbox} {item['name']}"
-        
-        rows.append([
-            InlineKeyboardButton(
-                f"{idx}. {shorten(label, 32)}",
-                callback_data=f"fb:bselect:{encoded}"
-            ),
-            InlineKeyboardButton(
-                shorten(size_text, 8),
-                callback_data=f"fb:bselect:{encoded}"
-            )
-        ])
-    
-    pager = []
-    if page > 0:
-        pager.append(
-            InlineKeyboardButton(
-                f"{ICON_BACK} First",
-                callback_data=f"fb:blist:0:{encode_path(rel_path)}"
-            )
-        )
-    if page > 0:
-        pager.append(
-            InlineKeyboardButton(
-                f"{ICON_BACK} Prev",
-                callback_data=f"fb:blist:{page - 1}:{encode_path(rel_path)}"
-            )
-        )
-    pager.append(
-        InlineKeyboardButton(
-            f"{page + 1}/{pages}",
-            callback_data=f"fb:blist:{page}:{encode_path(rel_path)}"
-        )
+async def show_folder(message, rel_path: str, page: int = 0, *, edit: bool = True):
+    entries = await asyncio.to_thread(list_dir, rel_path)
+    await show_screen(
+        message, file_views.browser_screen(rel_path, entries, page, encode_path), edit=edit
     )
-    if page < pages - 1:
-        pager.append(
-            InlineKeyboardButton(
-                f"Next {ICON_NEXT}",
-                callback_data=f"fb:blist:{page + 1}:{encode_path(rel_path)}"
-            )
-        )
-    if page < pages - 1:
-        pager.append(
-            InlineKeyboardButton(
-                f"Last {ICON_NEXT}",
-                callback_data=f"fb:blist:{pages - 1}:{encode_path(rel_path)}"
-            )
-        )
-    rows.append(pager)
-    
-    selected_count = len(selected)
-    u = user_id or 0
-    if mode == "delete":
-        action_label = (
-            get_lang(u, "batch_delete_files").format(selected_count)
-            if selected_count > 0
-            else get_lang(u, "select_at_least")
-        )
-        action_cb = "fb:bdelete_confirm" if selected_count > 0 else "fb:bupload_empty"
+
+
+async def show_file(message, rel_path: str, page: int = 0):
+    info = await asyncio.to_thread(file_info, rel_path)
+    if info["is_dir"]:
+        await show_folder(message, rel_path, 0)
+        return
+    await show_screen(message, file_views.file_screen(
+        rel_path, info["size"], info["mtime"], page, encode_path,
+        is_video=is_video_file(info["name"]),
+    ))
+
+
+def files_in_folder(rel_path: str) -> list[dict]:
+    return [entry for entry in list_dir(rel_path) if not entry["is_dir"]]
+
+
+async def show_selection(message, user_id: int):
+    session = batch_select_sessions[user_id]
+    files = await asyncio.to_thread(files_in_folder, session["rel_path"])
+    session["selected"] &= {f["rel_path"] for f in files}  # forget deleted files
+    await show_screen(message, file_views.select_screen(
+        session["rel_path"], files, session["selected"], session["page"], encode_path
+    ))
+
+
+async def handle_file_selection(update: Update, context, action: str, parts: list[str]):
+    """Selection mode in the file browser: pick files, then upload, zip or delete them."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    session = batch_select_sessions.get(user_id)
+    if session is None:
+        await answer_once(query, "This selection has expired. Open Files again.", show_alert=True)
+        return
+    if action == "bupload_empty":
+        await answer_once(query, "Select at least one file first.", show_alert=True)
+        return
+
+    if action == "st":
+        token = parts[2] if len(parts) > 2 else ""
+        session["selected"].symmetric_difference_update({decode_path(token)})
+    elif action == "sp":
+        page_raw = parts[2] if len(parts) > 2 else "0"
+        if page_raw != "-1":
+            session["page"] = int(page_raw)
+    elif action in ("sall", "snone"):
+        files = await asyncio.to_thread(files_in_folder, session["rel_path"])
+        session["selected"] = {f["rel_path"] for f in files} if action == "sall" else set()
+    elif action == "sdone":
+        batch_select_sessions.pop(user_id, None)
+        await show_folder(query.message, session["rel_path"], session["page"])
+        return
     else:
-        action_label = (
-            get_lang(u, "upload_files").format(selected_count)
-            if selected_count > 0
-            else get_lang(u, "select_at_least")
-        )
-        action_cb = "fb:bupload" if selected_count > 0 else "fb:bupload_empty"
-    rows.append([InlineKeyboardButton(action_label, callback_data=action_cb)])
-    
-    rows.append([
-        InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data=f"fb:list:{page}:{encode_path(rel_path)}"),
-    ])
-    
-    return InlineKeyboardMarkup(rows)
-
-
-def build_file_details_text(rel_path: str) -> str:
-    info = file_info(rel_path)
-    dt = datetime.fromtimestamp(info["mtime"]).strftime("%Y-%m-%d %H:%M:%S")
-    shown_path = "/" + rel_path.lstrip("/")
-    icon = item_icon(info["name"], False)
-    return (
-        f"{icon} File Details\n\n"
-        f"Name: {info['name']}\n"
-        f"{ICON_PIN} Path: {shown_path}\n"
-        f"{ICON_BOX} Size: {human_size(info['size'])}\n"
-        f"{ICON_CLOCK} Modified: {dt}"
-    )
-
-
-def build_folder_details_text(rel_path: str) -> str:
-    info = folder_info(rel_path)
-    shown_path = "/" + rel_path.lstrip("/") if rel_path else "/"
-    dt = datetime.fromtimestamp(info["mtime"]).strftime("%Y-%m-%d %H:%M:%S")
-    return (
-        f"{ICON_FOLDER} Folder Details\n\n"
-        f"Name: {info['name']}\n"
-        f"{ICON_PIN} Path: {shown_path}\n"
-        f"Subfolders: {info['folder_count']}\n"
-        f"Files: {info['file_count']}\n"
-        f"{ICON_BOX} Total size: {human_size(info['total_size'])}\n"
-        f"{ICON_CLOCK} Modified: {dt}"
-    )
-
-
-def build_file_details_markup(rel_path: str, page: int = 0):
-    encoded = encode_path(rel_path)
-    parent = encode_path(rel_parent(rel_path))
-    buttons = [
-        [InlineKeyboardButton(f"{ICON_UPLOAD} Upload File", callback_data=f"fb:send_confirm:{page}:{encoded}")],
-    ]
-    # Check if video file to add conversion and thumbnail buttons
-    full = safe_join(DOWNLOAD_DIR, rel_path)
-    if full.is_file() and is_video_file(str(full)):
-        buttons.append([InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(0, 'convert'))}", callback_data=f"fb:conv_menu:{page}:{encoded}")])
-        buttons.append([InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(0, 'send_thumbnail'))}", callback_data=f"fb:thumb_send:{page}:{encoded}")])
-    buttons.append([InlineKeyboardButton(f"{ICON_DELETE} Delete", callback_data=f"fb:delete_confirm:{page}:{encoded}")])
-    buttons.append([
-        InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent}"),
-        InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")
-    ])
-    return InlineKeyboardMarkup(buttons)
-
-
-def build_folder_details_markup(rel_path: str, page: int = 0):
-    encoded = encode_path(rel_path)
-    parent = encode_path(rel_parent(rel_path))
-    buttons = [
-        [InlineKeyboardButton(f"{ICON_FOLDER} Open Folder", callback_data=f"fb:list:0:{encoded}")],
-        [InlineKeyboardButton(f"{ICON_UPLOAD} Upload All Files", callback_data=f"fb:send_folder_confirm:{page}:{encoded}")],
-        [InlineKeyboardButton(f"{ICON_DELETE} Delete Folder", callback_data=f"fb:delete_confirm:{page}:{encoded}")],
-        [
-            InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent}"),
-            InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")
-        ],
-    ]
-    full = safe_join(DOWNLOAD_DIR, rel_path)
-    if is_manga_gallery_folder(full):
-        buttons.insert(
-            2,
-            [InlineKeyboardButton("Convert to PDF", callback_data=f"fb:manga_pdf:{page}:{encoded}")],
-        )
-    return InlineKeyboardMarkup(buttons)
+        selected = sorted(session["selected"])
+        if not selected:
+            await answer_once(query, "Select at least one file first.", show_alert=True)
+            return
+        if action == "sup":
+            batch_select_sessions.pop(user_id, None)
+            await answer_once(query)
+            await safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing upload of {len(selected)} file(s)...")
+            run_in_background(
+                send_folder_files_via_pyrogram(
+                    context.application, query.message.chat_id, query.message.message_id,
+                    session["rel_path"], file_list=selected, user_id=user_id,
+                ),
+                name="upload",
+                on_error=message_error_reporter(
+                    context.application, query.message.chat_id, query.message.message_id, "Upload"
+                ),
+            )
+            return
+        if action == "szip":
+            paths = filter_files_for_archiving([safe_join(DOWNLOAD_DIR, rel) for rel in selected])
+            if not paths:
+                await answer_once(query, "None of the selected files can be zipped.", show_alert=True)
+                return
+            await ask_zip_name(
+                query.message, user_id, query.message.chat_id, paths,
+                default_name=rel_name(session["rel_path"]) if session["rel_path"] else default_archive_name(),
+                cancel_data="fb:sp:-1",
+            )
+            return
+        if action == "sdel":
+            infos = [await asyncio.to_thread(file_info, rel) for rel in selected]
+            await show_screen(query.message, file_views.delete_selected_confirm_screen(
+                [info["name"] for info in infos], sum(info["size"] for info in infos)
+            ))
+            return
+        if action == "sdelyes":
+            deleted, errors = await asyncio.to_thread(delete_paths_batch, selected)
+            session["selected"] = set()
+            await answer_once(
+                query,
+                f"Deleted {deleted} file(s)." + (f" {len(errors)} could not be deleted." if errors else ""),
+                show_alert=bool(errors),
+            )
+    await show_selection(query.message, user_id)
 
 
 def is_manga_gallery_folder(folder: Path) -> bool:
@@ -2588,43 +2471,31 @@ async def convert_video_quality(input_path: str, output_path: str, target_res: s
 
 
 async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel_path: str):
-    """
-    Generate a contact sheet thumbnail grid from a video using thumbnail_generate.py.
-    Creates a 4x8 grid (32 frames total) from evenly spaced points in the video.
-    """
+    """Send a contact sheet (grid of frames from across the video) as a photo."""
     full = safe_join(DOWNLOAD_DIR, rel_path)
+    chat_id = update.effective_chat.id
 
     if not full.exists() or not is_video_file(str(full)):
-        await answer_once(update.callback_query, "Not a valid video file", show_alert=True)
+        await context.bot.send_message(chat_id=chat_id, text=f"{ICON_WARN} {full.name} is not a video file.")
         return
 
     tmp_dir = Path(tempfile.gettempdir()) / f"thumb_{uuid.uuid4().hex}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-
+    output_path = tmp_dir / "contact_sheet.jpg"
     try:
-        # Generate contact sheet thumbnail grid using thumbnail_generate.py
-        output_path = tmp_dir / "contact_sheet.jpg"
-        
-        try:
-            generate_contact_sheet(str(full), str(output_path))
-        except Exception as e:
-            await answer_once(update.callback_query, f"Thumbnail generation failed: {str(e)}", show_alert=True)
-            return
-
+        # Decoding frames is CPU-heavy; keep it off the event loop.
+        await asyncio.to_thread(generate_contact_sheet, str(full), str(output_path))
         if not output_path.exists():
-            await answer_once(update.callback_query, "Thumbnail generation failed", show_alert=True)
-            return
-
-        # Send the contact sheet as a photo
+            raise RuntimeError("no image was produced")
         with open(output_path, "rb") as img:
             await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=img,
-                caption=f"📸 Thumbnail Grid: {full.name}"
+                chat_id=chat_id, photo=img, caption=f"📸 Thumbnails: {full.name}"
             )
-
-    except Exception as e:
-        await answer_once(update.callback_query, f"Error: {str(e)}", show_alert=True)
+    except Exception as exc:
+        logger.warning("Thumbnail generation failed for %s: %s", full, exc)
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"{ICON_FAIL} Could not make thumbnails for {full.name}: {exc}"
+        )
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -4680,80 +4551,11 @@ async def refresh_status_callback(update: Update, context: ContextTypes.DEFAULT_
 # =========================================================
 
 async def zip_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create zip archive of files in Download folder."""
-    user_id = update.effective_user.id
-
-    if not is_authorized_user(user_id):
-        await update.message.reply_text("⛔ Unauthorized")
-        return
-
-    try:
-        files_only = filter_files_for_archiving(collect_download_files())
-
-        if not files_only:
-            await update.message.reply_text("📭 No files to zip in Download folder")
-            return
-
-        parts = (update.message.text or "").split(maxsplit=1)
-        zip_name = parts[1].strip() if len(parts) > 1 else f"archive_{int(time.time())}"
-
-        files_only, limit_warn = apply_zip_file_limit(files_only)
-        settings = get_user_settings(user_id)
-        files_to_zip = build_files_to_zip(files_only)
-        
-        # Get compression method for display
-        method = settings.get("zip_method", "zip").upper()
-        compression_info = f"Method: {method} | Level: {settings.get('compression_level', 5)}/9"
-
-        status_msg = await update.message.reply_text(
-            f"📦 Preparing to zip {len(files_to_zip)} file(s)...\n"
-            f"Name: {zip_sanitize(zip_name)}\n"
-            f"{compression_info}\n"
-            f"Please wait..."
-        )
-
-        async def on_progress(text: str):
-            try:
-                await status_msg.edit_text(text)
-            except BadRequest as e:
-                if "message is not modified" not in str(e).lower():
-                    raise
-
-        # Create upload callback for instant upload + delete
-        upload_callback = create_zip_upload_callback(
-            context, update.effective_chat.id, user_id, settings, status_msg
-        )
-
-        zip_paths, size_warnings = await run_archive_job(
-            user_id,
-            files_to_zip,
-            DOWNLOAD_DIR,
-            zip_name=zip_name,
-            settings=settings,
-            on_progress=on_progress,
-            upload_callback=upload_callback,
-        )
-
-        # If all parts were uploaded and deleted by callback, zip_paths will be empty
-        if zip_paths:
-            all_ok = await send_archives_to_chat(
-                context, update.effective_chat.id, zip_paths, settings, status_msg, user_id
-            )
-        else:
-            all_ok = True  # All parts were already sent via callback
-
-        done_text = f"✅ Zip complete! Uploaded volume(s)"
-        if limit_warn:
-            done_text += f"\n{limit_warn}"
-        for w in size_warnings:
-            done_text += f"\n⚠️ {w}"
-        if not all_ok:
-            done_text += "\n⚠️ Some archives failed to send."
-        done_text += "\n📊 All zip parts have been automatically deleted from disk to save space."
-        await status_msg.edit_text(done_text)
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+    """/zip: open the Archive screen."""
+    context.user_data["archive_settings_back"] = "nav:archive"
+    await show_screen(
+        update.message, await build_archive_menu_screen(update.effective_user.id), edit=False
+    )
 
 
 async def list_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4864,17 +4666,7 @@ async def supported_sites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_authorized_user(user_id):
-        await update.message.reply_text("⛔ Unauthorized")
-        return
-
-    await update.message.reply_text(
-        build_files_text("", 0),
-        reply_markup=build_files_markup("", 0),
-        disable_web_page_preview=True,
-    )
+    await show_folder(update.message, "", 0, edit=False)
 
 
 async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4943,159 +4735,12 @@ async def forwarded_posts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
 # Zip Menu Functions
 # =========================================================
 
-def build_zip_menu_text(user_id: int) -> str:
-    """Build text for zip menu."""
-    files_count = len(filter_files_for_archiving(collect_download_files()))
-    
-    return (
-        f"{ICON_ARCHIVE} Archive / Zip Menu\n\n"
-        f"Available files: {files_count}\n\n"
-        "Create archives, choose files, or adjust archive defaults."
+async def build_archive_menu_screen(user_id: int):
+    files = await asyncio.to_thread(lambda: filter_files_for_archiving(collect_download_files()))
+    total = sum(path.stat().st_size for path in files if path.exists())
+    return file_views.archive_menu_screen(
+        len(files), total, settings_views.archive_summary(get_user_settings(user_id))
     )
-
-
-def build_zip_menu_markup(user_id: int) -> InlineKeyboardMarkup:
-    """Build buttons for zip menu."""
-    u = user_id or 0
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ICON_FILE} {clean_emoji_prefix(get_lang(u, 'list_files'))}", callback_data="zip_menu:list")],
-        [InlineKeyboardButton(f"{ICON_OK} {clean_emoji_prefix(get_lang(u, 'select_files_zip'))}", callback_data="zip_menu:select")],
-        [InlineKeyboardButton(f"{ICON_ARCHIVE} {clean_emoji_prefix(get_lang(u, 'zip_all'))}", callback_data="zip_menu:zip_all")],
-        [InlineKeyboardButton(f"{ICON_SETTINGS} {clean_emoji_prefix(get_lang(u, 'zip_settings'))}", callback_data="nav:archive_settings")],
-        [InlineKeyboardButton(f"{ICON_HOME} Main Menu", callback_data="menu_home")],
-    ])
-
-
-def build_zip_file_list_markup(user_id: int, page: int = 0, files_per_page: int = 10) -> tuple:
-    """Build text and markup for zip file list."""
-    u = user_id or 0
-    
-    all_files = filter_files_for_archiving(collect_download_files())
-
-    if not all_files:
-        return (
-            f"{clean_emoji_prefix(get_lang(u, 'list_files'))}\n\n{get_lang(u, 'no_files')}",
-            InlineKeyboardMarkup([[InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'home_btn'))}", callback_data="zip_menu:back")]])
-        )
-    
-    total_pages = (len(all_files) + files_per_page - 1) // files_per_page
-    page = max(0, min(page, total_pages - 1))
-    
-    start_idx = page * files_per_page
-    end_idx = start_idx + files_per_page
-    page_files = all_files[start_idx:end_idx]
-    
-    lines = [
-        f"{clean_emoji_prefix(get_lang(u, 'list_files'))}",
-        f"Page {page + 1}/{total_pages}",
-        ""
-    ]
-    
-    total_size = 0
-    for i, f in enumerate(page_files, start_idx + 1):
-        try:
-            size = f.stat().st_size
-            total_size += size
-            rel_path = f.relative_to(DOWNLOAD_DIR)
-            lines.append(f"{i}. {rel_path.name} ({zip_human_size(size)})")
-        except Exception:
-            pass
-
-    lines.append(f"\n📊 Total on page: {zip_human_size(total_size)}")
-    lines.append(f"📦 Total files: {len(all_files)}")
-
-    buttons = []
-    if page > 0:
-        buttons.append(InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'prev'))}", callback_data=f"zip_menu:list:{page-1}"))
-    if page < total_pages - 1:
-        buttons.append(InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'next'))}", callback_data=f"zip_menu:list:{page+1}"))
-    
-    keyboard = []
-    if buttons:
-        keyboard.append(buttons)
-    keyboard.append([InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'home_btn'))}", callback_data="zip_menu:back")])
-    
-    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
-
-
-def build_zip_file_select_markup(user_id: int, page: int = 0, files_per_page: int = 10) -> tuple:
-    """Build text and markup for zip file selection."""
-    u = user_id or 0
-    
-    all_files = filter_files_for_archiving(collect_download_files())
-
-    if not all_files:
-        return (
-            f"{clean_emoji_prefix(get_lang(u, 'select_files_zip'))}\n\n{get_lang(u, 'no_files')}",
-            InlineKeyboardMarkup([[InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'home_btn'))}", callback_data="zip_menu:back")]])
-        )
-    
-    session = zip_select_sessions.get(user_id, {"selected": set(), "page": page})
-    zip_select_sessions[user_id] = session
-    session["page"] = page
-    
-    total_pages = (len(all_files) + files_per_page - 1) // files_per_page
-    page = max(0, min(page, total_pages - 1))
-    
-    start_idx = page * files_per_page
-    end_idx = start_idx + files_per_page
-    page_files = all_files[start_idx:end_idx]
-    
-    lines = [
-        f"{clean_emoji_prefix(get_lang(u, 'select_files_zip'))}",
-        f"Page {page + 1}/{total_pages}",
-        f"Selected: {len(session['selected'])}/{len(all_files)}",
-        ""
-    ]
-    
-    selected_size = 0
-    for display_num, f in enumerate(page_files, start_idx + 1):
-        try:
-            size = f.stat().st_size
-            rel_path = f.relative_to(DOWNLOAD_DIR)
-            token = encode_path(file_rel_path(f))
-            is_selected = token in session["selected"]
-            checkbox = "✅" if is_selected else "☐"
-            lines.append(f"{checkbox} {display_num}. {rel_path.name} ({zip_human_size(size)})")
-            if is_selected:
-                selected_size += size
-        except Exception:
-            pass
-
-    for token in session["selected"]:
-        try:
-            full = safe_join(DOWNLOAD_DIR, decode_path(token))
-            if full.is_file() and full not in page_files:
-                selected_size += full.stat().st_size
-        except Exception:
-            pass
-
-    lines.append(f"\n📊 Selected size: {zip_human_size(selected_size)}")
-
-    keyboard = []
-    for f in page_files:
-        token = encode_path(file_rel_path(f))
-        file_name = f.name[:25] + "..." if len(f.name) > 25 else f.name
-        is_selected = token in session["selected"]
-        checkbox = "✅" if is_selected else "☐"
-        keyboard.append([
-            InlineKeyboardButton(f"{checkbox} {file_name}", callback_data=f"zip_select:{token}")
-        ])
-    
-    # Navigation and action buttons
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'prev'))}", callback_data=f"zip_menu:select:{page-1}"))
-    if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'next'))}", callback_data=f"zip_menu:select:{page+1}"))
-    
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-    
-    keyboard.append([InlineKeyboardButton(f"💾 Save Selection", callback_data="zip_select:confirm")])
-    keyboard.append([InlineKeyboardButton(f"{clean_emoji_prefix(get_lang(u, 'home_btn'))}", callback_data="zip_menu:back")])
-    
-    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
 # =========================================================
@@ -5133,89 +4778,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         zip_select_sessions[user_id] = session
         return
 
-    # Check if user is waiting for zip name
+    # Waiting for an archive name
     if user_id in pending_zip_name_sessions:
-        session = pending_zip_name_sessions[user_id]
-        mode = session.get("mode")
-        
-        if not text or len(text) > 100:
-            await update.message.reply_text("❌ Please provide a valid zip name (1-100 characters)")
-            return
-        
-        # Sanitize zip name
-        safe_name = re.sub(r'[<>:"/\\|?*]', '_', text).strip('._- ')
+        safe_name = sanitize_archive_name(text)
         if not safe_name:
-            await update.message.reply_text("❌ Invalid zip name. Please try again.")
+            await update.message.reply_text(
+                "Please send a name made of letters or numbers (up to 100 characters), or /cancel."
+            )
             return
-        
-        try:
-            files_to_zip = session.get("files_to_zip", [])
-            source_files = session.get("source_files", [])
-            settings = session.get("settings", {})
-            limit_warn = session.get("limit_warn", "")
-            
-            status_msg = await update.message.reply_text(f"📦 {get_lang(user_id, 'zipping')}...")
-            
-            async def on_progress(prog_text: str):
-                try:
-                    await status_msg.edit_text(prog_text)
-                except BadRequest as e:
-                    if "message is not modified" not in str(e).lower():
-                        pass
-            
-            # Create upload callback for instant upload + delete
-            upload_callback = create_zip_upload_callback(
-                context, chat_id, user_id, settings, status_msg
-            )
-
-            zip_paths, size_warnings = await run_archive_job(
-                user_id,
-                files_to_zip,
-                DOWNLOAD_DIR,
-                zip_name=safe_name,
-                settings=settings,
-                on_progress=on_progress,
-                upload_callback=upload_callback,
-            )
-            
-            # If all parts were uploaded and deleted by callback, zip_paths will be empty
-            if zip_paths:
-                all_ok = await send_archives_to_chat(
-                    context, chat_id, zip_paths, settings, status_msg, user_id
-                )
-            else:
-                all_ok = True  # All parts were already sent via callback
-            
-            if all_ok and settings.get("auto_delete_files_after_zip"):
-                for f in source_files:
-                    try:
-                        if isinstance(f, Path):
-                            f.unlink()
-                    except Exception:
-                        pass
-            
-            # Clear pending session
-            pending_zip_name_sessions.pop(user_id, None)
-            
-            done_text = (
-                f"{clean_emoji_prefix(get_lang(user_id, 'zip_complete'))}\n"
-                f"Uploaded volume(s)"
-            )
-            if limit_warn:
-                done_text += f"\n{limit_warn}"
-            for w in size_warnings:
-                done_text += f"\n⚠️ {w}"
-            if not all_ok:
-                done_text += "\n⚠️ Some archives failed to send."
-            done_text += "\n📊 All zip parts have been automatically deleted from disk to save space."
-            
-            await status_msg.edit_text(done_text)
-        
-        except Exception as e:
-            logger.error(f"Zip error during execution: {e}")
-            await update.message.reply_text(f"{clean_emoji_prefix(get_lang(user_id, 'zip_error'))}: {e}")
-            pending_zip_name_sessions.pop(user_id, None)
-        
+        status_msg = await update.message.reply_text(f"📦 Creating {safe_name}...")
+        run_in_background(
+            run_named_zip(context.application, user_id, safe_name, status_msg),
+            name="zip",
+            on_error=message_error_reporter(context.application, chat_id, status_msg.message_id, "Archive"),
+        )
         return
 
     # A link always wins over a pending search prompt; anything else typed
@@ -5380,11 +4956,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif normalized in ("files", "file browser"):
-            await update.message.reply_text(
-                build_files_text("", 0),
-                reply_markup=build_files_markup("", 0),
-                disable_web_page_preview=True,
-            )
+            await show_folder(update.message, "", 0, edit=False)
 
         elif normalized == "cancel":
             active = [j for j in download_jobs.values() if j["status"] in JOB_ACTIVE_STATES]
@@ -5425,10 +4997,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif normalized in ("zip menu", "zip", "archive"):
             context.user_data["archive_settings_back"] = "nav:archive"
-            await update.message.reply_text(
-                build_zip_menu_text(user_id),
-                reply_markup=build_zip_menu_markup(user_id),
-            )
+            await show_screen(update.message, await build_archive_menu_screen(user_id), edit=False)
 
         elif normalized in ("search", "tpb search", "rarbg search", "rargb search", "prowlarr search"):
             provider_key = normalized.split()[0] if normalized != "search" else None
@@ -5629,9 +5198,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data in ("nav:archive", "menu:zip"):
             context.user_data["archive_settings_back"] = "nav:archive"
-            await safe_edit_message(
-                query.message, build_zip_menu_text(user_id), build_zip_menu_markup(user_id)
-            )
+            pending_zip_name_sessions.pop(user_id, None)
+            await show_screen(query.message, await build_archive_menu_screen(user_id))
 
         elif data == "nav:help":
             await show_screen(query.message, home_views.help_screen(SUPPORTED_SITES_URL))
@@ -5689,11 +5257,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_live_dashboard(context.application, chat_id, user_id)
 
         elif data == "menu:file_browser":
-            await safe_edit_message(
-                query.message,
-                build_files_text("", 0),
-                build_files_markup("", 0),
-            )
+            await show_folder(query.message, "", 0)
 
         elif data == "menu:clear":
             text, markup = build_clear_jobs_prompt()
@@ -5811,152 +5375,67 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("fb:"):
             parts = data.split(":", 3)
             action = parts[1]
+            # Buttons from the previous file browser.
+            action = {
+                "dir": "list",
+                "dirinfo": "more",
+                "send_confirm": "send_yes",
+                "upload_file_confirm": "send_yes",
+                "upload_file_yes": "send_yes",
+                "delete_file_confirm": "delete_confirm",
+                "delete_file_yes": "delete_yes",
+                "batch": "sel",
+                "batchdel": "sel",
+                "bselect": "st",
+                "blist": "sp",
+                "bupload": "sup",
+                "bdelete_confirm": "sdel",
+                "bdelete_yes": "sdelyes",
+            }.get(action, action)
+            page_raw = parts[2] if len(parts) > 2 else ""
+            page = int(page_raw) if page_raw.lstrip("-").isdigit() else 0
+            encoded = parts[3] if len(parts) > 3 else ""
+
+            if action in ("st", "sp", "sall", "snone", "sup", "szip", "sdel", "sdelyes", "sdone", "bupload_empty"):
+                await handle_file_selection(update, context, action, parts)
+                return
+
+            if action in ("list", "o", "file", "more", "send_yes", "send_folder_confirm", "send_folder_yes",
+                          "delete_confirm", "delete_yes", "deleteall_confirm", "deleteall_yes", "zipdir",
+                          "sel", "manga_pdf", "conv_menu", "thumb_send"):
+                rel_path = decode_path(encoded.split(":", 1)[0]) if encoded else ""
 
             if action == "list":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
+                await show_folder(query.message, rel_path, page)
 
-                await safe_edit_message(
-                    query.message,
-                    build_files_text(rel_path, page),
-                    build_files_markup(rel_path, page),
-                )
-
-            elif action == "dir":
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                await safe_edit_message(
-                    query.message,
-                    build_files_text(rel_path, 0),
-                    build_files_markup(rel_path, 0),
-                )
-
-            elif action == "dirinfo":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                await safe_edit_message(
-                    query.message,
-                    build_folder_details_text(rel_path),
-                    build_folder_details_markup(rel_path, page),
-                )
-
-            elif action == "manga_pdf":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                folder = safe_join(DOWNLOAD_DIR, rel_path)
-                if not is_manga_gallery_folder(folder):
-                    await answer_once(query, "No manga images found in this folder.", show_alert=True)
-                    return
-                await answer_once(query)
-
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_IMAGE} Converting manga folder to PDF...\n\n{folder.name}",
-                )
-                pdf_path = await convert_manga_folder_to_pdf_job(folder, user_id)
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_OK} Manga PDF created\n\n{pdf_path.name}\n\nSaved in:\n{DOWNLOAD_DIR}",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_FOLDER} Folder", callback_data=f"fb:dirinfo:{page}:{encoded}")],
-                        [InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:")],
-                    ]),
-                )
+            elif action == "o":
+                full = safe_join(DOWNLOAD_DIR, rel_path)
+                if full.is_dir():
+                    await show_folder(query.message, rel_path, 0)
+                elif full.is_file():
+                    await show_file(query.message, rel_path, page)
+                else:
+                    raise FileNotFoundError(rel_path)
 
             elif action == "file":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
+                await show_file(query.message, rel_path, page)
 
-                await safe_edit_message(
-                    query.message,
-                    build_file_details_text(rel_path),
-                    build_file_details_markup(rel_path, page),
-                )
-
-            elif action == "delete_confirm":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                await safe_edit_message(
-                    query.message,
-                    build_delete_confirm_text(rel_path),
-                    build_delete_confirm_markup(rel_path, page),
-                )
-
-            elif action == "delete_yes":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                deleted_kind = delete_path(rel_path)
-                parent = rel_parent(rel_path)
-                parent_encoded = encode_path(parent)
-
-                await safe_edit_message(
-                    query.message,
-                    (
-                        f"{ICON_OK} Deleted successfully\n\n"
-                        f"Type: {deleted_kind}\n"
-                        f"Path: /{rel_path.lstrip('/')}"
-                    ),
-                    InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent_encoded}"),
-                            InlineKeyboardButton(f"{ICON_FOLDER} Root", callback_data="fb:list:0:"),
-                        ],
-                    ]),
-                )
-
-            elif action == "send_confirm":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                info = file_info(rel_path)
-                if info["is_dir"]:
-                    raise IsADirectoryError(rel_path)
-
-                await safe_edit_message(
-                    query.message,
-                    (
-                        f"{ICON_UPLOAD} Upload File\n\n"
-                        f"Name: {info['name']}\n"
-                        f"{ICON_PIN} Path: /{rel_path.lstrip('/')}\n"
-                        f"{ICON_BOX} Size: {human_size(info['size'])}\n\n"
-                        "Target: your own Telegram account\n\n"
-                        "Upload this file?"
-                    ),
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_OK} Yes, Upload", callback_data=f"fb:send_yes:{page}:{encoded}")],
-                        [InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data=f"fb:file:{page}:{encoded}")],
-                    ]),
-                )
+            elif action == "more":
+                info = await asyncio.to_thread(folder_info, rel_path)
+                await show_screen(query.message, file_views.more_screen(
+                    rel_path, info, page, encode_path,
+                    is_manga=is_manga_gallery_folder(safe_join(DOWNLOAD_DIR, rel_path)),
+                ))
 
             elif action == "send_yes":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                parent_encoded = encode_path(rel_parent(rel_path))
-
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_UPLOAD} Preparing upload...\nPlease wait.",
-                )
-
+                if not safe_join(DOWNLOAD_DIR, rel_path).is_file():
+                    raise FileNotFoundError(rel_path)
+                await answer_once(query)
+                await safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing upload...")
                 run_in_background(
                     send_single_file_via_pyrogram(
-                        context.application,
-                        query.message.chat_id,
-                        query.message.message_id,
-                        rel_path,
-                        user_id=user_id,
+                        context.application, query.message.chat_id, query.message.message_id,
+                        rel_path, user_id=user_id,
                     ),
                     name="upload",
                     on_error=message_error_reporter(
@@ -5965,229 +5444,125 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             elif action == "send_folder_confirm":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                info = folder_info(rel_path)
-                files = get_all_files_in_folder(rel_path)
-
+                info = await asyncio.to_thread(folder_info, rel_path)
+                if not info["file_count"]:
+                    await answer_once(query, "There are no files in this folder.", show_alert=True)
+                    return
                 await safe_edit_message(
                     query.message,
-                    (
-                        f"{ICON_UPLOAD} Upload All Files\n\n"
-                        f"Folder: {info['name']}\n"
-                        f"{ICON_PIN} Path: /{rel_path.lstrip('/') if rel_path else ''}\n"
-                        f"Files found: {len(files)}\n"
-                        f"{ICON_BOX} Total size: {human_size(info['total_size'])}\n"
-                        "Target: your own Telegram account\n\n"
-                        "Upload all files from this folder?"
-                    ),
+                    f"{ICON_UPLOAD} Upload {info['file_count']} file(s) "
+                    f"({human_size(info['total_size'])}) from /{rel_path} to Saved Messages?",
                     InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_OK} Yes, Upload All", callback_data=f"fb:send_folder_yes:{page}:{encoded}")],
-                        [InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data=f"fb:dirinfo:{page}:{encoded}")],
+                        [InlineKeyboardButton(f"{ICON_OK} Yes, upload all", callback_data=f"fb:send_folder_yes:{page}:{encoded}")],
+                        [InlineKeyboardButton("✖ Cancel", callback_data=f"fb:more:{page}:{encoded}")],
                     ]),
                 )
 
             elif action == "send_folder_yes":
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_UPLOAD} Preparing folder upload...\nPlease wait.",
-                )
-
+                await answer_once(query)
+                await safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing folder upload...")
                 run_in_background(
                     send_folder_files_via_pyrogram(
-                        context.application,
-                        query.message.chat_id,
-                        query.message.message_id,
-                        rel_path,
-                        user_id=user_id,
+                        context.application, query.message.chat_id, query.message.message_id,
+                        rel_path, user_id=user_id,
                     ),
                     name="upload",
                     on_error=message_error_reporter(
                         context.application, query.message.chat_id, query.message.message_id, "Upload"
                     ),
                 )
-            
-            # NEW: Inline Upload Confirmation
-            elif action == "upload_file_confirm":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                info = file_info(rel_path)
-                await safe_edit_message(
-                    query.message,
-                    (
-                        f"{ICON_UPLOAD} Upload File\n\n"
-                        f"Name: {info['name']}\n"
-                        f"Size: {human_size(info['size'])}\n\n"
-                        "Upload this file?"
-                    ),
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_OK} Yes", callback_data=f"fb:upload_file_yes:{page}:{encoded}")],
-                        [InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data=f"fb:list:{page}:{encode_path(rel_parent(rel_path))}")]
-                    ])
-                )
-            elif action == "upload_file_yes":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                parent_encoded = encode_path(rel_parent(rel_path))
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_UPLOAD} Preparing upload...\nPlease wait.",
-                )
-                run_in_background(
-                    send_single_file_via_pyrogram(
-                        context.application,
-                        query.message.chat_id,
-                        query.message.message_id,
-                        rel_path,
-                        user_id=user_id,
-                    ),
-                    name="upload",
-                    on_error=message_error_reporter(
-                        context.application, query.message.chat_id, query.message.message_id, "Upload"
-                    ),
-                )
-            
-            # NEW: Inline Delete Confirmation
-            elif action == "delete_file_confirm":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                info = file_info(rel_path)
-                await safe_edit_message(
-                    query.message,
-                    (
-                        f"{ICON_WARN} Confirm Delete\n\n"
-                        f"Name: {info['name']}\n"
-                        f"Size: {human_size(info['size'])}\n\n"
-                        f"Delete this file permanently?"
-                    ),
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_DELETE} Yes", callback_data=f"fb:delete_file_yes:{page}:{encoded}")],
-                        [InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data=f"fb:list:{page}:{encode_path(rel_parent(rel_path))}")]
-                    ])
-                )
-            elif action == "delete_file_yes":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                delete_path(rel_path)
-                parent = rel_parent(rel_path)
-                parent_encoded = encode_path(parent)
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_OK} Deleted: {rel_path}",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{parent_encoded}")],
-                    ])
-                )
 
-            elif action == "batch":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
+            elif action == "delete_confirm":
+                full = safe_join(DOWNLOAD_DIR, rel_path)
+                if not rel_path or not full.exists():
+                    raise FileNotFoundError(rel_path)
+                info = await asyncio.to_thread(folder_info if full.is_dir() else file_info, rel_path)
+                await show_screen(query.message, file_views.delete_confirm_screen(
+                    rel_path, full.is_dir(), info, page, encode_path
+                ))
 
-                batch_select_sessions[user_id] = {
-                    "rel_path": rel_path,
-                    "selected": set(),
-                    "page": page,
-                    "mode": "upload",
-                }
-
-                await safe_edit_message(
-                    query.message,
-                    build_batch_select_text(rel_path, page, user_id),
-                    build_batch_select_markup(rel_path, user_id, page),
-                )
-
-            elif action == "batchdel":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                batch_select_sessions[user_id] = {
-                    "rel_path": rel_path,
-                    "selected": set(),
-                    "page": page,
-                    "mode": "delete",
-                }
-
-                await safe_edit_message(
-                    query.message,
-                    build_batch_select_text(rel_path, page, user_id),
-                    build_batch_select_markup(rel_path, user_id, page),
-                )
+            elif action == "delete_yes":
+                if not rel_path:
+                    raise ValueError("Refusing to delete the download root")
+                kind = await asyncio.to_thread(delete_path, rel_path)
+                await answer_once(query, f"Deleted {kind}: {rel_name(rel_path)}")
+                await show_folder(query.message, rel_parent(rel_path), page)
 
             elif action == "deleteall_confirm":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                entries = list_dir(rel_path)
-                file_count = sum(1 for e in entries if not e["is_dir"])
-                folder_count = sum(1 for e in entries if e["is_dir"])
-                shown_path = "/" + rel_path.lstrip("/") if rel_path else "/"
-
+                entries = await asyncio.to_thread(list_dir, rel_path)
+                if not entries:
+                    await answer_once(query, "This folder is already empty.", show_alert=True)
+                    return
+                info = await asyncio.to_thread(folder_info, rel_path)
                 await safe_edit_message(
                     query.message,
-                    (
-                        f"{ICON_WARN} {get_lang(user_id, 'delete_all_confirm')}\n\n"
-                        f"{ICON_PIN} {shown_path}\n"
-                        f"Files: {file_count}\n"
-                        f"Folders: {folder_count}\n\n"
-                        f"{get_lang(user_id, 'delete_all_warning')}"
-                    ),
+                    f"{ICON_WARN} Permanently delete everything inside /{rel_path}?\n\n"
+                    f"{info['file_count']} files in {info['folder_count']} folders · "
+                    f"{human_size(info['total_size'])}\n\nThis cannot be undone.",
                     InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                get_lang(user_id, "yes_delete_all"),
-                                callback_data=f"fb:deleteall_yes:{page}:{encoded}",
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                get_lang(user_id, "cancel_btn"),
-                                callback_data=f"fb:list:{page}:{encoded}",
-                            ),
-                        ],
+                        [InlineKeyboardButton("🗑 Yes, delete everything", callback_data=f"fb:deleteall_yes:{page}:{encoded}")],
+                        [InlineKeyboardButton("✖ Cancel", callback_data=f"fb:more:{page}:{encoded}")],
                     ]),
                 )
 
             elif action == "deleteall_yes":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                parent_encoded = encode_path(rel_path)
-
-                files_n, folders_n, errors = delete_all_in_directory(rel_path)
-                text = get_lang(user_id, "delete_all_done").format(files_n, folders_n)
+                files_n, folders_n, errors = await asyncio.to_thread(delete_all_in_directory, rel_path)
+                text = f"Deleted {files_n} file(s) and {folders_n} folder(s)."
                 if errors:
-                    preview = "\n".join(errors[:5])
-                    if len(errors) > 5:
-                        preview += f"\n... and {len(errors) - 5} more"
-                    text += f"\n\n{ICON_WARN} Errors:\n{preview}"
+                    text += f" {len(errors)} item(s) could not be deleted."
+                await answer_once(query, text, show_alert=bool(errors))
+                await show_folder(query.message, rel_path, 0)
 
+            elif action == "zipdir":
+                files = await asyncio.to_thread(get_all_files_in_folder, rel_path)
+                paths = filter_files_for_archiving([safe_join(DOWNLOAD_DIR, f) for f in files])
+                if not paths:
+                    await answer_once(query, "There are no files to zip here.", show_alert=True)
+                    return
+                await ask_zip_name(
+                    query.message, user_id, chat_id, paths,
+                    default_name=rel_name(rel_path) if rel_path else default_archive_name(),
+                    cancel_data=f"fb:more:{page}:{encoded}",
+                )
+
+            elif action == "sel":
+                batch_select_sessions[user_id] = {"rel_path": rel_path, "selected": set(), "page": 0}
+                await show_selection(query.message, user_id)
+
+            elif action == "manga_pdf":
+                folder = safe_join(DOWNLOAD_DIR, rel_path)
+                if not is_manga_gallery_folder(folder):
+                    await answer_once(query, "No manga images found in this folder.", show_alert=True)
+                    return
+                await answer_once(query)
+                await safe_edit_message(query.message, f"{ICON_IMAGE} Converting images to PDF...\n\n{folder.name}")
+                pdf_path = await convert_manga_folder_to_pdf_job(folder, user_id)
+                pdf_rel = file_rel_path(pdf_path)
                 await safe_edit_message(
                     query.message,
-                    f"{ICON_OK} {text}",
+                    f"{ICON_OK} PDF created\n\n{pdf_path.name}",
                     InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                get_lang(user_id, "back"),
-                                callback_data=f"fb:list:{page}:{parent_encoded}",
-                            ),
-                            InlineKeyboardButton(
-                                get_lang(user_id, "root"),
-                                callback_data="fb:list:0:",
-                            ),
-                        ],
+                        [InlineKeyboardButton(f"{ICON_UPLOAD} Upload the PDF", callback_data=f"fb:send_yes:0:{encode_path(pdf_rel)}")],
+                        [InlineKeyboardButton(f"{ICON_FOLDER} Open its folder", callback_data=f"fb:list:0:{encode_path(rel_parent(pdf_rel))}")],
                     ]),
                 )
+
+            elif action == "conv_menu":
+                await safe_edit_message(
+                    query.message,
+                    f"🎬 Convert {rel_name(rel_path)} to:",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton(res, callback_data=f"fb:conv_start:{page}:{encoded}:{res}")
+                         for res in ("1080p", "720p")],
+                        [InlineKeyboardButton(res, callback_data=f"fb:conv_start:{page}:{encoded}:{res}")
+                         for res in ("480p", "360p")],
+                        [InlineKeyboardButton("✖ Cancel", callback_data=f"fb:file:{page}:{encoded}")],
+                    ]),
+                )
+
+            elif action == "thumb_send":
+                await answer_once(query, "Making thumbnails…")
+                await send_thumbnail(update, context, rel_path)
 
             elif action == "organize":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
@@ -6228,173 +5603,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"{ICON_FOLDER} Open folder", callback_data=f"fb:list:{page}:{encoded}"
                     )]]),
                 )
-
-            elif action == "blist":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                user_id = query.from_user.id
-                
-                if user_id in batch_select_sessions:
-                    batch_select_sessions[user_id]["page"] = page
-                
-                await safe_edit_message(
-                    query.message,
-                    build_batch_select_text(rel_path, page, user_id),
-                    build_batch_select_markup(rel_path, user_id, page),
-                )
-
-            elif action == "bselect":
-                encoded = parts[2] if len(parts) > 2 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-
-                if user_id not in batch_select_sessions:
-                    return
-
-                session = batch_select_sessions[user_id]
-                if rel_path in session["selected"]:
-                    session["selected"].remove(rel_path)
-                else:
-                    session["selected"].add(rel_path)
-
-                await safe_edit_message(
-                    query.message,
-                    build_batch_select_text(session["rel_path"], session["page"], user_id),
-                    build_batch_select_markup(session["rel_path"], user_id, session["page"]),
-                )
-
-            elif action == "bdelete_confirm":
-                if user_id not in batch_select_sessions:
-                    await answer_once(query, "Session expired", show_alert=True)
-                    return
-
-                session = batch_select_sessions[user_id]
-                selected = list(session["selected"])
-                if not selected:
-                    await answer_once(query, get_lang(user_id, "select_at_least"), show_alert=True)
-                    return
-
-                total_size = 0
-                names = []
-                for rel in selected:
-                    try:
-                        info = file_info(rel)
-                        total_size += info["size"]
-                        names.append(info["name"])
-                    except Exception:
-                        names.append(rel)
-
-                preview = "\n".join(f"• {n}" for n in names[:12])
-                if len(names) > 12:
-                    preview += f"\n... and {len(names) - 12} more"
-
-                await safe_edit_message(
-                    query.message,
-                    (
-                        f"{ICON_WARN} {get_lang(user_id, 'batch_delete_confirm')}\n\n"
-                        f"Files: {len(selected)}\n"
-                        f"{ICON_BOX} Total: {human_size(total_size)}\n\n"
-                        f"{preview}\n\n"
-                        f"{get_lang(user_id, 'delete_warning_file')}"
-                    ),
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
-                            get_lang(user_id, "yes_batch_delete"),
-                            callback_data="fb:bdelete_yes",
-                        )],
-                        [InlineKeyboardButton(
-                            get_lang(user_id, "cancel_btn"),
-                            callback_data=f"fb:batchdel:{session['page']}:{encode_path(session['rel_path'])}",
-                        )],
-                    ]),
-                )
-
-            elif action == "bdelete_yes":
-                if user_id not in batch_select_sessions:
-                    await answer_once(query, "Session expired", show_alert=True)
-                    return
-
-                session = batch_select_sessions.pop(user_id)
-                selected = list(session["selected"])
-                rel_path = session["rel_path"]
-                page = session["page"]
-                parent_encoded = encode_path(rel_path)
-
-                deleted, errors = delete_paths_batch(selected)
-                text = get_lang(user_id, "deleted_count").format(deleted)
-                if errors:
-                    preview = "\n".join(errors[:5])
-                    if len(errors) > 5:
-                        preview += f"\n... and {len(errors) - 5} more"
-                    text += f"\n\n{ICON_WARN} Errors:\n{preview}"
-
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_OK} {text}",
-                    InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                get_lang(user_id, "back"),
-                                callback_data=f"fb:list:{page}:{parent_encoded}",
-                            ),
-                            InlineKeyboardButton(
-                                get_lang(user_id, "root"),
-                                callback_data="fb:list:0:",
-                            ),
-                        ],
-                    ]),
-                )
-
-            elif action == "bupload":
-                user_id = query.from_user.id
-                if user_id not in batch_select_sessions:
-                    await answer_once(query, "Session expired", show_alert=True)
-                    return
-                
-                session = batch_select_sessions.pop(user_id)
-                selected = list(session["selected"])
-                
-                if not selected:
-                    await answer_once(query, "Select at least one file", show_alert=True)
-                    return
-                
-                await safe_edit_message(
-                    query.message,
-                    f"{ICON_UPLOAD} Preparing batch upload ({len(selected)} files)...\nPlease wait.",
-                )
-                
-                run_in_background(
-                    send_folder_files_via_pyrogram(
-                        context.application,
-                        query.message.chat_id,
-                        query.message.message_id,
-                        session["rel_path"],
-                        file_list=selected,
-                        user_id=user_id,
-                    ),
-                    name="upload",
-                    on_error=message_error_reporter(
-                        context.application, query.message.chat_id, query.message.message_id, "Upload"
-                    ),
-                )
-            
-            elif action == "bupload_empty":
-                await answer_once(query, get_lang(user_id, "select_at_least"), show_alert=True)
-
-            # New: Video conversion menu
-            elif action == "conv_menu":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                # Show resolution options
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("1080p", callback_data=f"fb:conv_start:{page}:{encoded}:1080p")],
-                    [InlineKeyboardButton("720p",  callback_data=f"fb:conv_start:{page}:{encoded}:720p")],
-                    [InlineKeyboardButton("480p",  callback_data=f"fb:conv_start:{page}:{encoded}:480p")],
-                    [InlineKeyboardButton("360p",  callback_data=f"fb:conv_start:{page}:{encoded}:360p")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data=f"fb:file:{page}:{encoded}")]
-                ])
-                await safe_edit_message(query.message, "Select target resolution:", keyboard)
 
             elif action == "conv_start":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
@@ -6474,128 +5682,41 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             # New: Send thumbnail (multiple frames)
-            elif action == "thumb_send":
-                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                encoded = parts[3] if len(parts) > 3 else ""
-                rel_path = decode_path(encoded) if encoded else ""
-                await send_thumbnail(update, context, rel_path)
 
-        # ===== Zip Menu =====
-        elif data.startswith("zip_menu:"):
-            action = data.split(":")[1]
-            
-            if action == "list":
-                page = int(data.split(":")[2]) if len(data.split(":")) > 2 else 0
-                text, markup = build_zip_file_list_markup(user_id, page)
-                await safe_edit_message(query.message, text, markup)
-            
-            elif action == "select":
-                page = int(data.split(":")[2]) if len(data.split(":")) > 2 else 0
-                text, markup = build_zip_file_select_markup(user_id, page)
-                await safe_edit_message(query.message, text, markup)
-            
-            elif action == "zip_all":
-                try:
-                    all_files = filter_files_for_archiving(collect_download_files())
 
-                    if not all_files:
-                        await answer_once(query, get_lang(user_id, 'no_files'), show_alert=True)
-                        return
+        # ===== Archive =====
+        elif data == "zipname:default":
+            session = pending_zip_name_sessions.get(user_id)
+            if session is None:
+                await answer_once(query, "This archive request has expired.", show_alert=True)
+                return
+            await answer_once(query)
+            run_in_background(
+                run_named_zip(context.application, user_id, session["default_name"], query.message),
+                name="zip",
+                on_error=message_error_reporter(
+                    context.application, chat_id, query.message.message_id, "Archive"
+                ),
+            )
 
-                    settings = get_user_settings(user_id)
-                    all_files, limit_warn = apply_zip_file_limit(all_files)
-                    files_to_zip = build_files_to_zip(all_files)
-                    source_files = list(all_files)
+        elif data in ("zip_menu:zip_all",):
+            all_files = await asyncio.to_thread(lambda: filter_files_for_archiving(collect_download_files()))
+            if not all_files:
+                await answer_once(query, "There are no files to zip.", show_alert=True)
+                return
+            await ask_zip_name(
+                query.message, user_id, chat_id, all_files,
+                default_name=default_archive_name(), cancel_data="nav:archive",
+            )
 
-                    # Store session info and ask for zip name
-                    pending_zip_name_sessions[user_id] = {
-                        "mode": "all",
-                        "files_to_zip": files_to_zip,
-                        "source_files": source_files,
-                        "settings": settings,
-                        "limit_warn": limit_warn,
-                        "message_id": query.message.message_id,
-                    }
-
-                    await query.edit_message_text(
-                        get_lang(user_id, 'enter_zip_name'),
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data="zip_menu:back")]
-                        ])
-                    )
-
-                except Exception as e:
-                    logger.error(f"Zip error: {e}")
-                    await query.edit_message_text(f"{clean_emoji_prefix(get_lang(user_id, 'zip_error'))}: {e}")
-            
-            elif action == "settings":
-                await show_screen(query.message, build_archive_settings_screen(user_id, context))
-            
-            elif action == "back":
-                await safe_edit_message(
-                    query.message,
-                    build_zip_menu_text(user_id),
-                    build_zip_menu_markup(user_id)
-                )
-        
-        # ===== Zip File Selection =====
-        elif data.startswith("zip_select:"):
-            action = data.split(":", 1)[1]
-            session = zip_select_sessions.get(user_id)
-
-            if action == "confirm":
-                if not session or not session.get("selected"):
-                    # FIX #7: Use translated string instead of hardcoded
-                    await answer_once(query, get_lang(user_id, 'select_at_least'), show_alert=True)
-                    return
-
-                try:
-                    selected_files = resolve_selected_zip_files(session)
-
-                    if not selected_files:
-                        await answer_once(query, get_lang(user_id, 'select_at_least'), show_alert=True)
-                        return
-
-                    settings = get_user_settings(user_id)
-                    files_to_zip = build_files_to_zip(selected_files)
-
-                    # Store session info and ask for zip name
-                    pending_zip_name_sessions[user_id] = {
-                        "mode": "selected",
-                        "files_to_zip": files_to_zip,
-                        "source_files": selected_files,
-                        "settings": settings,
-                        "message_id": query.message.message_id,
-                    }
-
-                    # Remove from selection session after storing
-                    zip_select_sessions.pop(user_id, None)
-
-                    await query.edit_message_text(
-                        get_lang(user_id, 'enter_zip_name'),
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data="zip_menu:back")]
-                        ])
-                    )
-
-                except Exception as e:
-                    logger.error(f"Zip error: {e}")
-                    await query.edit_message_text(f"{clean_emoji_prefix(get_lang(user_id, 'zip_error'))}: {e}")
-
+        elif data.startswith(("zip_menu:", "zip_select:")):
+            # zip_menu:back/list/select and zip_select:* come from the old archive menu.
+            if data.startswith(("zip_menu:select", "zip_select:")):
+                batch_select_sessions[user_id] = {"rel_path": "", "selected": set(), "page": 0}
+                await show_selection(query.message, user_id)
             else:
-                if not session:
-                    session = {"selected": set(), "page": 0}
-                    zip_select_sessions[user_id] = session
+                await show_screen(query.message, await build_archive_menu_screen(user_id))
 
-                if action not in session.get("selected", set()):
-                    session["selected"].add(action)
-                else:
-                    session["selected"].discard(action)
-                
-                page = session.get("page", 0)
-                text, markup = build_zip_file_select_markup(user_id, page)
-                await safe_edit_message(query.message, text, markup)
-        
         # ===== Zip Settings =====
         elif data.startswith("zip_setting:"):
             setting_key = data.split(":")[1]

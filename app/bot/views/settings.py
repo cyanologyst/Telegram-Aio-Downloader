@@ -40,7 +40,7 @@ def next_video_default(value: Any) -> str:
     return VIDEO_DEFAULTS[(VIDEO_DEFAULTS.index(current) + 1) % len(VIDEO_DEFAULTS)]
 
 
-def _archive_summary(s: dict[str, Any]) -> str:
+def archive_summary(s: dict[str, Any]) -> str:
     part_mb = int(s.get("zip_part_size", 0)) // (1024 * 1024)
     part = f"{part_mb // 1024} GB" if part_mb and part_mb % 1024 == 0 else f"{part_mb} MB"
     password = "password set" if s.get("password") else "no password"
@@ -63,7 +63,7 @@ def settings_screen(s: dict[str, Any]) -> Screen:
             f"• Download forwarded media: {on_off(s.get('auto_download_forwarded_posts'))}",
             "",
             "<b>Archives</b>",
-            f"• {e(_archive_summary(s))}",
+            f"• {e(archive_summary(s))}",
             "",
             "<b>Manga</b>",
             f"• Make a PDF after download: {on_off(s.get('manga_auto_convert_pdf'))}",
