@@ -1,9 +1,9 @@
 """Forwarded media is only taken from the owner's chat with the bot."""
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from pyrogram import types
 
 from app.handlers import forwarded_media as fm
 
@@ -12,16 +12,15 @@ OWNER = 111
 
 
 def _message(chat_id=BOT_ID, outgoing=True, forwarded=True, photo=True):
-    return SimpleNamespace(
+    # Real Message objects: Kurigram's filters check isinstance(update, Message).
+    message = types.Message.__new__(types.Message)
+    message.__dict__.update(
         id=7,
-        chat=SimpleNamespace(id=chat_id, username=None),
-        from_user=SimpleNamespace(id=OWNER, is_self=True),
+        chat=types.Chat(id=chat_id),
+        from_user=types.User(id=OWNER, is_self=True),
         outgoing=outgoing,
         forward_date=1 if forwarded else None,
         forward_origin=object() if forwarded else None,
-        forward_from=None,
-        forward_sender_name=None,
-        forward_from_chat=None,
         photo=object() if photo else None,
         video=None,
         document=None,
@@ -31,6 +30,7 @@ def _message(chat_id=BOT_ID, outgoing=True, forwarded=True, photo=True):
         video_note=None,
         sticker=None,
     )
+    return message
 
 
 class Notifier:

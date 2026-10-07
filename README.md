@@ -119,9 +119,12 @@ See [.env.example](.env.example) for all available settings.
 ```bash
 git pull
 source .venv/bin/activate
+pip uninstall -y pyrogram   # one-time: replaced by Kurigram, which uses the same package name
 pip install -U -r requirements.txt
 python main.py
 ```
+
+Your existing Pyrogram `.session` file keeps working after the switch to Kurigram.
 
 Restart your systemd, PM2, Docker, or other process manager after the dependency update.
 

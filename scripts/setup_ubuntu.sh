@@ -197,6 +197,11 @@ create_venv() {
 
 install_python_requirements() {
   log "Installing Python requirements"
+  # Kurigram replaces the archived Pyrogram and installs into the same
+  # `pyrogram` package directory, so the old package must go first.
+  if pip show pyrogram >/dev/null 2>&1; then
+    pip uninstall -y pyrogram
+  fi
   pip install -r "${PROJECT_ROOT}/requirements.txt"
 }
 
