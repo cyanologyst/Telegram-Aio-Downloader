@@ -1,44 +1,60 @@
 #!/usr/bin/env python3
-import shutil
+"""Lift videos out of sub-folders, using the same safe logic as the bot.
+
+Dry run by default: prints what would happen. Pass --apply to move files.
+Folders with downloads in progress are skipped, and left-over files are only
+deleted with --delete-leftovers.
+
+    python scripts/organize_downloaded_videos.py [FOLDER] [--apply] [--delete-leftovers]
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
 from pathlib import Path
 
-# Set this to your parent folder path
-PARENT = Path("./Download")  # run script inside parent folder, or change path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"}
-
-
-def unique_target(dst: Path) -> Path:
-    if not dst.exists():
-        return dst
-
-    stem, suf = dst.stem, dst.suffix
-    i = 1
-
-    while True:
-        cand = dst.with_name(f"{stem}_{i}{suf}")
-        if not cand.exists():
-            return cand
-        i += 1
+from app.services.organize import apply_organize, plan_organize  # noqa: E402
 
 
-# Keep track of folders that had videos moved out
-folders_to_delete = set()
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("folder", nargs="?", default="Download", type=Path)
+    parser.add_argument("--apply", action="store_true", help="actually move files")
+    parser.add_argument(
+        "--delete-leftovers",
+        action="store_true",
+        help="delete sub-folders including files that are not videos",
+    )
+    args = parser.parse_args()
 
-for p in PARENT.rglob("*"):
-    if p.is_file() and p.suffix.lower() in VIDEO_EXTS and p.parent != PARENT:
-        source_folder = p.parent
+    if not args.folder.is_dir():
+        parser.error(f"not a folder: {args.folder}")
 
-        target = unique_target(PARENT / p.name)
-        print(f"Moving: {p} -> {target}")
+    plan = plan_organize(args.folder)
+    for src, dst in plan.moves:
+        print(f"{'Moving' if args.apply else 'Would move'}: {src} -> {dst}")
+    for name in plan.skipped_busy:
+        print(f"Skipped (download in progress): {name}")
+    if plan.leftover_files:
+        action = "deleted" if args.delete_leftovers else "kept"
+        print(f"Other files in those folders: {plan.leftover_files} ({action})")
 
-        shutil.move(str(p), str(target))
-        folders_to_delete.add(source_folder)
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to make these changes.")
+        return 0
 
-# Delete folders (with all remaining contents) after videos are moved
-for folder in sorted(folders_to_delete, key=lambda x: len(x.parts), reverse=True):
-    if folder.exists():
-        print(f"Deleting folder and contents: {folder}")
-        shutil.rmtree(folder, ignore_errors=True)
+    result = apply_organize(plan, delete_leftovers=args.delete_leftovers)
+    print(
+        f"Moved {result.moved} video(s); removed {result.removed_folders} folder(s); "
+        f"kept {result.kept_folders}."
+    )
+    for error in result.errors:
+        print(f"Error: {error}", file=sys.stderr)
+    return 1 if result.errors else 0
 
-print("Done.")
+
+if __name__ == "__main__":
+    raise SystemExit(main())

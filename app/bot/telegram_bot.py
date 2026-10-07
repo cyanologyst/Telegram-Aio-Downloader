@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -131,6 +130,7 @@ from app.services.manga import (
     list_manga_images,
     remove_manga_folder_if_empty,
 )
+from app.services.organize import OrganizePlan, apply_organize, plan_organize
 from app.services.pornhub_model import (
     PornHubModelPlaylist,
     is_pornhub_model_url,
@@ -2066,6 +2066,67 @@ def build_files_text(rel_path: str, page: int = 0) -> str:
 
     return "\n".join(lines)
 
+
+
+# Library folders the bot manages itself; "Organize" at the Download root skips them.
+ORGANIZE_PROTECTED_NAMES = {"Telegram", "Spotify", "Manga", "Adult", "Hentai", "_torrents"}
+
+
+def build_organize_plan(rel_path: str) -> OrganizePlan:
+    folder = safe_join(DOWNLOAD_DIR, rel_path)
+    busy_names: set[str] = set()
+    for job in download_jobs.values():
+        if job.get("status") in JOB_ACTIVE_STATES:
+            name = str(job.get("name", ""))
+            busy_names.update({name, clean_download_name(name)})
+    return plan_organize(
+        folder,
+        protected_names=ORGANIZE_PROTECTED_NAMES if not rel_path else (),
+        busy_names=busy_names,
+    )
+
+
+def build_organize_preview(rel_path: str, page: int, plan: OrganizePlan):
+    shown_path = "/" + rel_path.lstrip("/") if rel_path else "/"
+    encoded = encode_path(rel_path)
+    back = InlineKeyboardButton(f"{ICON_BACK} Back", callback_data=f"fb:list:{page}:{encoded}")
+    lines = [f"{ICON_BROOM} Organize videos", f"{ICON_PIN} {shown_path}", ""]
+    if not plan.moves:
+        lines.append("Nothing to organize: no videos in sub-folders of this folder.")
+        if plan.skipped_busy:
+            lines.append(f"Skipped {len(plan.skipped_busy)} folder(s) with downloads in progress.")
+        return "\n".join(lines), InlineKeyboardMarkup([[back]])
+
+    extra_files = len(plan.moves) - plan.video_count
+    lines.append(
+        f"Move {plan.video_count} video(s) from {len(plan.folders)} sub-folder(s) into this folder"
+        + (f", with {extra_files} matching subtitle file(s)." if extra_files else ".")
+    )
+    for _, dst in plan.moves[:8]:
+        lines.append(f"• {shorten(dst.name, 60)}")
+    if len(plan.moves) > 8:
+        lines.append(f"… and {len(plan.moves) - 8} more")
+    lines.append("")
+    if plan.leftover_files:
+        lines.append(
+            f"Other files left behind: {plan.leftover_files} ({human_size(plan.leftover_bytes)}). "
+            "They are kept unless you choose to delete them."
+        )
+    lines.append("Folders that end up empty are removed.")
+    if plan.skipped_busy:
+        lines.append(f"Skipped {len(plan.skipped_busy)} folder(s) with downloads in progress.")
+
+    rows = [[InlineKeyboardButton(
+        f"{ICON_OK} Move {plan.video_count} video(s)",
+        callback_data=f"fb:organize_go:{page}:{encoded}:keep",
+    )]]
+    if plan.leftover_files:
+        rows.append([InlineKeyboardButton(
+            f"{ICON_DELETE} Move + delete leftovers ({human_size(plan.leftover_bytes)})",
+            callback_data=f"fb:organize_go:{page}:{encoded}:purge",
+        )])
+    rows.append([back])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def build_files_markup(rel_path: str, page: int = 0):
@@ -4862,16 +4923,11 @@ async def resume_job(job_id: int):
 
 
 def clear_finished_jobs():
-    global download_jobs
-
-    keep = {}
-    for jid, job in download_jobs.items():
-        if job["status"] in JOB_ACTIVE_STATES:
-            keep[jid] = job
-
-    removed = len(download_jobs) - len(keep)
-    download_jobs = keep
-    return removed
+    # Mutate in place: the Mini App and dashboard hold references to this dict.
+    finished = [jid for jid, job in download_jobs.items() if job["status"] not in JOB_ACTIVE_STATES]
+    for jid in finished:
+        del download_jobs[jid]
+    return len(finished)
 
 
 async def refresh_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4997,44 +5053,24 @@ async def list_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
-async def clear_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear all files from Download folder."""
-    user_id = update.effective_user.id
-    
-    if not is_authorized_user(user_id):
-        await update.message.reply_text("⛔ Unauthorized")
-        return
-    
-    try:
-        all_items = list(DOWNLOAD_DIR.glob("*"))
-        
-        if not all_items:
-            await update.message.reply_text("📭 Download folder already empty")
-            return
-        
-        # Delete all files (not folders to be safe)
-        deleted_count = 0
-        total_freed = 0
-        
-        for item in all_items:
-            try:
-                if item.is_file():
-                    size = item.stat().st_size
-                    item.unlink()
-                    deleted_count += 1
-                    total_freed += size
-                elif item.is_dir() and not any(item.iterdir()):
-                    item.rmdir()
-            except Exception as e:
-                logger.warning(f"Could not delete {item}: {e}")
-        
-        await update.message.reply_text(
-            f"🗑 Cleared {deleted_count} file(s)\n"
-            f"Freed: {zip_human_size(total_freed)}"
-        )
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+def build_clear_jobs_prompt() -> tuple[str, InlineKeyboardMarkup | None]:
+    finished = sum(1 for j in download_jobs.values() if j["status"] not in JOB_ACTIVE_STATES)
+    if not finished:
+        return f"{ICON_BROOM} No finished jobs to clear.", None
+    return (
+        f"{ICON_WARN} Clear {finished} finished job(s) from the list?\n\n"
+        "Only the job list is cleared. Downloaded files are not touched.",
+        InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"{ICON_BROOM} Yes, clear", callback_data="clear_confirm"),
+            InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data="clear_cancel"),
+        ]]),
+    )
+
+
+async def clear_jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/clear: remove finished jobs from the list, after confirmation."""
+    text, markup = build_clear_jobs_prompt()
+    await update.message.reply_text(text, reply_markup=markup)
 
 
 # =========================================================
@@ -5587,15 +5623,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif lower in ("clear", f"{ICON_BROOM.lower()} clear", get_lang(user_id, 'clear').lower()):
-            msg = await update.message.reply_text(
-                f"{ICON_WARN} {get_lang(user_id, 'confirm_clear')}\n\n"
-                f"{get_lang(user_id, 'clear_warning')}",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(f"{ICON_BROOM} Yes, Clear", callback_data="clear_confirm"),
-                    ]
-                ]),
-            )
+            await clear_jobs_cmd(update, context)
 
         elif "help" in normalized or "راهنما" in normalized:
             await update.message.reply_text(
@@ -6161,14 +6189,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"Batch mode: {batch_download_mode_label(next_mode)}")
 
         elif data == "menu:clear":
-            await safe_edit_message(
-                query.message,
-                f"{ICON_WARN} Clear finished jobs from memory?",
-                InlineKeyboardMarkup([[
-                    InlineKeyboardButton(f"{ICON_BROOM} Yes, Clear", callback_data="clear_confirm"),
-                    InlineKeyboardButton(f"{ICON_BACK} Back", callback_data="menu:downloads"),
-                ]]),
-            )
+            text, markup = build_clear_jobs_prompt()
+            await safe_edit_message(query.message, text, markup)
 
         elif data == "menu:tpb":
             context.user_data["tpb_waiting_for_query"] = True
@@ -6307,10 +6329,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif data == "clear_confirm":
             removed = clear_finished_jobs()
-            await safe_edit_message(
-                query.message,
-                f"{ICON_OK} {get_lang(user_id, 'cleared')}: {removed} {get_lang(user_id, 'job_id')}(s)",
-            )
+            await safe_edit_message(query.message, f"{ICON_OK} Cleared {removed} finished job(s).")
+
+        elif data == "clear_cancel":
+            await safe_edit_message(query.message, "Nothing was cleared.")
         
         # ===== Torrent Selection =====
         elif data.startswith("tsel:"):
@@ -6739,22 +6761,44 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             elif action == "organize":
-                # Run the organizer script in background without blocking
+                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
                 encoded = parts[3] if len(parts) > 3 else ""
-                # acknowledge the button press
-                await query.answer()
+                rel_path = decode_path(encoded) if encoded else ""
+                plan = await asyncio.to_thread(build_organize_plan, rel_path)
+                text, markup = build_organize_preview(rel_path, page, plan)
+                await safe_edit_message(query.message, text, markup)
 
-                script_path = BASE_DIR / "scripts" / "organize_downloaded_videos.py"
-
-                loop = asyncio.get_running_loop()
-
-                def _run():
-                    try:
-                        subprocess.run([sys.executable, str(script_path)], cwd=str(BASE_DIR))
-                    except Exception:
-                        logger.exception("organize_downloaded_videos.py failed")
-
-                loop.run_in_executor(None, _run)
+            elif action == "organize_go":
+                page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
+                encoded, _, mode = (parts[3] if len(parts) > 3 else "").partition(":")
+                rel_path = decode_path(encoded) if encoded else ""
+                await safe_edit_message(query.message, f"{ICON_BROOM} Organizing videos...")
+                # Re-plan so files that changed since the preview are handled correctly.
+                plan = await asyncio.to_thread(build_organize_plan, rel_path)
+                result = await asyncio.to_thread(
+                    apply_organize, plan, delete_leftovers=(mode == "purge")
+                )
+                lines = [
+                    f"{ICON_OK} Organized videos",
+                    "",
+                    f"Moved: {result.moved} video(s)",
+                    f"Folders removed: {result.removed_folders}",
+                ]
+                if result.kept_folders:
+                    lines.append(f"Folders kept (other files inside): {result.kept_folders}")
+                if plan.skipped_busy:
+                    lines.append(f"Skipped (download in progress): {len(plan.skipped_busy)}")
+                if result.errors:
+                    lines.append("")
+                    lines.append(f"{ICON_WARN} Problems:")
+                    lines.extend(f"• {shorten(err, 80)}" for err in result.errors[:5])
+                await safe_edit_message(
+                    query.message,
+                    "\n".join(lines),
+                    InlineKeyboardMarkup([[InlineKeyboardButton(
+                        f"{ICON_FOLDER} Open folder", callback_data=f"fb:list:{page}:{encoded}"
+                    )]]),
+                )
 
             elif action == "blist":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
@@ -7429,7 +7473,7 @@ def main():
     # Zipping feature handlers
     app.add_handler(CommandHandler("zip", zip_files_cmd))
     app.add_handler(CommandHandler("list", list_files_cmd))
-    app.add_handler(CommandHandler("clear", clear_files_cmd))
+    app.add_handler(CommandHandler("clear", clear_jobs_cmd))
 
     # TPB crawler handlers
     tpb_crawler = TPBCrawler(TPB_API_URL)
