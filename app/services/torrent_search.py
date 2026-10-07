@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,6 +30,7 @@ class SearchResult:
     added: str = ""
     magnet: str = ""  # known up front for TPB results
     can_select_files: bool = False  # a .torrent may be available (Prowlarr)
+    url: str = ""  # the result's page on the site, linked from its title
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,6 +69,19 @@ def _to_int(value: Any) -> int | None:
         return int(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _web_url(value: Any) -> str:
+    url = str(value or "")
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+def _tpb_date(value: Any) -> str:
+    """apibay gives a Unix timestamp; show it as a date."""
+    stamp = _to_int(value)
+    if not stamp:
+        return ""
+    return datetime.fromtimestamp(stamp, UTC).strftime("%Y-%m-%d")
 
 
 def _human_bytes(size: int) -> str:
@@ -113,6 +128,7 @@ class ProwlarrProvider:
                     else ""
                 ),
                 can_select_files=not str(item.get("magnet_url") or "").startswith("magnet:"),
+                url=_web_url(item.get("info_url")),
                 raw=item,
             )
             for item in releases
@@ -160,6 +176,8 @@ class TPBProvider:
                     leechers=_to_int(item.get("leechers")),
                     source=str(item.get("username") or ""),
                     magnet=TPBCrawler.build_magnet(info_hash, name) if info_hash else "",
+                    added=_tpb_date(item.get("added")),
+                    url=f"https://thepiratebay.org/description.php?id={item.get('id')}",
                     raw={"id": str(item.get("id"))},
                 )
             )
@@ -205,6 +223,7 @@ class RARBGProvider:
                 source=str(item.get("category") or ""),
                 added=str(item.get("added") or ""),
                 magnet=str(item.get("magnet") or ""),
+                url=_web_url(item.get("url")),
                 raw={"id": str(item.get("id") or "")},
             )
             for item in items

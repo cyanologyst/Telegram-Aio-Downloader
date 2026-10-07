@@ -1,9 +1,16 @@
 """Unified torrent search UI: one message that moves between screens.
 
 Flow: pick a source (skipped when only one is configured) -> type a query ->
-results page with numbered buttons -> result details -> download / choose
-files / magnet. Every screen has a way back, and the waiting-for-query state
-expires on its own so stray messages are not swallowed as searches.
+one results message listing a page of results. Each result shows its title
+(linked to its page on the site), size, seeders/leechers and date, with
+⬇️ Download / ☑️ Files / 🧲 Magnet links. Those are t.me deep links back to
+this bot (``/start sd<sid>_<index>``), so one tap acts on a result without a
+details screen; the bot deletes the /start message the tap produces. The
+waiting-for-query state expires on its own so stray messages are not
+swallowed as searches.
+
+Without the bot's username (deep links need it) results fall back to numbered
+buttons and a details screen.
 
 Callback data is ``srch:<action>[:<sid>[:<arg>...]]``. ``sid`` identifies the
 search the buttons belong to, so buttons on an old results message say so
@@ -14,6 +21,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -33,8 +41,10 @@ logger = logging.getLogger(__name__)
 StartDownload = Callable[[Any, Any, str, bool], Awaitable[dict[str, Any]]]
 SelectFiles = Callable[[Any, Any, Path, str], Awaitable[None]]
 
-PER_PAGE = 6
+PER_PAGE = 6  # numbered-button fallback
+LINK_PER_PAGE = 10  # result list with deep links
 WAIT_SECONDS = 600
+DEEP_LINK_RE = re.compile(r"^s([dfm])(\d+)_(\d+)$")
 SESSION_KEY = "search"
 WAIT_KEY = "search_wait"
 
@@ -48,6 +58,11 @@ def _short(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _title(item: dict[str, Any], limit: int) -> str:
+    # Scraped titles can carry HTML entities (&#039;); decode, then escape once.
+    return _e(_short(html.unescape(str(item.get("title") or "")), limit))
+
+
 def _stats_line(item: dict[str, Any]) -> str:
     parts = [f"💾 {_e(item.get('size') or '?')}"]
     if item.get("seeders") is not None:
@@ -55,6 +70,10 @@ def _stats_line(item: dict[str, Any]) -> str:
     if item.get("leechers") is not None:
         parts.append(f"🔴 {item['leechers']}")
     return " · ".join(parts)
+
+
+def _link(url: str, text: str) -> str:
+    return f'<a href="{html.escape(url, quote=True)}">{text}</a>'
 
 
 class SearchUI:
@@ -69,6 +88,15 @@ class SearchUI:
         self.start_download = start_download
         self.select_files = select_files
         self.torrent_dir = torrent_dir
+        # Set once the bot knows its username; enables the deep-link result list.
+        self.bot_username: str | None = None
+
+    @property
+    def per_page(self) -> int:
+        return LINK_PER_PAGE if self.bot_username else PER_PAGE
+
+    def _deep_link(self, action: str, sid: str, index: int) -> str:
+        return f"https://t.me/{self.bot_username}?start=s{action}{sid}_{index}"
 
     # ------------------------------------------------------------ helpers
 
@@ -161,6 +189,9 @@ class SearchUI:
             ]
             return text, InlineKeyboardMarkup(rows)
 
+        if self.bot_username:
+            return self._result_list(session)
+
         page = session["page"]
         start = page * PER_PAGE
         shown = items[start : start + PER_PAGE]
@@ -196,6 +227,63 @@ class SearchUI:
             ]
         )
         rows.append([InlineKeyboardButton("✖ Close", callback_data="srch:x")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    def _result_list(self, session: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+        """A page of results in one message, each with deep-link actions."""
+        provider = self.providers[session["provider"]]
+        items = session["items"]
+        sid = session["sid"]
+        page = session["page"]
+        start = page * LINK_PER_PAGE
+        shown = items[start : start + LINK_PER_PAGE]
+        more = "+" if not session["exhausted"] else ""
+        category_label = provider.categories.get(session["category"], "🌐 All")
+
+        entries = []
+        for offset, item in enumerate(shown):
+            index = start + offset
+            title = _title(item, 110)
+            title = _link(item["url"], title) if item.get("url") else f"<b>{title}</b>"
+            actions = [_link(self._deep_link("d", sid, index), "⬇️ Download")]
+            if item.get("can_select_files"):
+                actions.append(_link(self._deep_link("f", sid, index), "☑️ Files"))
+            actions.append(_link(self._deep_link("m", sid, index), "🧲 Magnet"))
+            details = [_stats_line(item)]
+            if item.get("added"):
+                details.append(f"📅 {_e(_short(item['added'], 20))}")
+            if item.get("source"):
+                details.append(_e(_short(item["source"], 24)))
+            entries.append(
+                f"<b>{index + 1}.</b> {title}\n{'  '.join(actions)}\n{' · '.join(details)}"
+            )
+
+        last_page = start + LINK_PER_PAGE >= len(items) and session["exhausted"]
+        lines = [
+            f"🔍 <b>Found {len(items)}{more} results for “{_e(_short(session['query'], 60))}”</b>",
+            f"{_e(provider.label)} · {_e(category_label)} · page {page + 1}"
+            + (" (last)" if last_page and page else ""),
+            "<blockquote expandable>" + "\n\n".join(entries) + "</blockquote>",
+            "Tap ⬇️ Download to start one; titles open the site.",
+        ]
+
+        rows = []
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("👈 Prev", callback_data=f"srch:pg:{sid}:{page - 1}"))
+        if not last_page:
+            nav.append(
+                InlineKeyboardButton("Next Page 👉", callback_data=f"srch:pg:{sid}:{page + 1}")
+            )
+        if nav:
+            rows.append(nav)
+        rows.append(
+            [
+                InlineKeyboardButton("🏷 Category", callback_data=f"srch:cat:{sid}"),
+                InlineKeyboardButton("🔁 New search", callback_data="srch:new"),
+                InlineKeyboardButton("✖", callback_data="srch:x"),
+            ]
+        )
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
     def _categories(self, session: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
@@ -306,7 +394,7 @@ class SearchUI:
     async def _run_search(self, message: Any, session: dict[str, Any], context: Any = None) -> None:
         provider = self.providers[session["provider"]]
         try:
-            await fetch_until(provider, session, PER_PAGE * (session["page"] + 1) + 1)
+            await fetch_until(provider, session, self.per_page * (session["page"] + 1) + 1)
         except Exception as exc:
             if context is not None and context.user_data.get(SESSION_KEY) is not session:
                 return  # superseded (new category or search) while fetching
@@ -326,7 +414,7 @@ class SearchUI:
             return
         if context is not None and context.user_data.get(SESSION_KEY) is not session:
             return  # superseded while fetching; the newer search draws the screen
-        max_page = max(0, (len(session["items"]) - 1) // PER_PAGE)
+        max_page = max(0, (len(session["items"]) - 1) // self.per_page)
         session["page"] = min(session["page"], max_page)
         await self._show(message, *self._results(session))
 
@@ -342,6 +430,12 @@ class SearchUI:
         if action == "x":
             self.cancel_waiting(context)
             await self._show(message, "🔍 Search closed.", None)
+            return
+        if action == "rm":
+            try:
+                await message.delete()
+            except Exception as exc:
+                logger.debug("Could not delete search message: %s", exc)
             return
         if action == "pick":
             self.cancel_waiting(context)
@@ -396,16 +490,76 @@ class SearchUI:
             if action == "o":
                 await self._show(message, *self._detail(session, index))
             elif action == "mag":
-                await message.reply_text(
-                    f"<code>{_e(session['items'][index]['magnet'])}</code>",
-                    parse_mode=ParseMode.HTML,
-                )
+                await answer_once(query)
+                await self._send_magnet(message, session, index)
             elif action == "dl":
                 await answer_once(query)
-                await self._download(update, context, session, index, force=len(parts) > 4)
+                flag = parts[4] if len(parts) > 4 else ""
+                # "f": forced from the details screen; "F": forced from a deep-link prompt.
+                await self._download(
+                    update,
+                    context,
+                    session,
+                    index,
+                    force=bool(flag),
+                    message=message,
+                    inline=flag != "F",
+                )
             else:
                 await answer_once(query)
-                await self._choose_files(update, context, session, index)
+                await self._choose_files(update, context, session, index, message=message)
+
+    async def handle_start(self, update: Any, context: Any, payload: str) -> bool:
+        """``/start s<action><sid>_<index>`` from a result's deep link. True when handled."""
+        match = DEEP_LINK_RE.match(payload or "")
+        if not match:
+            return False
+        action, sid, index = match.group(1), match.group(2), int(match.group(3))
+        message = update.message
+        session = self._session(context, sid)
+        if session is None or index >= len(session["items"]):
+            await message.reply_text(
+                "These results are from an older search. Run /search again.",
+            )
+        elif action == "d":
+            status = await message.reply_text(
+                f"⏳ Starting <b>{_title(session['items'][index], 80)}</b>…",
+                parse_mode=ParseMode.HTML,
+            )
+            await self._download(
+                update, context, session, index, force=False, message=status, inline=False
+            )
+        elif action == "f":
+            status = await message.reply_text("⏳ Fetching the torrent's file list…")
+            await self._choose_files(update, context, session, index, message=status, inline=False)
+        else:
+            await self._send_magnet(message, session, index)
+        # The tap shows up as a "/start …" message from you; tidy it away.
+        try:
+            await message.delete()
+        except Exception as exc:
+            logger.debug("Could not delete the deep-link /start message: %s", exc)
+        return True
+
+    async def _send_magnet(self, message: Any, session: dict[str, Any], index: int) -> None:
+        item = session["items"][index]
+        magnet = item.get("magnet") or ""
+        if not magnet:
+            try:
+                resolved = await self.providers[session["provider"]].resolve(item, self.torrent_dir)
+                if resolved.source.startswith("magnet:"):
+                    magnet = item["magnet"] = resolved.source
+            except Exception as exc:
+                logger.warning("Magnet lookup failed: %s", exc)
+        if not magnet:
+            await message.reply_text(
+                "This result has no magnet link (it's a .torrent file). Use ⬇️ Download."
+            )
+            return
+        await message.reply_text(
+            f"🧲 <b>{_title(item, 80)}</b>\n<code>{_e(magnet)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _download(
         self,
@@ -415,13 +569,23 @@ class SearchUI:
         index: int,
         *,
         force: bool,
+        message: Any,
+        inline: bool = True,
     ) -> None:
+        """Start a result's download, reporting on ``message``.
+
+        ``inline``: ``message`` is the results/details screen (offer a way
+        back). Otherwise it's a status message sent for a deep link, removed
+        once the job card is up.
+        """
         provider = self.providers[session["provider"]]
         item = session["items"][index]
         sid = session["sid"]
-        message = update.callback_query.message
-        back = InlineKeyboardButton("⬅ Back to results", callback_data=f"srch:back:{sid}")
-        await self._show(message, f"⏳ Starting <b>{_e(_short(item['title'], 80))}</b>…", None)
+        if inline:
+            back = InlineKeyboardButton("⬅ Back to results", callback_data=f"srch:back:{sid}")
+        else:
+            back = InlineKeyboardButton("✖ Dismiss", callback_data="srch:rm")
+        await self._show(message, f"⏳ Starting <b>{_title(item, 80)}</b>…", None)
         try:
             resolved = await provider.resolve(item, self.torrent_dir)
             job = await self.start_download(update, context, resolved.source, force)
@@ -443,7 +607,8 @@ class SearchUI:
                     [
                         [
                             InlineKeyboardButton(
-                                "📥 Download anyway", callback_data=f"srch:dl:{sid}:{index}:f"
+                                "📥 Download anyway",
+                                callback_data=f"srch:dl:{sid}:{index}:{'f' if inline else 'F'}",
                             )
                         ],
                         [back],
@@ -451,9 +616,16 @@ class SearchUI:
                 ),
             )
             return
+        if not inline:
+            # The job's live card (sent by start_download) says it all.
+            try:
+                await message.delete()
+            except Exception as exc:
+                logger.debug("Could not delete the starting message: %s", exc)
+            return
         await self._show(
             message,
-            f"✅ <b>Download started</b> · Job #{job.get('id')}\n{_e(item['title'])}\n\n"
+            f"✅ <b>Download started</b> · Job #{job.get('id')}\n{_title(item, 200)}\n\n"
             "Follow it from 📊 Status.",
             InlineKeyboardMarkup([[back]]),
         )
@@ -464,19 +636,19 @@ class SearchUI:
         context: Any,
         session: dict[str, Any],
         index: int,
+        *,
+        message: Any,
+        inline: bool = True,
     ) -> None:
         provider = self.providers[session["provider"]]
         item = session["items"][index]
-        message = update.callback_query.message
-        back = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "⬅ Back to results", callback_data=f"srch:back:{session['sid']}"
-                    )
-                ]
-            ]
-        )
+        if inline:
+            button = InlineKeyboardButton(
+                "⬅ Back to results", callback_data=f"srch:back:{session['sid']}"
+            )
+        else:
+            button = InlineKeyboardButton("✖ Dismiss", callback_data="srch:rm")
+        back = InlineKeyboardMarkup([[button]])
         await self._show(message, "⏳ Fetching the torrent's file list…", None)
         try:
             resolved = await provider.resolve(item, self.torrent_dir)
@@ -491,5 +663,13 @@ class SearchUI:
                 back,
             )
             return
-        await self._show(message, f"☑️ Choose files for <b>{_e(item['title'])}</b> below.", back)
+        if inline:
+            await self._show(
+                message, f"☑️ Choose files for <b>{_title(item, 200)}</b> below.", back
+            )
+        else:
+            try:
+                await message.delete()
+            except Exception as exc:
+                logger.debug("Could not delete the file-list message: %s", exc)
         await self.select_files(update, context, resolved.torrent_path, item["title"])

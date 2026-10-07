@@ -307,3 +307,106 @@ async def test_links_cancel_a_pending_search(text, monkeypatch):
     await tb.on_text(text_update(context, text), context)
 
     assert not ui.is_waiting(context)
+
+
+# ------------------------------------------------- result list with deep links
+
+
+def _linked_ui(providers, recorder=None):
+    ui = _ui(providers, recorder)
+    ui.bot_username = "my_bot"
+    return ui
+
+
+def _start_update(context, payload):
+    update = text_update(context, f"/start {payload}")
+    return update
+
+
+async def test_results_are_one_list_with_deep_links():
+    provider = FakeProvider("tpb", count=14)
+    ui = _linked_ui([provider])
+    context = make_context()
+    await _searched(ui, context, "Bonnie's &#039;show&#039;")
+
+    results = context.bot.calls[-1]
+    text = results.kwargs["text"]
+    assert text.startswith("🔍 <b>Found 14 results for")
+    assert "<blockquote expandable>" in text
+    assert "'show'" in text and "&#039;" not in text  # entities decoded, then escaped once
+    assert text.count("?start=sd1_") == search_mod.LINK_PER_PAGE
+    assert 'href="https://t.me/my_bot?start=sm1_0"' in text
+    assert "💾 1 GB · 🟢 0" in text
+    assert [b.text for b in _buttons(_markup(results))] == [
+        "Next Page 👉",
+        "🏷 Category",
+        "🔁 New search",
+        "✖",
+    ]
+
+    await ui.on_callback(callback_update(context, "srch:pg:1:1"), context)
+    page2 = context.bot.calls[-1]
+    assert "sd1_13" in page2.kwargs["text"] and 'sd1_0"' not in page2.kwargs["text"]
+    assert [b.text for b in _buttons(_markup(page2))][0] == "👈 Prev"
+    assert "Next Page 👉" not in [b.text for b in _buttons(_markup(page2))]
+
+
+async def test_download_link_starts_the_job_and_tidies_up():
+    recorder = Recorder()
+    ui = _linked_ui([FakeProvider("tpb")], recorder)
+    context = make_context()
+    await _searched(ui, context)
+
+    update = _start_update(context, "sd1_2")
+    assert await ui.handle_start(update, context, "sd1_2") is True
+
+    assert recorder.calls == [("magnet:?xt=urn:btih:2", False)]
+    deleted = [c.kwargs["message_id"] for c in context.bot.called("delete_message")]
+    assert update.message.message_id in deleted  # the "/start …" message
+    assert len(deleted) == 2  # and the "Starting…" note; the job card replaces it
+
+
+async def test_duplicate_from_a_link_asks_then_forces():
+    recorder = Recorder(duplicate=True)
+    ui = _linked_ui([FakeProvider("tpb")], recorder)
+    context = make_context()
+    await _searched(ui, context)
+
+    await ui.handle_start(_start_update(context, "sd1_1"), context, "sd1_1")
+    prompt = [c for c in context.bot.calls if c.method == "edit_text"][-1]
+    assert "already in your downloads" in prompt.kwargs["text"]
+    data = [b.callback_data for b in _buttons(_markup(prompt))]
+    assert data == ["srch:dl:1:1:F", "srch:rm"]
+
+    await ui.on_callback(callback_update(context, "srch:dl:1:1:F"), context)
+    assert recorder.calls[-1] == ("magnet:?xt=urn:btih:1", True)
+
+
+async def test_magnet_link_and_stale_links():
+    ui = _linked_ui([FakeProvider("tpb")])
+    context = make_context()
+    await _searched(ui, context)
+
+    await ui.handle_start(_start_update(context, "sm1_3"), context, "sm1_3")
+    assert "<code>magnet:?xt=urn:btih:3</code>" in context.bot.texts()[-1]
+
+    await ui.handle_start(_start_update(context, "sd9_0"), context, "sd9_0")
+    assert "older search" in context.bot.texts()[-1]
+
+    assert await ui.handle_start(_start_update(context, "other"), context, "other") is False
+
+
+async def test_start_command_routes_search_links(monkeypatch):
+    import app.bot.telegram_bot as tb
+
+    seen = []
+
+    class UI:
+        async def handle_start(self, update, context, payload):
+            seen.append(payload)
+            return True
+
+    monkeypatch.setattr(tb, "search_ui", UI())
+    context = make_context(args=["sd1_0"])
+    await tb.start_cmd(text_update(context, "/start sd1_0"), context)
+    assert seen == ["sd1_0"] and context.bot.texts() == []

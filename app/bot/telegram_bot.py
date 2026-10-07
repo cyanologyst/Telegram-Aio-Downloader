@@ -4958,6 +4958,10 @@ async def cancel_input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Deep links from the search results arrive as "/start <payload>".
+    if context.args and search_ui is not None:
+        if await search_ui.handle_start(update, context, context.args[0]):
+            return
     await update.message.reply_text(
         home_views.welcome_text(),
         reply_markup=build_reply_menu(update.effective_user.id),
@@ -6247,6 +6251,9 @@ async def restore_jobs(app: Application) -> None:
 async def post_init(app: Application):
     """Initialize bot - setup pyrogram, executor, and start auto-cleanup task."""
     global zip_executor
+
+    if search_ui is not None:
+        search_ui.bot_username = app.bot.username  # result links are t.me/<bot>?start=…
     
     # Initialize thread pool executor for zip operations
     # Using ThreadPoolExecutor instead of ProcessPoolExecutor to properly share

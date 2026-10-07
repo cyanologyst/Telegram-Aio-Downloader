@@ -75,6 +75,10 @@ class FakeMessage:
         self._bot.calls.append(Call("reply_text", {"text": text, **kwargs}))
         return FakeMessage(self._bot, self.chat_id, text)
 
+    async def delete(self) -> bool:
+        self._bot.calls.append(Call("delete_message", {"message_id": self.message_id}))
+        return True
+
     async def edit_text(self, text: str, **kwargs: Any) -> FakeMessage:
         self._bot.calls.append(
             Call("edit_text", {"text": text, "message_id": self.message_id, **kwargs})
