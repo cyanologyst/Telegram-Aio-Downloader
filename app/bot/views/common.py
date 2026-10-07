@@ -23,8 +23,8 @@ def e(value: Any) -> str:
 
 
 def short(text: Any, limit: int) -> str:
-    text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 def human_size(size: float) -> str:
