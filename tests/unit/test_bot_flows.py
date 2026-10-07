@@ -439,3 +439,38 @@ async def test_bot_only_mode_sends_small_files_and_explains_big_ones(monkeypatch
 
     with pytest.raises(RuntimeError, match="only files up to"):
         await tb.upload_files_via_pyrogram(context.application, 1, 3, ["big.bin"], title="t")
+
+
+BOT_CHECK = (
+    "ERROR: [youtube] abc123: Sign in to confirm you’re not a bot. Use --cookies-from-browser"
+    " or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ"
+)
+
+
+def test_ytdlp_errors_are_explained():
+    reason, fatal = tb.explain_ytdlp_error(BOT_CHECK)
+    assert (
+        fatal and "blocking downloads from this server" in reason and "YTDLP_COOKIES_FILE" in reason
+    )
+
+    reason, fatal = tb.explain_ytdlp_error(
+        "ERROR: [generic] xyz: Requested format is not available. Use --list-formats"
+    )
+    assert not fatal and reason == "Requested format is not available."
+
+
+async def test_blocked_video_shows_the_reason_instead_of_a_picker(monkeypatch):
+    def blocked(url):
+        raise RuntimeError(BOT_CHECK)
+
+    monkeypatch.setattr(tb, "probe_video", blocked)
+    monkeypatch.setattr(tb, "search_ui", None)
+    context = make_context()
+
+    await tb.on_text(text_update(context, "https://youtu.be/blocked"), context)
+    await _drain_background()
+
+    final = context.bot.texts()[-1]
+    assert "Can't download this" in final and "YTDLP_COOKIES_FILE" in final
+    assert "Choose a quality" not in final
+    assert tb.link_requests == {}

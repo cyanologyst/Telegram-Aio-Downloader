@@ -329,8 +329,8 @@ zip_executor = None  # Will be initialized in post_init
 
 
 # Logging
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = Path(os.getenv("LOG_DIR", "").strip() or BASE_DIR / "logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger("telegram_downloader_bot")
 logger.setLevel(logging.INFO)
@@ -2505,6 +2505,38 @@ def probe_video(url: str) -> dict:
 
 QUALITY_STEPS = (1080, 720, 480)
 
+_COOKIE_HINT = (
+    "Set YTDLP_COOKIES_FILE to a cookies.txt exported from a browser that is "
+    "logged in to the site, then try again."
+)
+# (phrase in yt-dlp's error, plain explanation). These fail the same way on retry.
+YTDLP_KNOWN_ERRORS = (
+    (
+        "confirm you're not a bot",
+        "YouTube is blocking downloads from this server's IP address. " + _COOKIE_HINT
+        + " Setting YTDLP_PROXY to a residential proxy also works.",
+    ),
+    ("confirm your age", "This video is age-restricted. " + _COOKIE_HINT),
+    ("age-restricted", "This video is age-restricted. " + _COOKIE_HINT),
+    ("private video", "This video is private. " + _COOKIE_HINT),
+    ("members-only", "This video is for channel members only. " + _COOKIE_HINT),
+    ("video unavailable", "This video is unavailable (removed, blocked or region-locked)."),
+    ("unsupported url", "This link isn't supported by yt-dlp."),
+)
+
+
+def explain_ytdlp_error(error) -> tuple[str, bool]:
+    """A short, readable reason for a yt-dlp error, and whether retrying is pointless."""
+    text = " ".join(str(error).split())
+    normalized = text.replace("\u2019", "'").lower()
+    for phrase, explanation in YTDLP_KNOWN_ERRORS:
+        if phrase in normalized:
+            return explanation, True
+    text = re.sub(r"^ERROR:\s*", "", text)
+    text = re.sub(r"^\[[^\]]+\]\s*[^:\s]+:\s*", "", text)  # "[youtube] abc123: "
+    text = re.split(r"\s(?:Use --|See https?://)", text, maxsplit=1)[0]
+    return text or "Unknown error", False
+
 
 def quality_actions(heights: list[int]) -> list[tuple[str, str]]:
     """Picker buttons: Best (with its height when known), lower standard heights, MP3."""
@@ -2524,6 +2556,17 @@ async def show_quality_picker(message, rid: str, url: str, platform: str):
         info = await asyncio.wait_for(asyncio.to_thread(probe_video, url), timeout=60)
     except Exception as exc:
         logger.info("Quality probe failed for %s: %s", url, exc)
+        reason, fatal = explain_ytdlp_error(exc)
+        if fatal:
+            if link_requests.pop(rid, None) is None:
+                return  # cancelled while we were looking
+            await safe_edit_message(
+                message,
+                f"❌ <b>Can't download this {html.escape(platform)} link</b>\n\n"
+                f"{html.escape(reason)}",
+                parse_mode=ParseMode.HTML,
+            )
+            return
         info = {"title": "", "duration": None, "heights": []}
     if rid not in link_requests:
         return  # cancelled while we were looking
@@ -3147,11 +3190,15 @@ async def start_ytdlp_download(
             if is_cancelled():
                 await finish_cancelled()
                 return
-            logger.exception("yt-dlp download failed")
+            reason, fatal = explain_ytdlp_error(e)
+            if fatal:
+                logger.warning("yt-dlp download failed: %s", e)
+            else:
+                logger.exception("yt-dlp download failed")
 
             job["status"] = "failed"
             job["finished_at"] = now_ts()
-            job["last_line"] = str(e)
+            job["last_line"] = reason
             if notify:
                 await maybe_auto_update_status_message(app, job, force=True)
 

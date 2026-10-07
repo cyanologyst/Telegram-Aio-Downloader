@@ -112,7 +112,7 @@ Common optional settings:
 | Variable | Purpose |
 |---|---|
 | `PYRO_SESSION_NAME` | Pyrogram session used for Telegram uploads |
-| `YTDLP_COOKIES_FILE` | Netscape cookies file for supported authenticated pages |
+| `YTDLP_COOKIES_FILE` | Netscape cookies file; needed when YouTube says "confirm you're not a bot" (common on VPS IPs) and for private or age-restricted videos |
 | `YTDLP_PROXY` | Optional yt-dlp proxy |
 | `DENO_BIN` | Absolute Deno path when required by a provider |
 | `PROWLARR_URL` / `PROWLARR_API_KEY` | Prowlarr torrent search |
