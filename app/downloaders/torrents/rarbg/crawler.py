@@ -223,10 +223,7 @@ class RARBGCrawler:
                 id=torrent_id,
                 name=link.get_text(" ", strip=True),
                 url=urljoin(self.base_url + "/", torrent_id + "/"),
-                category=(
-                    category_cell.get_text(" ", strip=True) if category_cell else "?"
-                )
-                or "?",
+                category=(category_cell.get_text(" ", strip=True) if category_cell else "?") or "?",
                 added=added_cell.get_text(" ", strip=True) if added_cell else "?",
                 size=size_cell.get_text(" ", strip=True) if size_cell else "?",
                 seeders=seeders or "?",
@@ -293,11 +290,14 @@ class RARBGCrawler:
             raw = title_tag.get_text(" ", strip=True) if title_tag else ""
             # therarbg.to titles look like:
             # "Download <name>. Free Torrent from The RarBg"
-            name = re.sub(
-                r"^(?:Download\s+)?(.*?)\.(?:\s*Free Torrent from .*)?$",
-                r"\1",
-                raw,
-            ) or raw
+            name = (
+                re.sub(
+                    r"^(?:Download\s+)?(.*?)\.(?:\s*Free Torrent from .*)?$",
+                    r"\1",
+                    raw,
+                )
+                or raw
+            )
             name = name.strip() or "Unknown"
 
         detail = RARBGResult(

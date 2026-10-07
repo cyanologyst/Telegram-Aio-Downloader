@@ -11,6 +11,21 @@ mypy app
 pytest
 ```
 
+## Testing the bot without Telegram
+
+`tests/fakes.py` provides fake updates, callback queries and a recording bot.
+Handlers can be called directly:
+
+```python
+context = make_context()
+await tb.on_button(callback_update(context, "nav:settings"), context)
+assert context.bot.texts()[-1].startswith("⚙️ <b>Settings</b>")
+```
+
+The fake callback query raises like Telegram does when a query is answered
+twice. `tests/unit/test_wiring.py` runs `main()` with polling stubbed out to
+check that every handler is registered.
+
 ## Refactoring Rules
 
 - Preserve current Telegram behavior while extracting modules.

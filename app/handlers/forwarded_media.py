@@ -1,15 +1,27 @@
 """Pyrogram-native forwarded media downloader.
 
-Uses Pyrogram's MTProto media download path:
+The Pyrogram client is logged in as the owner's personal account, so it sees
+every private chat that account has. Only media the owner forwards *into the
+bot's chat* is downloaded; forwards to friends or anywhere else are ignored.
+
+Status messages are sent by the bot (through ``notify``), never by the
+personal account: a reply from the account would land in the bot chat as a
+new text message and the bot would answer it.
+
+Uses Pyrogram's MTProto media download path, so there is no Bot API size cap:
 - Pyrogram receives the forwarded message via MTProto
 - download_media(message, file_name=...) gets the native file reference
 """
 
+from __future__ import annotations
+
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
@@ -17,6 +29,21 @@ from pyrogram.handlers import MessageHandler
 from app.services.user_settings import get_user_settings
 
 logger = logging.getLogger(__name__)
+
+# notify(user_id, text, message_id) sends a new status message when
+# message_id is None, otherwise edits that message. Returns the message id.
+Notifier = Callable[[int, str, int | None], Awaitable[int | None]]
+
+MEDIA_FILTER = (
+    filters.photo
+    | filters.video
+    | filters.document
+    | filters.audio
+    | filters.voice
+    | filters.animation
+    | filters.video_note
+    | filters.sticker
+)
 
 
 def _human_size(size: int) -> str:
@@ -32,106 +59,130 @@ def _human_size(size: int) -> str:
     return f"{size} B"
 
 
-def setup_pyrogram_forwarded_downloads(client, telegram_dir: str):
-    """Register Pyrogram handlers for forwarded media downloads.
+def bot_id_from_token(bot_token: str) -> int:
+    """A bot's user ID is the numeric prefix of its token."""
+    prefix = (bot_token or "").split(":", 1)[0]
+    if not prefix.isdigit():
+        raise ValueError("BOT_TOKEN does not start with the bot's numeric ID")
+    return int(prefix)
 
-    Args:
-        client: Pyrogram Client instance (already started).
-        telegram_dir: Directory to save downloaded files.
-    """
-    download_dir = Path(telegram_dir)
-    download_dir.mkdir(parents=True, exist_ok=True)
 
-    async def on_forwarded_media(_, message):
-        """Handle forwarded media: determine type, download, confirm."""
+def describe_media(message: Any) -> tuple[str, str] | None:
+    """Return (kind, original file name) for a media message, or None."""
+    if message.photo:
+        return "photo", f"photo_{message.id}.jpg"
+    if message.video:
+        return "video", message.video.file_name or f"video_{message.id}.mp4"
+    if message.document:
+        return "document", message.document.file_name or f"document_{message.id}"
+    if message.audio:
+        return "audio", message.audio.file_name or f"audio_{message.id}.mp3"
+    if message.voice:
+        return "voice", f"voice_{message.id}.ogg"
+    if message.animation:
+        return "animation", message.animation.file_name or f"animation_{message.id}.mp4"
+    if message.video_note:
+        return "video_note", f"video_note_{message.id}.mp4"
+    if message.sticker:
+        if message.sticker.is_animated:
+            ext = "tgs"
+        elif message.sticker.is_video:
+            ext = "webm"
+        else:
+            ext = "webp"
+        return "sticker", f"sticker_{message.id}.{ext}"
+    return None
+
+
+def make_forwarded_media_callback(
+    client: Any,
+    download_dir: Path,
+    notify: Notifier,
+) -> Callable[[Any, Any], Awaitable[None]]:
+    """Build the Pyrogram callback; split out so it can be tested directly."""
+    notified_groups: set[str] = set()
+
+    async def on_forwarded_media(_: Any, message: Any) -> None:
         user_id = message.from_user.id if message.from_user else None
         if not user_id:
             return
 
+        media = describe_media(message)
+        if media is None:
+            return
+        kind, original_name = media
+        if kind == "document" and original_name.lower().endswith(".torrent"):
+            return  # the bot itself starts torrents sent to it
+
         settings = get_user_settings(user_id)
         if not settings.get("auto_download_forwarded_posts", False):
-            logger.info(
-                "Forwarded media ignored because auto-download is disabled for user %s", user_id
+            # One notice per forwarded album, not one per photo in it.
+            group = getattr(message, "media_group_id", None)
+            if group:
+                if group in notified_groups:
+                    return
+                notified_groups.add(group)
+                if len(notified_groups) > 500:
+                    notified_groups.clear()
+            await notify(
+                user_id,
+                "Forwarded media is not downloaded because auto-download is off.\n"
+                "Turn it on in Settings → Forwarded posts, then forward it again.",
+                None,
             )
             return
 
-        kind = "file"
-        original_name = None
-
-        if message.photo:
-            kind = "photo"
-            original_name = f"photo_{message.id}.jpg"
-        elif message.video:
-            kind = "video"
-            original_name = message.video.file_name or f"video_{message.id}.mp4"
-        elif message.document:
-            kind = "document"
-            original_name = message.document.file_name or f"document_{message.id}"
-        elif message.audio:
-            kind = "audio"
-            original_name = message.audio.file_name or f"audio_{message.id}.mp3"
-        elif message.voice:
-            kind = "voice"
-            original_name = f"voice_{message.id}.ogg"
-        elif message.animation:
-            kind = "animation"
-            original_name = message.animation.file_name or f"animation_{message.id}.mp4"
-        elif message.video_note:
-            kind = "video_note"
-            original_name = f"video_note_{message.id}.mp4"
-        elif message.sticker:
-            kind = "sticker"
-            if message.sticker.is_animated:
-                ext = "tgs"
-            elif message.sticker.is_video:
-                ext = "webm"
-            else:
-                ext = "webp"
-            original_name = f"sticker_{message.id}.{ext}"
-        else:
-            # No downloadable media
-            return
-
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         safe_name = re.sub(r'[\\/:\*?"<>|]+', "_", original_name)
-        filename = f"{timestamp}_{safe_name}"
-        target_path = download_dir / filename
+        target_path = download_dir / f"{timestamp}_{safe_name}"
 
+        status_id = await notify(user_id, f"⬇️ Downloading forwarded {kind}...", None)
         try:
-            status = await message.reply("⬇️ Downloading forwarded file...")
             await client.download_media(message, file_name=str(target_path))
 
             if not target_path.exists():
                 raise RuntimeError("Download finished but file not found on disk.")
 
             size = target_path.stat().st_size
-            await status.edit_text(
-                f"✅ Forwarded {kind} downloaded! (via Pyrogram)\n\n"
+            await notify(
+                user_id,
+                f"✅ Forwarded {kind} downloaded\n\n"
                 f"📁 Folder: Telegram\n"
                 f"📄 File: {target_path.name}\n"
-                f"📊 Size: {_human_size(size)}"
+                f"📊 Size: {_human_size(size)}",
+                status_id,
             )
         except Exception as exc:
             logger.error("Forwarded media download failed: %s", exc)
             if target_path.exists():
                 with suppress(Exception):
                     target_path.unlink()
-            await message.reply(f"❌ Failed to download forwarded media: {exc}")
+            await notify(user_id, f"❌ Failed to download forwarded {kind}: {exc}", status_id)
+
+    return on_forwarded_media
+
+
+def setup_pyrogram_forwarded_downloads(
+    client: Any,
+    telegram_dir: str,
+    *,
+    bot_id: int,
+    notify: Notifier,
+) -> None:
+    """Register the Pyrogram handler for media forwarded into the bot chat.
+
+    Args:
+        client: Pyrogram Client instance (already started), logged in as the owner.
+        telegram_dir: Directory to save downloaded files.
+        bot_id: The bot's user ID; only the owner's chat with the bot is watched.
+        notify: Sends or edits status messages as the bot.
+    """
+    download_dir = Path(telegram_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
 
     handler = MessageHandler(
-        on_forwarded_media,
-        filters.private
-        & filters.forwarded
-        & (
-            filters.photo
-            | filters.video
-            | filters.document
-            | filters.audio
-            | filters.voice
-            | filters.animation
-            | filters.video_note
-            | filters.sticker
-        ),
+        make_forwarded_media_callback(client, download_dir, notify),
+        filters.chat(bot_id) & filters.outgoing & filters.forwarded & MEDIA_FILTER,
     )
     client.add_handler(handler)
-    logger.info("Pyrogram forwarded-media handler registered")
+    logger.info("Pyrogram forwarded-media handler registered for bot chat %s", bot_id)

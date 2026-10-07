@@ -1,10 +1,13 @@
 python-telegram-bot>=20.0
-pyrogram>=2.0
+# Maintained drop-in fork of Pyrogram (archived Dec 2024); still imported as `pyrogram`.
+kurigram>=2.2.26
 tgcrypto
 yt-dlp[default]
 curl-cffi>=0.10.0
 hanime-plugin==2026.5.10
 spotdl
+# Image/gallery sites nothing else handles (Pixiv, boorus, Imgur, Reddit, ...)
+gallery-dl>=1.30
 Pillow
 pyzipper
 py7zr

@@ -69,11 +69,11 @@ ask_yes_no() {
 ask_user_ids() {
   local value sanitized chunk
   while true; do
-    value="$(ask "Allowed Telegram numeric user IDs, comma-separated. Do NOT paste bot token. Leave empty to allow all" "")"
+    value="$(ask "Your Telegram numeric user ID (comma-separate extra IDs). Message @userinfobot to find it. Do NOT paste bot token" "")"
     value="${value// /}"
     if [[ -z "${value}" ]]; then
-      printf ''
-      return
+      log "At least one user ID is required; the bot refuses to start without it."
+      continue
     fi
 
     sanitized=""
@@ -197,6 +197,11 @@ create_venv() {
 
 install_python_requirements() {
   log "Installing Python requirements"
+  # Kurigram replaces the archived Pyrogram and installs into the same
+  # `pyrogram` package directory, so the old package must go first.
+  if pip show pyrogram >/dev/null 2>&1; then
+    pip uninstall -y pyrogram
+  fi
   pip install -r "${PROJECT_ROOT}/requirements.txt"
 }
 
@@ -341,7 +346,7 @@ EOF
 
     cat <<'EOF'
 
-# Security: comma-separated Telegram user IDs. Empty means allow all users.
+# Required: comma-separated numeric Telegram user IDs allowed to use the bot.
 EOF
     write_env_line "ALLOWED_USER_IDS" "${allowed_user_ids}"
 

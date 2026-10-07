@@ -14,11 +14,14 @@ Usage:
     python thumbnail_grid.py input_video.mp4 output.jpg
 """
 
+import logging
 import sys
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+logger = logging.getLogger(__name__)
 
 # =========================
 # CONFIG
@@ -108,7 +111,7 @@ def generate_contact_sheet(video_path, output_path):
     video = cv2.VideoCapture(video_path)
 
     if not video.isOpened():
-        print("Error: Could not open video.")
+        logger.warning("Could not open video: %s", video_path)
         return
 
     fps = video.get(cv2.CAP_PROP_FPS)
@@ -116,7 +119,7 @@ def generate_contact_sheet(video_path, output_path):
 
     duration = frame_count / fps
 
-    print(f"Video duration: {duration:.2f} seconds")
+    logger.debug("Video duration: %.2f seconds", duration)
 
     # Canvas size
     sheet_width = COLUMNS * THUMB_WIDTH + (COLUMNS + 1) * PADDING
@@ -129,7 +132,7 @@ def generate_contact_sheet(video_path, output_path):
     timestamps = np.linspace(0, duration, TOTAL_FRAMES + 2)[1:-1]
 
     for idx, ts in enumerate(timestamps):
-        print(f"Processing thumbnail {idx + 1}/{TOTAL_FRAMES}")
+        logger.debug("Processing thumbnail %d/%d", idx + 1, TOTAL_FRAMES)
 
         frame = extract_frame(video, ts)
 
@@ -153,7 +156,7 @@ def generate_contact_sheet(video_path, output_path):
 
     video.release()
 
-    print(f"\nSaved thumbnail sheet to: {output_path}")
+    logger.debug("Saved thumbnail sheet to %s", output_path)
 
 
 if __name__ == "__main__":

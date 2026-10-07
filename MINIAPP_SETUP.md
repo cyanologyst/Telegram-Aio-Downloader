@@ -83,7 +83,7 @@ In Telegram:
 
 **Issue**: API returns `403 Forbidden`
 - Cause: Your Telegram user ID is not in `ALLOWED_USER_IDS`.
-- Solution: Add your ID, or clear `ALLOWED_USER_IDS` to allow any signed user.
+- Solution: Add your numeric user ID to `ALLOWED_USER_IDS` and restart the bot.
 
 ## Security
 

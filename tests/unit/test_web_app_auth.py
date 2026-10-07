@@ -77,8 +77,12 @@ def test_allowed_user_ids_are_enforced(tmp_path):
     app.config["TESTING"] = True
     client = app.test_client()
 
-    assert client.get("/api/files", headers={"X-Init-Data": build_init_data(4242)}).status_code == 403
-    assert client.get("/api/files", headers={"X-Init-Data": build_init_data(999)}).status_code == 200
+    assert (
+        client.get("/api/files", headers={"X-Init-Data": build_init_data(4242)}).status_code == 403
+    )
+    assert (
+        client.get("/api/files", headers={"X-Init-Data": build_init_data(999)}).status_code == 200
+    )
 
 
 def test_identity_ignores_caller_supplied_ids(client, monkeypatch):
