@@ -94,13 +94,15 @@ Required values in `.env`:
 BOT_TOKEN=
 API_ID=
 API_HASH=
+ALLOWED_USER_IDS=123456789
 ```
+
+`ALLOWED_USER_IDS` is your numeric Telegram user ID (message @userinfobot to find it). The bot refuses to start without it, and silently ignores everyone else.
 
 Common optional settings:
 
 | Variable | Purpose |
 |---|---|
-| `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs |
 | `PYRO_SESSION_NAME` | Pyrogram session used for Telegram uploads |
 | `YTDLP_COOKIES_FILE` | Netscape cookies file for supported authenticated pages |
 | `YTDLP_PROXY` | Optional yt-dlp proxy |

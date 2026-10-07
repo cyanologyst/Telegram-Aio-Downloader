@@ -65,10 +65,12 @@ from telegram import (
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 from telegram.request import HTTPXRequest
@@ -740,9 +742,24 @@ def get_lang_for_all(key: str, lang: str = DEFAULT_LANGUAGE) -> str:
 
 
 def is_authorized_user(user_id: int) -> bool:
-    if not ALLOWED_USER_IDS:
-        return True
+    # main() refuses to start with an empty allow-list, so an empty set here
+    # means "nobody", never "everybody".
     return user_id in ALLOWED_USER_IDS
+
+
+async def authorization_gate(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Drop every update that does not come from an allowed user.
+
+    Registered in handler group -1 so it runs before any command, message or
+    button handler. Unauthorized users are ignored silently: replying would
+    only confirm the bot exists.
+    """
+    user = getattr(update, "effective_user", None)
+    if user is not None and is_authorized_user(user.id):
+        return
+    if user is not None:
+        logger.warning("Ignored update from unauthorized user %s", user.id)
+    raise ApplicationHandlerStop
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -7327,6 +7344,12 @@ def main():
         raise RuntimeError("BOT_TOKEN missing")
     if not API_ID or not API_HASH:
         raise RuntimeError("API_ID or API_HASH missing")
+    if not ALLOWED_USER_IDS:
+        raise RuntimeError(
+            "ALLOWED_USER_IDS is empty. Set it in .env to your numeric Telegram user ID "
+            "(message @userinfobot to find it). The bot refuses to start without it "
+            "because anyone could otherwise control your server's downloads and files."
+        )
 
     # Configure HTTP request with proper timeouts
     request = HTTPXRequest(
@@ -7370,6 +7393,9 @@ def main():
             )
         except Exception as exc:
             logger.warning("Unable to start web dashboard: %s", exc)
+
+    # Runs before every other handler and stops updates from unknown users.
+    app.add_handler(TypeHandler(Update, authorization_gate), group=-1)
 
     # Core commands
     app.add_handler(CommandHandler("start", start_cmd))
