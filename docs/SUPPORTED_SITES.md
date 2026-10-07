@@ -19,6 +19,8 @@ These providers use `yt-dlp` and support video downloads plus audio extraction w
 
 Many additional sites supported natively by `yt-dlp` may work through the same downloader even when they are not listed here.
 
+When you send a video link the bot shows its title and length and offers **Best**, lower resolution caps (only those the video actually has) and **MP3**. Settings → *Video links* can skip the question with a default quality.
+
 ## Spotify
 
 Spotify downloads use `spotDL`.
@@ -101,6 +103,20 @@ These routes use `yt-dlp` with `hanime-plugin==2026.5.10`. Hanime also requires 
 
 Downloaded galleries can be converted to PDF manually or automatically.
 
+## Image Galleries (gallery-dl)
+
+Links that none of the other downloaders handle are offered to [gallery-dl](https://github.com/mikf/gallery-dl) when it recognises the site. Files go to `Download/Gallery/<site>/`.
+
+| Site | Notes |
+|---|---|
+| Pixiv | Public works; cookies for restricted ones |
+| Danbooru, Gelbooru and other boorus | Posts and searches |
+| Imgur | Albums and images |
+| Reddit | Image posts and galleries (video posts use yt-dlp) |
+| DeviantArt, Kemono, Bluesky, … | See gallery-dl's [supported sites list](https://github.com/mikf/gallery-dl/blob/master/docs/supportedsites.md) |
+
+The `YTDLP_COOKIES_FILE` and `YTDLP_PROXY` settings are passed to gallery-dl too.
+
 ## Torrents and Direct Downloads
 
 | Provider or Input | Supported | Notes |
@@ -108,9 +124,11 @@ Downloaded galleries can be converted to PDF manually or automatically.
 | Magnet links | Yes | aria2 download with live status |
 | `.torrent` files | Yes | Includes file selection |
 | Direct HTTP/HTTPS files | Yes | Resume support through aria2 |
-| The Pirate Bay / API Bay | Yes | Configurable `TPB_API_URL` |
-| RARBG-style mirrors | Yes | Configurable `RARBG_BASE_URL` |
-| Prowlarr | Yes | Searches configured Prowlarr indexers |
+| The Pirate Bay / API Bay | Yes | 🔍 Search; configurable `TPB_API_URL` |
+| RARBG-style mirrors | Yes | 🔍 Search; configurable `RARBG_BASE_URL` |
+| Prowlarr | Yes | 🔍 Search across your Prowlarr indexers; *Choose files* for `.torrent` results |
+
+Torrent and direct downloads survive a bot restart: the job list is saved and running aria2 downloads are picked up again.
 
 ## Batch Behavior
 

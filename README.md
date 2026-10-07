@@ -13,12 +13,17 @@ An asynchronous Telegram bot and Mini App for downloading, organizing, processin
 - YouTube and social-media video or audio downloads through `yt-dlp`
 - Spotify tracks, albums, playlists, artists, shows, and episodes through `spotDL`
 - Manga and image-gallery downloads with optional PDF conversion
+- Hundreds of image sites (Pixiv, boorus, Imgur, Reddit galleries, …) through `gallery-dl`
 - ZIP and 7Z creation, password protection, and volume splitting
 - Upload files and folders to Telegram Saved Messages through Pyrogram
 - Sequential batch processing with download-only or upload-and-delete modes
-- Live progress, speed, ETA, cancellation, storage, and file-management controls
+- One live card per download: progress, speed and ETA, Pause/Cancel, then Upload / Open / Delete or Retry
+- Video quality picker (Best, 1080p/720p/480p caps, MP3) or a default quality
+- Optional automatic upload to Saved Messages when a download finishes
+- Unified torrent search across Prowlarr, The Pirate Bay and RARBG mirrors
+- Compact file browser with multi-select upload, zip and delete
+- The job list survives restarts; torrent and direct downloads resume
 - Telegram Mini App for downloads, files, storage, uploads, archives, and settings
-- TPB, RARBG-style, and Prowlarr torrent search integrations
 
 See [Supported Sites](docs/SUPPORTED_SITES.md) for the complete provider list and current limitations.
 
@@ -43,6 +48,7 @@ See [Supported Sites](docs/SUPPORTED_SITES.md) for the complete provider list an
 | YouTube or supported social-media URL | yt-dlp video/audio downloader |
 | Spotify URL | spotDL audio downloader |
 | Manga or gallery URL | Gallery downloader |
+| Other image/gallery site URL | `gallery-dl` (when it recognises the site) |
 | Supported playlist or profile URL | Sequential batch downloader |
 
 ## Quick Start
@@ -113,6 +119,12 @@ Common optional settings:
 | `SUPPORTED_SITES_URL` | URL opened by the bot's Supported Sites button |
 
 See [.env.example](.env.example) for all available settings.
+
+## Using the Bot
+
+- **Send a link** (magnet, `.torrent` file, direct file, video, Spotify, manga or gallery) to start a download. Each download gets its own card with live progress.
+- The keyboard has **📊 Status**, **📁 Files**, **🔍 Search**, **⚙️ Settings**, **🏠 Menu** and **❓ Help**.
+- `/cancel` stops whatever the bot is waiting for you to type. The `/` menu lists every command.
 
 ## Updating
 
