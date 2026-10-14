@@ -15,11 +15,12 @@ An asynchronous Telegram bot and Mini App for downloading, organizing, processin
 - Manga and image-gallery downloads with optional PDF conversion
 - Hundreds of image sites (Pixiv, boorus, Imgur, Reddit galleries, …) through `gallery-dl`
 - ZIP and 7Z creation, password protection, and volume splitting
-- Upload files and folders to Telegram Saved Messages through Pyrogram
+- Upload files and folders to Telegram Saved Messages through Pyrogram, or to a channel/group you choose in Settings
 - Sequential batch processing with download-only or upload-and-delete modes
 - One live card per download: progress, speed and ETA, Pause/Cancel, then Upload / Open / Delete or Retry
 - Video quality picker (Best, 1080p/720p/480p caps, MP3, GIF) or a default quality
 - GIFs come back as GIFs: short silent clips (X/Twitter and Reddit GIFs, Imgur, …) are sent to the chat as Telegram GIFs
+- GIF previews: one tap on a finished video's card (or its file card) sends ONE preview video made of 10 six-second clips spread across the video, captioned with each clip's timestamp; auto-uploaded videos get it automatically in the same chat as the upload
 - Optional [cobalt](https://github.com/imputnet/cobalt) instance as a second engine when yt-dlp fails
 - Cookies (for YouTube's "confirm you're not a bot", private or age-restricted videos) can be sent to the bot as a file
 - Optional automatic upload to Saved Messages when a download finishes
@@ -107,6 +108,10 @@ ALLOWED_USER_IDS=123456789
 ```
 
 `API_ID`/`API_HASH` and a one-time Pyrogram login (the first `python main.py` in a terminal asks for your phone number and code) let the bot upload files of any size to your Saved Messages. Without them it runs in bot-only mode: files up to 50 MB are sent to the chat, and forwarded-media capture is off.
+
+**Upload to a channel or group.** In **⚙️ Settings → 📍 Upload to**, tap *Set upload target* and send `@channelname`, a `t.me/…` link or a numeric id like `-1001234567890` (or forward a text post from it). The bot checks that your account can post there — an admin with "post messages" in a channel, or a member of a group — and then every upload (Upload buttons, "Upload when done", playlist upload-and-delete) goes there instead of Saved Messages. Files over 2 GB are still split into parts. In bot-only mode the bot itself must be an admin there, and files are limited to 50 MB. *Reset to Saved Messages* undoes it. GIFs and "Send here" still come to the bot chat.
+
+**GIF previews.** A finished video's card and the video's file card have a **🎞 GIF previews (10×6s)** button. It cuts 10 six-second clips evenly spread over the video (480 px, 12 fps, silent) and joins them in timeline order into one video, `Preview - <name>.mp4`, captioned `Preview - <name>` with a chapter line per clip like `Preview 3/10 @ 12:34`. After an automatic upload the preview is posted right after the video, in the same chat (Saved Messages or the upload channel/group). If ffmpeg can't join the clips they go out as one album instead. Videos shorter than a minute get fewer clips; needs `ffmpeg` and `ffprobe`.
 
 `ALLOWED_USER_IDS` is your numeric Telegram user ID (message @userinfobot to find it). The bot refuses to start without it, and silently ignores everyone else.
 

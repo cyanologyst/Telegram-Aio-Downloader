@@ -12,6 +12,10 @@ swallowed as searches.
 Without the bot's username (deep links need it) results fall back to numbered
 buttons and a details screen.
 
+Results are sorted (seeders, size, date or name, either direction) by the
+two sort buttons; the choice is saved per user (``search_sort`` setting).
+For sources that page (RARBG mirror) the sort covers the results loaded so far.
+
 Callback data is ``srch:<action>[:<sid>[:<arg>...]]``. ``sid`` identifies the
 search the buttons belong to, so buttons on an old results message say so
 instead of acting on a newer search.
@@ -32,7 +36,18 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 from app.bot.callbacks import answer_once, auto_answer
-from app.services.torrent_search import SearchProvider, fetch_until
+from app.services.torrent_search import (
+    SORT_DIRECTIONS,
+    SORT_FIELDS,
+    SearchProvider,
+    fetch_until,
+    flip_sort_direction,
+    next_sort_field,
+    parse_sort,
+    sort_items,
+    sort_label,
+)
+from app.services.user_settings import get_user_settings, update_setting
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +89,27 @@ def _stats_line(item: dict[str, Any]) -> str:
 
 def _link(url: str, text: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{text}</a>'
+
+
+def _sort_row(session: dict[str, Any]) -> list[InlineKeyboardButton]:
+    """Criterion (tap: next one) and direction (tap: flip) for the results screen."""
+    sid = session["sid"]
+    field_name, direction = parse_sort(session.get("sort"))
+    return [
+        InlineKeyboardButton(
+            f"Sort: {SORT_FIELDS[field_name][0]}",
+            callback_data=f"srch:so:{sid}:{next_sort_field(session.get('sort'))}",
+        ),
+        InlineKeyboardButton(
+            SORT_DIRECTIONS[field_name][direction],
+            callback_data=f"srch:so:{sid}:{flip_sort_direction(session.get('sort'))}",
+        ),
+    ]
+
+
+def _user_id(update: Any) -> int:
+    user = getattr(update, "effective_user", None)
+    return int(getattr(user, "id", 0) or 0)
 
 
 class SearchUI:
@@ -198,7 +234,8 @@ class SearchUI:
         more = "+" if not session["exhausted"] else ""
         lines = [
             header,
-            f"Results {start + 1}–{start + len(shown)} of {len(items)}{more}",
+            f"Results {start + 1}–{start + len(shown)} of {len(items)}{more}"
+            f" · {sort_label(session.get('sort'))}",
             "",
         ]
         for offset, item in enumerate(shown):
@@ -220,6 +257,7 @@ class SearchUI:
             nav.append(InlineKeyboardButton("Next ▶", callback_data=f"srch:pg:{sid}:{page + 1}"))
         if nav:
             rows.append(nav)
+        rows.append(_sort_row(session))
         rows.append(
             [
                 InlineKeyboardButton("🏷 Category", callback_data=f"srch:cat:{sid}"),
@@ -261,8 +299,8 @@ class SearchUI:
         last_page = start + LINK_PER_PAGE >= len(items) and session["exhausted"]
         lines = [
             f"🔍 <b>Found {len(items)}{more} results for “{_e(_short(session['query'], 60))}”</b>",
-            f"{_e(provider.label)} · {_e(category_label)} · page {page + 1}"
-            + (" (last)" if last_page and page else ""),
+            f"{_e(provider.label)} · {_e(category_label)} · {sort_label(session.get('sort'))}"
+            f" · page {page + 1}" + (" (last)" if last_page and page else ""),
             "<blockquote expandable>" + "\n\n".join(entries) + "</blockquote>",
             "Tap ⬇️ Download to start one; titles open the site.",
         ]
@@ -277,6 +315,7 @@ class SearchUI:
             )
         if nav:
             rows.append(nav)
+        rows.append(_sort_row(session))
         rows.append(
             [
                 InlineKeyboardButton("🏷 Category", callback_data=f"srch:cat:{sid}"),
@@ -382,6 +421,7 @@ class SearchUI:
             "next_page": 0,
             "exhausted": False,
             "page": 0,
+            "sort": ":".join(parse_sort(get_user_settings(_user_id(update)).get("search_sort"))),
         }
         context.user_data[SESSION_KEY] = session
         message = await update.message.reply_text(
@@ -414,6 +454,7 @@ class SearchUI:
             return
         if context is not None and context.user_data.get(SESSION_KEY) is not session:
             return  # superseded while fetching; the newer search draws the screen
+        sort_items(session["items"], session.get("sort"))
         max_page = max(0, (len(session["items"]) - 1) // self.per_page)
         session["page"] = min(session["page"], max_page)
         await self._show(message, *self._results(session))
@@ -461,6 +502,15 @@ class SearchUI:
             await answer_once(query)
             session["page"] = max(0, int(parts[3]))
             await self._run_search(message, session, context)
+        elif action == "so":
+            await answer_once(query)
+            session["sort"] = ":".join(parse_sort(":".join(parts[3:5])))
+            session["page"] = 0
+            sort_items(session["items"], session["sort"])
+            user_id = _user_id(update)
+            if user_id:
+                await update_setting(user_id, "search_sort", session["sort"])
+            await self._show(message, *self._results(session))
         elif action == "back":
             await self._show(message, *self._results(session))
         elif action == "cat":

@@ -6,13 +6,13 @@
 # Runtime data
 Download/
 logs/
+*.log
 .cloudflared.log
 zip_settings/
-*.session
-*.session-journal
+*.session*
 
 # Python
-.venv/
+.venv*/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -33,3 +33,6 @@ Thumbs.db
 
 # Saved job list (SQLite)
 data/
+
+# Local services
+.prowlarr/

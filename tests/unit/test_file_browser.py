@@ -20,6 +20,8 @@ def download_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(tb, "batch_select_sessions", {})
     monkeypatch.setattr(tb, "pending_zip_name_sessions", {})
     monkeypatch.setattr(tb, "search_ui", None)
+    # A real Pyrogram session file in the project dir must not leak into tests.
+    monkeypatch.setattr(tb, "pyrogram_unavailable_reason", lambda: "no Pyrogram login in tests")
     return root
 
 

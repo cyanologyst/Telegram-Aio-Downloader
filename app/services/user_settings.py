@@ -5,6 +5,7 @@ Zip Settings Manager - Handles user preferences for zipping operations
 import asyncio
 import json
 import os
+import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -31,9 +32,23 @@ DEFAULT_SETTINGS = {
     "video_default": "ask",
     # Upload finished downloads to Saved Messages automatically.
     "auto_upload_after_download": False,
+    # Which files automatic uploads keep (see app.services.upload_filter); the rest are deleted.
+    "auto_upload_types": "all",
     # Send short silent clips and GIFs from finished downloads to the bot chat as GIFs.
     "send_gifs_to_chat": True,
+    # Follow each automatically uploaded video with its merged GIF preview.
+    "send_previews_after_upload": True,
+    # Downloads running at once (1-8); the rest wait in the bot's queue.
+    "max_concurrent_downloads": 8,
+    # Channel or group that uploads go to; None means Saved Messages.
+    "target_chat_id": None,
+    "target_chat_title": "",
     "compression_level": 3,  # 1-9, reduced from 5 for better responsiveness
+    # Compress (H.265) button: x265/x264 quality (lower is better and bigger) and speed.
+    "compress_crf": 28,
+    "compress_preset": "medium",
+    # Torrent search result order: "<seeders|size|date|name>:<asc|desc>".
+    "search_sort": "seeders:desc",
 }
 
 # Per-user locks to prevent concurrent settings updates
@@ -141,6 +156,35 @@ def format_settings_text(user_id: int) -> str:
         lines.append("⚠️ Note: 7z level 7+ is CPU-intensive, bot may be slower")
 
     return "\n".join(lines)
+
+
+def upload_target(settings: dict[str, Any]) -> int | str:
+    """Where uploads go: the saved chat id, or "me" (Saved Messages)."""
+    target = settings.get("target_chat_id")
+    return target if isinstance(target, int) and target else "me"
+
+
+def upload_target_label(settings: dict[str, Any]) -> str:
+    if upload_target(settings) == "me":
+        return "Saved Messages"
+    return settings.get("target_chat_title") or str(settings["target_chat_id"])
+
+
+_USERNAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{3,31}")
+
+
+def parse_chat_ref(text: str) -> int | str | None:
+    """A chat id or @username from what the user typed, or None.
+
+    Accepts ``-1001234567890``, ``@name``, ``name`` and ``https://t.me/name``.
+    """
+    text = (text or "").strip()
+    if re.fullmatch(r"-?\d{5,20}", text):
+        return int(text)
+    match = re.fullmatch(r"(?:https?://)?(?:t\.me|telegram\.me)/([^/?#\s]+)/?", text)
+    name = match.group(1) if match else text
+    name = name.removeprefix("@")
+    return f"@{name}" if _USERNAME.fullmatch(name) else None
 
 
 def validate_part_size(size_mb: int) -> bool:

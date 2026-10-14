@@ -14,8 +14,32 @@ from pathlib import Path
 from typing import Any, cast
 
 
+# Extra trackers added to every torrent (on top of the magnet's own) so magnets
+# with few or dead trackers still find peers. Our host drops outbound UDP to any
+# port but 80 and can't reach DHT bootstrap nodes, so the UDP-port-80 and
+# HTTP(S) trackers come first; those four answered from it. The rest help on
+# hosts without that filter.
+DEFAULT_BT_TRACKERS = (
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.dler.org:80/announce",
+    "https://tracker.pmman.tech:443/announce",
+    "http://tracker.renfei.net:8080/announce",
+    "udp://tracker.bittor.pw:1337/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://tracker.qu.ax:6969/announce",
+    "udp://tracker.opentrackr.org:1337/announce",
+    "http://tracker.opentrackr.org:1337/announce",
+)
+
+
 class Aria2RpcError(RuntimeError):
     """Raised when aria2 RPC returns an error response."""
+
+
+class Aria2ConnectionError(Aria2RpcError):
+    """Raised when aria2 can't be reached at all (e.g. it is restarting)."""
 
 
 @dataclass(slots=True)
@@ -29,6 +53,9 @@ class Aria2DaemonConfig:
     rpc_secret: str = ""
     session_file: Path | None = None
     secret_file: Path | None = None
+    # Fixed BitTorrent ports (TCP peers / UDP DHT) so firewall rules can target them.
+    listen_port: int = 6881
+    dht_listen_port: int = 6881
 
     @property
     def rpc_url(self) -> str:
@@ -108,11 +135,23 @@ class Aria2RpcClient:
                 f"--rpc-secret={self._secret}",
                 "--rpc-allow-origin-all=false",
                 "--seed-time=0",
+                f"--listen-port={self.config.listen_port}",
+                f"--dht-listen-port={self.config.dht_listen_port}",
+                "--enable-dht=true",
+                "--enable-dht6=true",
+                "--dht-listen-addr6=::",
+                "--enable-peer-exchange=true",
+                "--bt-enable-lpd=true",
+                f"--bt-tracker={','.join(DEFAULT_BT_TRACKERS)}",
                 f"--dir={self.config.download_dir}",
                 "--bt-save-metadata=true",
                 "--bt-metadata-only=false",
                 "--follow-torrent=true",
                 "--continue=true",
+                # aria2 deletes a torrent's .aria2 control file once it finishes,
+                # so after a restart a finished file would fail with errorCode 13
+                # ("file exists, but a control file does not"). Hash-check it instead.
+                "--check-integrity=true",
                 "--max-concurrent-downloads=8",
                 "--auto-file-renaming=false",
                 "--summary-interval=0",
@@ -184,8 +223,10 @@ class Aria2RpcClient:
             try:
                 with urllib.request.urlopen(request, timeout=10) as response:
                     body = response.read().decode("utf-8")
-            except urllib.error.URLError as exc:
+            except urllib.error.HTTPError as exc:
                 raise Aria2RpcError(str(exc)) from exc
+            except urllib.error.URLError as exc:
+                raise Aria2ConnectionError(str(exc)) from exc
 
             decoded = json.loads(body)
             if "error" in decoded:

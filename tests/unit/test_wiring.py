@@ -21,6 +21,9 @@ def built_app(monkeypatch):
     monkeypatch.setattr(tb, "WEB_APP_ENABLE", False)
     monkeypatch.setattr(tb, "WEB_DASHBOARD_ENABLE", False)
     monkeypatch.setattr(tb, "search_ui", None)  # main() sets it; restore afterwards
+    # The real data/bot.lock is held by a running bot, and flock refuses a
+    # second lock even from this same process.
+    monkeypatch.setattr(tb, "acquire_instance_lock", lambda: None)
     tb.main()
     return captured["app"]
 

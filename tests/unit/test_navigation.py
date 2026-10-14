@@ -33,7 +33,7 @@ def test_every_screen_has_a_way_home():
     s = user_settings.DEFAULT_SETTINGS
     screens = [
         home_views.help_screen("https://example.test"),
-        home_views.sites_screen("https://example.test"),
+        home_views.sites_screen(["§ Videos", "YouTube"], 0, 1, 1),
         settings_views.settings_screen(s),
         settings_views.archive_settings_screen(s),
         settings_views.archive_choice_screen("x", [("a", "zip_set_value:zip_method:zip")], "nav:x"),
@@ -84,7 +84,7 @@ async def test_settings_toggle_saves_and_redraws():
     saved = user_settings.get_user_settings(1)
     assert saved["auto_upload_after_download"] is True
     assert saved["video_default"] == "best"
-    assert "Upload to Saved Messages when done: On" in context.bot.texts()[-1]
+    assert "Upload when done: On" in context.bot.texts()[-1]
 
 
 async def test_archive_settings_back_returns_where_you_came_from():

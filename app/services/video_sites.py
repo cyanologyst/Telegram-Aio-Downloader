@@ -27,12 +27,16 @@ ADULT_VIDEO_SITES: dict[str, str] = {
     "hellporno.com": "HellPorno",
     "hellporno.net": "HellPorno",
     "hqporner.com": "HQPorner",
+    "javcc.me": "JAVCC",
     "javhdporn.net": "JavHDPorn",
     "javtiful.com": "Javtiful",
     "lovehomeporn.com": "LoveHomePorn",
+    "missav.ai": "MissAV",
     "missav.com": "MissAV",
+    "missav.io": "MissAV",
     "missav.live": "MissAV",
     "missav.ws": "MissAV",
+    "missav01.com": "MissAV",
     "missav123.com": "MissAV",
     "motherless.com": "Motherless",
     "njavtv.com": "NJAV",
@@ -63,6 +67,12 @@ YTDLP_GENERIC_IMPERSONATION_SITES: frozenset[str] = frozenset(
     {
         "javhdporn.net",
     }
+)
+
+# Sites whose resolved stream CDN (e.g. MissAV's surrit.com) rejects yt-dlp's
+# default HTTP client, so every request must impersonate a browser.
+YTDLP_IMPERSONATION_SITES: frozenset[str] = frozenset(
+    domain for domain, label in ADULT_VIDEO_SITES.items() if label in {"MissAV", "NJAV"}
 )
 
 HENTAI_VIDEO_SITES: dict[str, str] = {
@@ -126,6 +136,15 @@ def requires_ytdlp_generic_impersonation(url: str) -> bool:
         return False
     host = _host(url)
     return any(_matches_domain(host, domain) for domain in YTDLP_GENERIC_IMPERSONATION_SITES)
+
+
+def requires_ytdlp_impersonation(url: str) -> bool:
+    """Return whether every yt-dlp request (including HLS fragments) should impersonate."""
+
+    if not url.lower().startswith(("http://", "https://")):
+        return False
+    host = _host(url)
+    return any(_matches_domain(host, domain) for domain in YTDLP_IMPERSONATION_SITES)
 
 
 def video_platform_label(url: str) -> str:

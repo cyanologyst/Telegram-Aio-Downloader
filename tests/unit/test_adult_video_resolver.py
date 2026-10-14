@@ -1,16 +1,13 @@
-import pytest
-
 from app.services import adult_video_resolver
 from app.services.adult_video_resolver import (
     ResolvedAdultVideo,
-    _decode_packed_javascript,
     _media_urls,
     _resolve_generic_adult_media_url,
     _resolve_javtiful_url,
-    _resolve_missav_like_url,
     resolve_adult_video_url,
     resolved_video_output_template,
 )
+from app.services.packed_js import decode_packed_javascript
 
 
 def test_decode_packed_javascript_extracts_playlist_url():
@@ -23,30 +20,12 @@ def test_decode_packed_javascript_extracts_playlist_url():
         </script>
     """
 
-    assert _decode_packed_javascript(html) == ('source="https://cdn.example/playlist.m3u8"',)
+    assert decode_packed_javascript(html) == ('source="https://cdn.example/playlist.m3u8"',)
 
 
 def test_media_urls_normalize_escaped_urls():
     assert _media_urls(r'"https:\/\/cdn.example\/video.mp4?token=a\u0026expires=1"') == (
         "https://cdn.example/video.mp4?token=a&expires=1",
-    )
-
-
-def test_resolve_missav_like_url_prefers_playlist(monkeypatch):
-    html = """
-        <script>
-        eval(function(p,a,c,k,e,d){}(
-            '0="1://2.3/4.5"',10,6,
-            'source|https|cdn|example|playlist|m3u8'.split('|'),0,{}
-        ))
-        </script>
-    """
-
-    monkeypatch.setattr(adult_video_resolver, "_fetch_page", lambda url, timeout: html)
-
-    assert (
-        _resolve_missav_like_url("https://missav.ws/en/example", timeout=1)
-        == "https://cdn.example/playlist.m3u8"
     )
 
 
@@ -131,13 +110,13 @@ def test_resolve_adult_video_url_returns_referer_for_generic_jav_site(monkeypatc
 def test_resolve_adult_video_url_routes_missav_mirrors(monkeypatch):
     monkeypatch.setattr(
         adult_video_resolver,
-        "_resolve_missav_like_url",
-        lambda url, timeout: "https://cdn.example/playlist.m3u8",
+        "resolve_missav_video",
+        lambda url, timeout: ("https://cdn.example/playlist.m3u8", "https://missav123.com/en/example"),
     )
 
     assert resolve_adult_video_url("https://missav.live/en/example") == ResolvedAdultVideo(
         "https://cdn.example/playlist.m3u8",
-        referer="https://missav.live/en/example",
+        referer="https://missav123.com/en/example",
     )
 
 
@@ -158,9 +137,3 @@ def test_resolved_video_output_template_avoids_signed_url_ids(tmp_path):
     assert "X-Amz" not in template
     assert len(template) < len(str(tmp_path)) + 200
 
-
-def test_resolve_missav_like_url_raises_when_page_has_no_media(monkeypatch):
-    monkeypatch.setattr(adult_video_resolver, "_fetch_page", lambda url, timeout: "<html></html>")
-
-    with pytest.raises(RuntimeError, match="Could not resolve"):
-        _resolve_missav_like_url("https://missav.ws/en/example", timeout=1)

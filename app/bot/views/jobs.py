@@ -44,6 +44,17 @@ STATE_LINES = {
     "processing": "Finishing up…",
     "paused": "⏸ Paused",
 }
+# Shown instead of the state line when a torrent has had no peers and no data
+# for several minutes (see ``unreachable`` in _apply_aria2_status).
+UNREACHABLE_LINE = "⚠️ Can't reach any trackers or peers (outbound ports blocked?)"
+
+
+def _state_line(job: dict[str, Any]) -> str | None:
+    if job.get("unreachable"):
+        return UNREACHABLE_LINE
+    if job.get("status") == "queued" and job.get("queue_position"):
+        return f"Queued (position {job['queue_position']})"
+    return STATE_LINES.get(str(job.get("status")))
 
 
 def duration(seconds: float | int | None) -> str:
@@ -115,11 +126,16 @@ def _progress_lines(job: dict[str, Any]) -> list[str]:
         details.append(f"ETA {e(eta)}")
     if details:
         lines.append(" · ".join(details))
-    if status in STATE_LINES:
-        lines.append(STATE_LINES[status])
+    state_line = _state_line(job)
+    if state_line:
+        lines.append(state_line)
     elif status == "uploading" and job.get("last_line"):
         lines.append(e(short(job["last_line"], 90)))
-    if job.get("source_type") in ("magnet", "torrent") and status == "downloading":
+    if (
+        job.get("source_type") in ("magnet", "torrent")
+        and status == "downloading"
+        and not job.get("unreachable")
+    ):
         lines.append(f"Peers {job.get('connections', 0)} · seeders {job.get('num_seeders', 0)}")
     elif job.get("provider") in ("spotify", "manga", "gallery-dl") and job.get("last_line"):
         lines.append(e(short(job["last_line"], 90)))
@@ -131,6 +147,8 @@ def job_card(
     *,
     open_data: str | None = None,
     can_upload: bool = False,
+    can_preview: bool = False,
+    can_compress: bool = False,
     confirm: str | None = None,
 ) -> Screen:
     """The card for one job. ``confirm`` is "cancel" or "delete" while asking."""
@@ -152,7 +170,7 @@ def job_card(
             ]
             return text + "\n\nCancel this download?", InlineKeyboardMarkup(rows)
         controls = []
-        if not job.get("provider"):  # aria2 can pause
+        if not job.get("provider") and not job.get("queue_position"):  # aria2 can pause
             if status == "paused":
                 controls.append(button("▶ Resume", f"job:resume:{jid}"))
             else:
@@ -201,7 +219,12 @@ def job_card(
             actions.append(button("📁 Open", open_data))
         if can_upload:
             actions.append(button("🗑 Delete", f"job:del:{jid}"))
-        return text, InlineKeyboardMarkup([actions]) if actions else None
+        rows = [actions] if actions else []
+        if can_preview:
+            rows.append([button("🎞 GIF previews (10×6s)", f"job:gp:{jid}")])
+        if can_compress:
+            rows.append([button("🗜 Compress (H.265)", f"job:cmp:{jid}")])
+        return text, InlineKeyboardMarkup(rows) if rows else None
 
     if status == "failed":
         reason = e(short(job.get("last_line") or "Unknown error", 300))
@@ -241,8 +264,8 @@ def status_screen(jobs: list[dict[str, Any]], free_bytes: int | None, *, recent:
             if job.get("provider") in BATCH_PROVIDERS:
                 count = int(job.get("episode_count") or job.get("video_count") or 0)
                 state = f"{job.get('completed_items', 0)}/{count} items"
-            elif job.get("status") in STATE_LINES:
-                state = STATE_LINES[job["status"]].rstrip("…")
+            elif state_line := _state_line(job):
+                state = state_line.rstrip("…")
             elif total:
                 state = f"{done / total * 100:.0f}%"
                 speed = int(job.get("download_speed") or 0)

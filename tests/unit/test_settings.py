@@ -22,7 +22,9 @@ def test_load_settings_parses_user_ids(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    monkeypatch.delenv("BOT_TOKEN", raising=False)
+    # Importing the bot loads the real .env into os.environ, which would win.
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        monkeypatch.delenv(line.split("=", 1)[0], raising=False)
     settings = load_settings(env_file)
 
     assert settings.bot_token == "test-token"

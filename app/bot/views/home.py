@@ -111,8 +111,10 @@ def help_screen(supported_sites_url: str) -> Screen:
         "<b>Search</b> — 🔍 Search finds torrents on Prowlarr, The Pirate Bay or a "
         "RARBG mirror.\n\n"
         "<b>Files</b> — 📁 Files browses the download folder. Tap a file to upload "
-        "it to your Saved Messages, convert or delete it; use Select for several "
-        "files at once.\n\n"
+        "it to your Saved Messages, convert, make GIF previews or delete it; use "
+        "Select for several files at once.\n\n"
+        "<b>Upload target</b> — uploads go to Saved Messages, or to a channel or group "
+        "you set in ⚙️ Settings › Upload to.\n\n"
         "<b>Archive</b> — pack files into ZIP or 7Z, optionally password-protected "
         "and split into parts.\n\n"
         "<b>Forwarded media</b> — forward a post here to save its media (turn it "
@@ -121,20 +123,30 @@ def help_screen(supported_sites_url: str) -> Screen:
     )
     markup = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🌐 Supported sites", url=supported_sites_url)],
+            [button("🌐 Supported sites", "sites:0")],
             [home_button()],
         ]
     )
     return text, markup
 
 
-def sites_screen(supported_sites_url: str) -> Screen:
-    text = (
-        "🌐 <b>Supported sites</b>\n\n"
-        "The full list of video, music, manga and torrent sources is kept up to "
-        "date on the project page."
+def sites_screen(lines: list[str], page: int, pages: int, total: int, supported_sites_url: str = "") -> Screen:
+    """One page of the Supported sites list; "§ " lines are section headers."""
+    body = [
+        f"<b>{e(line[2:])}</b>" if line.startswith("§ ") else f"• {e(line)}" for line in lines
+    ]
+    text = "\n".join(
+        [f"🌐 <b>Supported sites</b> · page {page + 1}/{pages}", ""]
+        + body
+        + ["", f"{total} entries. Other links get a “not supported” reply."]
     )
-    markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Open the list", url=supported_sites_url)], [home_button()]]
-    )
-    return text, markup
+    if supported_sites_url:
+        text += f'\nDetails: <a href="{e(supported_sites_url)}">project page</a>'
+    nav = []
+    if page > 0:
+        nav.append(button("⬅ Prev", f"sites:{page - 1}"))
+    if page < pages - 1:
+        nav.append(button("Next ➡", f"sites:{page + 1}"))
+    rows = [nav] if nav else []
+    rows.append([home_button()])
+    return text, InlineKeyboardMarkup(rows)

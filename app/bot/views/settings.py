@@ -8,8 +8,11 @@ from typing import Any
 from telegram import InlineKeyboardMarkup
 
 from app.bot.views.common import Screen, back_row, button, e, on_off
+from app.services import upload_filter
+from app.services.download_slots import MAX_SLOTS, MIN_SLOTS, limit_of
 from app.services.batch_download import batch_download_mode_label
 from app.services.cookies import CookieSummary
+from app.services.user_settings import upload_target, upload_target_label
 
 # What a video link does: ask with a quality picker, or start right away.
 VIDEO_DEFAULTS = ["ask", "best", "1080", "720", "480", "mp3"]
@@ -26,12 +29,13 @@ VIDEO_DEFAULT_LABELS = {
 HUB_TOGGLES = {
     "auto_upload_after_download",
     "send_gifs_to_chat",
+    "send_previews_after_upload",
     "auto_delete_files_after_upload",
     "auto_download_forwarded_posts",
     "manga_auto_convert_pdf",
     "manga_remove_images_after_conversion",
 }
-HUB_CYCLES = {"video_default", "batch_download_mode"}
+HUB_CYCLES = {"video_default", "batch_download_mode", "compress_crf", "compress_preset"}
 
 
 def video_default_label(value: Any) -> str:
@@ -61,6 +65,15 @@ def cookies_label(summary: CookieSummary | None) -> str:
     return f"{summary.count} saved"
 
 
+def concurrency_row(limit: int) -> list:
+    """➖ / current value / ➕ for "Downloads at once" (mcd:<new value> callbacks)."""
+    return [
+        button("➖", f"mcd:{limit - 1}" if limit > MIN_SLOTS else "noop"),
+        button(f"⏬ Downloads at once: {limit}", "noop"),
+        button("➕", f"mcd:{limit + 1}" if limit < MAX_SLOTS else "noop"),
+    ]
+
+
 def settings_screen(s: dict[str, Any], cookies: CookieSummary | None = None) -> Screen:
     text = "\n".join(
         [
@@ -69,11 +82,21 @@ def settings_screen(s: dict[str, Any], cookies: CookieSummary | None = None) -> 
             "<b>Downloads</b>",
             f"• Video links: {e(video_default_label(s.get('video_default')))}",
             f"• Send GIFs to this chat: {on_off(s.get('send_gifs_to_chat', True))}",
+            f"• Downloads at once: {limit_of(s)}",
             f"• Cookies: {e(cookies_label(cookies))}",
-            f"• Upload to Saved Messages when done: {on_off(s.get('auto_upload_after_download'))}",
-            f"• Delete files after uploading: {on_off(s.get('auto_delete_files_after_upload'))}",
             f"• Playlists and model pages: {e(batch_download_mode_label(s.get('batch_download_mode')))}",
             f"• Download forwarded media: {on_off(s.get('auto_download_forwarded_posts'))}",
+            "",
+            "<b>Uploads</b>",
+            f"• Upload to: {e(upload_target_label(s))}",
+            f"• Upload when done: {on_off(s.get('auto_upload_after_download'))}",
+            f"• Auto-upload filter: {e(upload_filter.label(s.get('auto_upload_types')))}",
+            f"• Preview after each uploaded video: {on_off(s.get('send_previews_after_upload', True))}",
+            f"• Delete files after uploading: {on_off(s.get('auto_delete_files_after_upload'))}",
+            "",
+            "<b>Compress (H.265)</b>",
+            f"• CRF {e(s.get('compress_crf', 28))} · {e(s.get('compress_preset', 'medium'))} preset "
+            "(lower CRF: better and bigger; slower preset: smaller, takes longer)",
             "",
             "<b>Archives</b>",
             f"• {e(archive_summary(s))}",
@@ -99,10 +122,24 @@ def settings_screen(s: dict[str, Any], cookies: CookieSummary | None = None) -> 
             ),
             button(f"🍪 Cookies: {cookies_label(cookies)}", "nav:cookies"),
         ],
+        concurrency_row(limit_of(s)),
+        [button(f"📍 Upload to: {upload_target_label(s)}", "nav:target")],
         [
             button(
                 f"📤 Upload when done: {on_off(s.get('auto_upload_after_download'))}",
                 "set:auto_upload_after_download",
+            ),
+        ],
+        [
+            button(
+                f"🧹 Auto-upload filter: {upload_filter.label(s.get('auto_upload_types'))}",
+                "nav:upload_filter",
+            ),
+        ],
+        [
+            button(
+                f"🎞 Preview after upload: {on_off(s.get('send_previews_after_upload', True))}",
+                "set:send_previews_after_upload",
             ),
         ],
         [
@@ -123,6 +160,10 @@ def settings_screen(s: dict[str, Any], cookies: CookieSummary | None = None) -> 
                 "set:auto_download_forwarded_posts",
             )
         ],
+        [
+            button(f"🗜 Compress CRF: {s.get('compress_crf', 28)}", "set:compress_crf"),
+            button(f"🐢 Preset: {s.get('compress_preset', 'medium')}", "set:compress_preset"),
+        ],
         [button("📦 Archive settings ›", "nav:archive_settings")],
         [
             button(
@@ -137,6 +178,64 @@ def settings_screen(s: dict[str, Any], cookies: CookieSummary | None = None) -> 
         back_row(),
     ]
     return text, InlineKeyboardMarkup(rows)
+
+
+def upload_filter_screen(s: dict[str, Any]) -> Screen:
+    current = upload_filter.normalize(s.get("auto_upload_types"))
+    lines = [
+        "🧹 <b>Auto-upload filter</b>",
+        "",
+        f"Now: <b>{e(upload_filter.label(current))}</b>",
+        "",
+        "Which files “Upload when done” and playlist uploads send. Files that don't "
+        "match are <b>deleted</b> from the server, and a folder left empty goes too.",
+        "Upload buttons and the file browser always send what you pick.",
+        "Each uploaded video is followed by its GIF preview unless “Preview after upload” is off.",
+    ]
+    rows = [
+        [button(("✅ " if key == current else "") + name, f"uf:{key}")]
+        for key, name in upload_filter.PRESET_LABELS.items()
+    ]
+    rows.append(back_row("nav:settings"))
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def upload_target_screen(
+    s: dict[str, Any], *, waiting: bool = False, error: str | None = None
+) -> Screen:
+    custom = upload_target(s) != "me"
+    lines = [
+        "📍 <b>Upload target</b>",
+        "",
+        f"Uploads go to: <b>{e(upload_target_label(s))}</b>",
+    ]
+    if custom:
+        lines.append(f"Chat id: <code>{s.get('target_chat_id')}</code>")
+    lines += [
+        "",
+        "Uploads (Upload buttons, “Upload when done”, playlists) can go to a channel "
+        "or group instead of Saved Messages. Files over 2 GB are still split into parts.",
+        "",
+        "Your account (the Pyrogram login) must be able to post there: an admin who "
+        "can post in a channel, or a member allowed to send media in a group. Without "
+        "the login the bot itself sends files of up to 50 MB, so it must be an admin there.",
+        "GIFs and “Send here” files still come to this chat.",
+    ]
+    if error:
+        lines += ["", f"❌ {e(error)}"]
+    if waiting:
+        lines += [
+            "",
+            "✍️ <b>Send the channel or group now</b>: @username, a t.me link, or a "
+            "numeric id like <code>-1001234567890</code>. You can also forward a text "
+            "post from it. /cancel to stop.",
+        ]
+        return "\n".join(lines), InlineKeyboardMarkup([[button("✖ Cancel", "tg:cancel")]])
+    rows = [[button("✏️ Set upload target", "tg:set")]]
+    if custom:
+        rows.append([button("↩️ Reset to Saved Messages", "tg:reset")])
+    rows.append(back_row("nav:settings"))
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def archive_settings_screen(s: dict[str, Any], back: str = "nav:settings") -> Screen:

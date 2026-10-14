@@ -16,6 +16,7 @@ dependencies = [
   "tgcrypto",
   "yt-dlp[default]",
   "curl-cffi>=0.10.0",
+  "pycryptodomex",
   "hanime-plugin==2026.5.10",
   "spotdl",
   "Pillow",

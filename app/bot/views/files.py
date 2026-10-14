@@ -13,7 +13,7 @@ Callback data (``fb:<action>:<page>:<token>``, page = the folder page to
 return to):
   list  open a folder page         o     open an entry (folder or file)
   file  file card                  more  folder actions
-  here  send the file to this chat send_yes  upload to Saved Messages
+  here  send the file to this chat send_yes  upload to the upload target
   zip1  zip one file               ren   rename (asks for the new name)
   sort  cycle the sort order       find  look for files by name
   send_folder_confirm, delete_confirm, deleteall_confirm, organize,
@@ -314,6 +314,7 @@ def file_screen(
     can_send_here: bool = True,
     has_saved_messages: bool = True,
     send_limit: int = 50 * 1024 * 1024,
+    upload_label: str = "Saved Messages",
 ) -> Screen:
     me = tok(rel_path)
     name = Path(rel_path).name
@@ -332,7 +333,7 @@ def file_screen(
     if can_send_here:
         send.append(button("📨 Send here", f"fb:here:{page}:{me}"))
     if has_saved_messages:
-        send.append(button("📤 Saved Messages", f"fb:send_yes:{page}:{me}"))
+        send.append(button(f"📤 {short(upload_label, 24)}", f"fb:send_yes:{page}:{me}"))
     if send:
         rows.append(send)
     rows.append(
@@ -347,6 +348,12 @@ def file_screen(
             [
                 button("🎬 Convert", f"fb:conv_menu:{page}:{me}"),
                 button("📸 Thumbnails", f"fb:thumb_send:{page}:{me}"),
+            ]
+        )
+        rows.append(
+            [
+                button("🎞 GIF previews (10×6s)", f"fb:gifprev:{page}:{me}"),
+                button("🗜 Compress (H.265)", f"fb:compress:{page}:{me}"),
             ]
         )
     rows.append(back_row(f"fb:list:{page}:{tok(parent_of(rel_path))}"))

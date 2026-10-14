@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -39,6 +40,7 @@ except ImportError:
     HAS_PIL = False
 
 import yt_dlp
+from yt_dlp.networking.impersonate import ImpersonateTarget
 
 # Pyrogram 2.x calls asyncio.get_event_loop() while building its sync wrappers
 # at import time. From Python 3.12 that is deprecated and on 3.14 it raises
@@ -52,12 +54,14 @@ except RuntimeError:
 
 from pyrogram import Client
 from pyrogram import StopTransmission
+from pyrogram import enums as pyro_enums
 from pyrogram.errors import FloodWait, RPCError
 import httpx
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaVideo,
     MenuButtonWebApp,
     Update,
     WebAppInfo,
@@ -79,9 +83,11 @@ from telegram.request import HTTPXRequest
 from app.downloaders.base import DownloadRequest
 from app.downloaders.spotify import SpotifyDownloader, is_spotify_url
 
+from app.bot import flood_guard
 from app.bot.callbacks import answer_once, auto_answer
 from app.bot.search import SearchUI
 from app.bot.views import files as file_views
+from app.bot.views import compress as compress_views
 from app.bot.views import home as home_views
 from app.bot.views import jobs as job_views
 from app.bot.views import settings as settings_views
@@ -92,7 +98,13 @@ from app.downloaders.torrents.tpb.crawler import TPBCrawler
 
 # Import post downloader module for handling forwarded posts
 from app.handlers.forwarded_media import bot_id_from_token, setup_pyrogram_forwarded_downloads
-from app.infrastructure.aria2_rpc import Aria2DaemonConfig, Aria2RpcClient, Aria2RpcError
+from app.infrastructure.aria2_rpc import (
+    DEFAULT_BT_TRACKERS,
+    Aria2ConnectionError,
+    Aria2DaemonConfig,
+    Aria2RpcClient,
+    Aria2RpcError,
+)
 from app.services.adult_video_resolver import (
     resolve_adult_video_url,
     resolved_video_output_template,
@@ -136,6 +148,14 @@ from app.services.manga import (
 )
 from app.services.gallery import download_gallery, gallery_category, site_label
 from app.services import animation
+from app.services import gif_previews
+from app.services import upload_filter
+from app.services import upload_guard
+from app.services import supported_sites
+from app.services import video_compress
+from app.services import video_split
+from app.services.link_batch import LinkBatch, split_links
+from app.services.download_slots import DownloadSlots, limit_of
 from app.services import cookies as cookie_store
 from app.services.cobalt import CobaltClient, CobaltError
 from app.services.job_store import JobStore
@@ -154,7 +174,10 @@ from app.services.torrent_search import ProwlarrProvider, RARBGProvider, TPBProv
 # Import zip settings module
 from app.services.user_settings import (
     get_user_settings,
+    parse_chat_ref,
     update_setting,
+    upload_target,
+    upload_target_label,
     validate_compression_level,
     validate_part_size,
     validate_password,
@@ -165,6 +188,7 @@ from app.services.video_sites import (
     is_supported_video_url,
     requires_deno_runtime,
     requires_ytdlp_generic_impersonation,
+    requires_ytdlp_impersonation,
     video_platform_label,
     video_platform_slug,
 )
@@ -250,7 +274,8 @@ DENO_PATH = configure_deno_runtime(DENO_BIN)
 DENO_VERSION = get_deno_version(DENO_PATH)
 
 FILES_PER_PAGE = 8
-MAX_SEND_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+# The most one upload may weigh (Premium); each upload checks the account's own cap.
+MAX_SEND_SIZE = video_split.PREMIUM_PART_CAP
 
 pyro_client = None
 upload_jobs = {}  # {job_id: {"status": "pending|uploading|completed|failed", "files": [...], ...}}
@@ -263,6 +288,7 @@ download_jobs = {}
 job_counter = 0
 # Jobs are saved to SQLite so the list, and running aria2 downloads, survive restarts.
 JOB_DB_PATH = Path(os.getenv("JOB_DB_PATH", "").strip() or BASE_DIR / "data" / "bot.sqlite3")
+FLOOD_STATE_PATH = JOB_DB_PATH.with_name("flood_control.json")
 job_store: "JobStore | None" = None
 JOB_SAVE_INTERVAL = 10
 jobs_lock = asyncio.Lock()
@@ -389,7 +415,7 @@ LANGUAGES = {
         "home_desc": "Use the keyboard below.",
         "folder": "📁 Download folder:",
         "target": "📤 Upload target:",
-        "target_val": "Your own Telegram account (Saved Messages / me)",
+        "target_val": "Saved Messages, or the channel/group set in Settings › Upload to",
         "help": "❓ Help",
         "magnet_help": "🧲 Send a magnet or direct file URL to start downloading.",
         "status_help": "📊 Status: show active downloads.",
@@ -401,7 +427,7 @@ LANGUAGES = {
         "upload_help": "📤 File upload: choose a file and upload it.",
         "upload_folder_help": "📤 Folder upload: choose a folder and upload all files.",
         "notes": "ℹ️ Notes:",
-        "upload_account": "- Upload target is your own Telegram account.",
+        "upload_account": "- Uploads go to Saved Messages unless a channel/group is set in Settings.",
         "pyrogram_user": "- Pyrogram must be logged in as a user account, not a bot.",
         "pyrogram_first_run": "- On first run, Pyrogram may ask for phone/code/2FA in console.",
         "status": "📊 Status",
@@ -483,7 +509,7 @@ LANGUAGES = {
         "job_number": "Job #{}",
         "part": "Part",
         "uploading": "📤 Uploading",
-        "target_account": "Target: your own Telegram account",
+        "target_account": "Target: Saved Messages or the channel/group set in Settings",
         "parts_sent": "Parts sent:",
         "language": "🌐 Language",
         "select_language": "Select your language:",
@@ -831,16 +857,23 @@ async def run_named_zip(app: Application, user_id: int, name: str, status_msg) -
     await status_msg.edit_text("\n".join(lines))
 
 
-async def maybe_delete_file_after_upload(user_id: int, rel_path: str) -> None:
+async def maybe_delete_file_after_upload(user_id: int, rel_path: str, *, prune: bool = False) -> None:
+    """Delete an uploaded file if the user wants that; ``prune`` also drops folders it left empty."""
     if not user_id:
         return
     settings = get_user_settings(user_id)
     if not settings.get("auto_delete_files_after_upload"):
         return
+    delete_uploaded_file(rel_path, prune=prune)
+
+
+def delete_uploaded_file(rel_path: str, *, prune: bool = False) -> None:
     try:
         full = safe_join(DOWNLOAD_DIR, rel_path)
         if full.is_file():
             full.unlink()
+        if prune:
+            prune_empty_folders(full)
     except Exception as e:
         logger.warning(f"auto_delete after upload failed for {rel_path}: {e}")
 
@@ -1223,7 +1256,13 @@ async def _edit_dashboard_message(
 
     This is the fix for progress-message spam: transient errors (rate limits,
     network hiccups) must NOT cause callers to send a brand-new message.
+
+    A rate limit never sleeps here: callers include Pyrogram progress
+    callbacks, and sleeping there stalls the transfer itself (one 512 KB part
+    per back-off). Instead edits to that chat are skipped until it lifts.
     """
+    if not message_id or flood_guard.blocked_for(chat_id):
+        return False
     try:
         await app.bot.edit_message_text(
             chat_id=chat_id,
@@ -1252,9 +1291,15 @@ async def _edit_dashboard_message(
         logger.warning("Status edit rejected (%s); skipping this update", exc)
         return False
     except RetryAfter as exc:
-        retry_after = min(float(getattr(exc, "retry_after", 5) or 5), 15.0)
-        logger.warning("Telegram rate limit on status edits; backing off %.1fs", retry_after)
-        await asyncio.sleep(retry_after)
+        retry_after = getattr(exc, "retry_after", 5) or 5
+        if hasattr(retry_after, "total_seconds"):
+            retry_after = retry_after.total_seconds()
+        if not flood_guard.blocked_for(chat_id):
+            logger.warning(
+                "Telegram rate limit on status edits in chat %s; skipping edits for %.0fs",
+                chat_id, float(retry_after),
+            )
+        flood_guard.note(chat_id, retry_after)
         return False
     except (TimedOut, NetworkError) as exc:
         logger.warning("Network error editing status message: %s", exc)
@@ -1415,8 +1460,14 @@ def job_open_data(outputs: list[str]) -> str | None:
 
 def render_job_card(job: dict, confirm: str | None = None):
     outputs = job_outputs(job) if job.get("status") == "completed" else []
+    has_video = bool(outputs) and job_preview_video(job) is not None
     return job_views.job_card(
-        job, open_data=job_open_data(outputs), can_upload=bool(outputs), confirm=confirm
+        job,
+        open_data=job_open_data(outputs),
+        can_upload=bool(outputs),
+        can_preview=has_video,
+        can_compress=has_video,
+        confirm=confirm,
     )
 
 
@@ -1590,6 +1641,234 @@ async def send_job_gifs(app: Application, job: dict) -> None:
         job["gif_note"] = " · ".join(notes)
 
 
+def job_preview_video(job: dict) -> Path | None:
+    """The first real video a finished job produced (GIF jobs have none worth previewing)."""
+    if job.get("gif"):
+        return None
+    return next((p for p in gif_candidates(job) if p.suffix.lower() != ".gif"), None)
+
+
+def make_gif_previews(source: Path, workdir: Path) -> list[tuple[Path, float, object]]:
+    """Cut the preview clips of ``source`` into ``workdir``: [(mp4, start seconds, info)]."""
+    if not shutil.which(FFMPEG_BIN) or not shutil.which(FFPROBE_BIN):
+        logger.error("GIF previews need ffmpeg and ffprobe (FFMPEG_BIN=%s, FFPROBE_BIN=%s)", FFMPEG_BIN, FFPROBE_BIN)
+        raise RuntimeError("ffmpeg/ffprobe are not installed on the server.")
+    info = animation.probe(source, FFPROBE_BIN)
+    plan = gif_previews.preview_plan(info.duration if info else None)
+    if not plan:
+        raise RuntimeError("Couldn't read the video's length.")
+    clips = []
+    for i, (start, length) in enumerate(plan, start=1):
+        target = workdir / f"preview_{i:02d}.mp4"
+        try:
+            gif_previews.make_clip(source, start, length, target, ffmpeg=FFMPEG_BIN)
+        except Exception as exc:
+            logger.warning("GIF preview %d of %s failed: %s", i, source.name, exc)
+            continue
+        if target.stat().st_size <= animation.BOT_ANIMATION_LIMIT:
+            clips.append((target, start, animation.probe(target, FFPROBE_BIN)))
+    return clips
+
+
+def preview_video_kwargs(info) -> dict:
+    """Size and length of a preview clip, so Telegram lays it out right."""
+    return {
+        "width": getattr(info, "width", None) or None,
+        "height": getattr(info, "height", None) or None,
+        "duration": int(getattr(info, "duration", 0) or 0) or None,
+        "supports_streaming": True,
+    }
+
+
+async def send_preview_video(app: Application, chat_id: int, path: Path, info) -> None:
+    """Send one preview clip, never with a caption."""
+    with open(path, "rb") as fh:
+        await app.bot.send_video(
+            chat_id=chat_id, video=fh, **preview_video_kwargs(info),
+            read_timeout=300, write_timeout=300,
+        )
+
+
+async def _send_preview_album(app: Application, chat_id: int, clips: list, name: str) -> int | None:
+    """Send the clips (no captions) to one chat; how many went out, or None if that is unknown (timed out)."""
+    sent = 0
+    try:
+        if len(clips) == 1:  # an album needs at least two items
+            path, _, info = clips[0]
+            await send_preview_video(app, chat_id, path, info)
+        else:
+            media = []
+            for i, (path, _, info) in enumerate(clips):
+                with open(path, "rb") as fh:  # InputMediaVideo reads the bytes right away
+                    media.append(InputMediaVideo(
+                        media=fh,
+                        **preview_video_kwargs(info),
+                    ))
+            await app.bot.send_media_group(
+                chat_id=chat_id, media=media, read_timeout=300, write_timeout=300,
+            )
+        return len(clips)
+    except BadRequest as exc:
+        logger.warning("GIF preview album of %s refused, sending one by one: %s", name, exc)
+        for i, (path, start, info) in enumerate(clips, start=1):
+            try:
+                await send_preview_video(app, chat_id, path, info)
+                sent += 1
+            except Exception as exc:
+                logger.warning("Could not send GIF preview %d of %s: %s", i, name, exc)
+    except (TimedOut, NetworkError) as exc:
+        # BadRequest is a NetworkError too, so this comes after it. The upload
+        # may still have landed; resending could duplicate the album.
+        logger.warning("GIF preview album of %s did not go through: %s", name, exc)
+        return None
+    except Exception as exc:
+        logger.warning("GIF preview album of %s failed: %s", name, exc)
+    return sent
+
+
+def merge_gif_previews(clips: list, source: Path, workdir: Path) -> tuple[Path, object] | None:
+    """Join the clips, in timeline order, into one preview video: (mp4, info), or None if that fails."""
+    ordered = [path for path, _, _ in sorted(clips, key=lambda clip: clip[1])]
+    target = workdir / gif_previews.merged_name(source.name)
+    try:
+        gif_previews.merge_clips(ordered, target, ffmpeg=FFMPEG_BIN)
+    except Exception as exc:
+        logger.warning("Merging the GIF previews of %s failed, sending an album: %s", source.name, exc)
+        return None
+    if target.stat().st_size > BOT_MAX_DOCUMENT_BYTES:
+        logger.warning("Merged GIF preview of %s is too big, sending an album", source.name)
+        target.unlink(missing_ok=True)
+        return None
+    return target, animation.probe(target, FFPROBE_BIN)
+
+
+async def _send_merged_preview(
+    app: Application, chat_id: int | str, path: Path, info, *, via_user: bool
+) -> bool | None:
+    """Send the merged preview (no caption) to one chat; None if that is unknown (timed out)."""
+    try:
+        if via_user:
+            client = await get_pyrogram_client()
+            await send_with_flood_wait_handling(
+                lambda: client.send_video(
+                    chat_id=chat_id,
+                    video=str(path),
+                    file_name=path.name,
+                    supports_streaming=True,
+                    **video_send_kwargs({
+                        "width": getattr(info, "width", None),
+                        "height": getattr(info, "height", None),
+                        "duration": getattr(info, "duration", None),
+                    }),
+                )
+            )
+        else:
+            await send_preview_video(app, chat_id, path, info)
+        return True
+    except BadRequest as exc:
+        logger.warning("Merged GIF preview %s refused in %s: %s", path.name, chat_id, exc)
+        return False
+    except (TimedOut, NetworkError) as exc:
+        # BadRequest is a NetworkError too, so this comes after it. The upload
+        # may still have landed; resending could duplicate it.
+        logger.warning("Merged GIF preview %s did not go through: %s", path.name, exc)
+        return None
+    except Exception as exc:
+        logger.warning("Merged GIF preview %s could not be sent to %s: %s", path.name, chat_id, exc)
+        return False
+
+
+async def _preview_sender(target: int | str | None, chat_id: int) -> tuple[int | str, bool]:
+    """Where the merged preview goes and whether the user account sends it.
+
+    With an upload ``target`` it lands where the uploaded video went: through
+    the Pyrogram account (Saved Messages or the channel/group), or, in
+    bot-only mode, the way ``_send_via_bot_api`` sent the video.
+    """
+    if target is None:
+        return chat_id, False
+    try:
+        await get_pyrogram_client()
+    except PyrogramUnavailable:
+        return (chat_id if target == "me" else target), False
+    return target, True
+
+
+async def send_gif_previews(
+    app: Application,
+    chat_id: int,
+    source: Path,
+    *,
+    status_chat_id: int | None = None,
+    fallback_chat_id: int | None = None,
+    target: int | str | None = None,
+) -> int:
+    """Send the previews of a video as ONE merged video (up to 10 clips in timeline order).
+
+    Previews never have captions: neither the merged video
+    ``Preview - <name>.mp4`` nor the album clips. With an
+    upload ``target`` (auto-upload) the video goes to the same chat as the
+    uploaded video; otherwise to ``chat_id``. If merging fails, the clips go
+    to ``chat_id`` as one album instead (one by one if Telegram refuses the
+    album). The "making previews" note goes to ``status_chat_id`` (default
+    ``chat_id``); if nothing could be sent, the previews go to
+    ``fallback_chat_id``. Returns how many clips were sent.
+    """
+    try:
+        status = await app.bot.send_message(
+            chat_id=status_chat_id or chat_id,
+            text=f"🎞 Making GIF previews of {shorten(source.name, 80)}…",
+        )
+    except RetryAfter:
+        # Flood control in the bot chat: the preview can still go where the
+        # video went (user account, or a channel), so make it without the note.
+        status = None
+    sent = 0
+    with tempfile.TemporaryDirectory(prefix="gif-previews-") as tmp:
+        try:
+            clips = await asyncio.to_thread(make_gif_previews, source, Path(tmp))
+        except Exception as exc:
+            logger.warning("GIF previews of %s failed: %s", source.name, exc)
+            if status is not None:
+                await safe_edit_message(status, f"{ICON_FAIL} No GIF previews: {shorten(str(exc), 200)}")
+            return 0
+        clips = sorted(clips, key=lambda clip: clip[1])[: gif_previews.PREVIEW_COUNT]
+        merged = await asyncio.to_thread(merge_gif_previews, clips, source, Path(tmp)) if clips else None
+        if merged:
+            path, info = merged
+            destinations = [await _preview_sender(target, chat_id)]
+            if fallback_chat_id is not None and destinations[0] != (fallback_chat_id, False):
+                destinations.append((fallback_chat_id, False))
+            for destination, via_user in destinations:
+                result = await _send_merged_preview(app, destination, path, info, via_user=via_user)
+                if result is None:
+                    break  # may have landed; don't send it again anywhere
+                if result:
+                    sent = len(clips)
+                    break
+        elif clips:
+            destinations = [chat_id]
+            if fallback_chat_id is not None and fallback_chat_id != chat_id:
+                destinations.append(fallback_chat_id)
+            for destination in destinations:
+                result = await _send_preview_album(app, destination, clips, source.name)
+                if result is None:
+                    break  # may have landed; don't send it again anywhere
+                sent = result
+                if sent:
+                    break
+    try:
+        if status is None:
+            pass
+        elif sent:
+            await status.delete()
+        else:
+            await safe_edit_message(status, f"{ICON_FAIL} Couldn't make GIF previews of {shorten(source.name, 80)}.")
+    except Exception as exc:
+        logger.debug("GIF preview status not updated: %s", exc)
+    return sent
+
+
 async def finish_job_card(app: Application, job: dict):
     """Show the job's final state as a fresh card at the bottom of the chat.
 
@@ -1602,16 +1881,40 @@ async def finish_job_card(app: Application, job: dict):
     await send_job_gifs(app, job)
     old = job.get("card")
     settings = get_user_settings(job.get("user_id") or 0)
+    # Once per job, even when this runs again for a card held back by flood control.
     auto_upload = (
         job.get("status") == "completed"
         and settings.get("auto_upload_after_download")
+        and not job.get("auto_upload_started")
         and bool(job_outputs(job))
     )
+    upload_list: list[str] = []
     if auto_upload:
-        job["auto_upload_note"] = "📤 Uploading to Saved Messages…"
+        preset = settings.get("auto_upload_types")
+        upload_list, deleted = await asyncio.to_thread(filter_auto_upload_files, job, preset)
+        if upload_list:
+            job["auto_upload_note"] = f"📤 Uploading to {upload_target_label(settings)}…"
+            if deleted:
+                job["auto_upload_note"] += (
+                    f" ({upload_filter.label(preset)}; {deleted} other file(s) deleted)"
+                )
+        else:
+            auto_upload = False
+            job["auto_upload_note"] = upload_filter.filtered_out_note(preset, deleted)
     try:
         await _send_card(app, job)
         job["card_final"] = job.get("status")
+    except RetryAfter as exc:
+        # Flood control: the upload goes through the user account, so it must not
+        # wait 14 hours for the card. The card is posted when the block lifts.
+        flood_guard.note(job["chat_id"], _retry_seconds(exc))
+        if not any(item.get("job_id") == job.get("id") for item in flood_guard.held(job["chat_id"])):
+            logger.info("Final card for #%s held until flood control lifts", job.get("id"))
+            hold_message(app, job["chat_id"], {"job_id": job.get("id")})
+        if auto_upload:
+            job["auto_upload_started"] = True
+            await start_job_upload(app, job, upload_list, auto=True)
+        return
     except Exception as exc:
         logger.warning("Could not send final card for #%s: %s", job.get("id"), exc)
         return
@@ -1622,27 +1925,199 @@ async def finish_job_card(app: Application, job: dict):
             logger.debug("Old job card not deleted: %s", exc)
     await update_status_message(app, job["chat_id"], job.get("user_id"))
     if auto_upload:
-        await start_job_upload(app, job)
+        job["auto_upload_started"] = True
+        await start_job_upload(app, job, upload_list, auto=True)
 
 
-async def start_job_upload(app: Application, job: dict):
+def job_files(job: dict) -> list[str]:
+    """Every file a finished job produced (folders expanded), relative to Download/."""
     files: list[str] = []
     for rel in job_outputs(job):
         full = DOWNLOAD_DIR / rel
         files += get_all_files_in_folder(rel) if full.is_dir() else [rel]
+    return list(dict.fromkeys(files))
+
+
+# Folders the bot keeps under Download/ even when empty.
+KEPT_FOLDERS = {
+    p.name for p in (TELEGRAM_DIR, SPOTIFY_DIR, MANGA_DIR, ADULT_VIDEO_DIR, HENTAI_VIDEO_DIR, GALLERY_DIR)
+}
+
+
+def _only_leftovers(folder: Path) -> bool:
+    """True if ``folder`` holds no files the user would see (only dotfiles and the like)."""
+    for root, _, names in os.walk(folder):
+        for name in names:
+            if not is_internal(str((Path(root) / name).relative_to(DOWNLOAD_DIR))):
+                return False
+    return True
+
+
+def prune_empty_folders(path: Path) -> list[Path]:
+    """Remove the folders above ``path`` that are left empty, up to Download/.
+
+    "Empty" also covers folders with nothing but leftovers (dotfiles). The
+    bot's own top-level folders (Telegram, Manga, ...) stay.
+    """
+    removed = []
+    parent = path.parent
+    while (
+        parent != DOWNLOAD_DIR
+        and DOWNLOAD_DIR in parent.parents
+        and not (parent.parent == DOWNLOAD_DIR and parent.name in KEPT_FOLDERS)
+        and parent.is_dir()
+        and _only_leftovers(parent)
+    ):
+        shutil.rmtree(parent)
+        removed.append(parent)
+        parent = parent.parent
+    return removed
+
+
+def filter_auto_upload_files(job: dict, preset) -> tuple[list[str], int]:
+    """Apply the auto-upload filter to a finished job: (files to upload, files deleted).
+
+    Files the filter does not keep are deleted, and so are folders that
+    leaves empty. Only for automatic uploads; Upload buttons send everything.
+    """
+    kept, dropped = upload_filter.split(preset, job_files(job))
+    deleted = 0
+    for rel in dropped:
+        full = DOWNLOAD_DIR / rel
+        try:
+            full.unlink()
+            deleted += 1
+        except OSError as exc:
+            logger.warning("Auto-upload filter could not delete %s: %s", rel, exc)
+            continue
+        for folder in prune_empty_folders(full):
+            logger.info("Auto-upload filter removed empty folder %s", folder.relative_to(DOWNLOAD_DIR))
+    if dropped:
+        logger.info(
+            "Auto-upload filter %s on job #%s: keeping %d file(s), deleted %d: %s",
+            upload_filter.normalize(preset), job.get("id"), len(kept), deleted,
+            ", ".join(dropped[:20]) + (" …" if len(dropped) > 20 else ""),
+        )
+    return kept, deleted
+
+
+_preview_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _preview_lock() -> asyncio.Lock:
+    """One preview job at a time: ffmpeg is heavy and albums should not interleave."""
+    loop = asyncio.get_running_loop()
+    lock = _preview_locks.get(loop)
+    if lock is None:
+        lock = _preview_locks[loop] = asyncio.Lock()
+    return lock
+
+
+_send_chains: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict]" = weakref.WeakKeyDictionary()
+
+
+def _send_chain(chat_id: int, target: int | str) -> asyncio.Lock:
+    """The lock that orders everything uploaded to one destination chat.
+
+    An upload holds it for one file and, for a video, until that video's
+    preview is sent too (automatic and manual uploads alike). So two videos finishing together arrive
+    as video 1, preview 1, video 2, preview 2, never interleaved.
+    """
+    key = ("me", chat_id) if target == "me" else target
+    chains = _send_chains.setdefault(asyncio.get_running_loop(), {})
+    lock = chains.get(key)
+    if lock is None:
+        lock = chains[key] = asyncio.Lock()
+    return lock
+
+
+def wants_upload_previews(user_id: int | None, rel_path: str | Path) -> bool:
+    """Whether an upload (automatic or manual) of ``rel_path`` is followed by its GIF preview."""
+    return upload_filter.is_video(rel_path) and bool(
+        get_user_settings(user_id or 0).get("send_previews_after_upload", True)
+    )
+
+
+async def send_upload_previews(
+    app: Application,
+    chat_id: int,
+    target: int | str,
+    rel_path: str,
+    *,
+    delete_after: bool,
+    prune: bool = True,
+) -> None:
+    """After uploading a video (automatically or by a button), send its merged GIF preview.
+
+    Awaited by the upload, inside its ``_send_chain``, so the preview lands
+    right after its own video. It goes to the same chat as the uploaded video
+    (``target``: Saved Messages or a channel/group), falling back to this chat
+    if it can't be posted there. If merging fails, the album goes to the
+    target channel or group, or else this chat. With ``delete_after`` the
+    video is deleted once the preview is made (``prune``: and folders it
+    left empty).
+    """
+    preview_chat = target if isinstance(target, int) else chat_id
+    try:
+        async with _preview_lock():
+            await send_gif_previews(
+                app, preview_chat, DOWNLOAD_DIR / rel_path,
+                status_chat_id=chat_id, fallback_chat_id=chat_id, target=target,
+            )
+    except Exception as exc:
+        logger.warning("GIF previews after uploading %s failed: %s", rel_path, exc)
+    finally:
+        if delete_after:
+            await asyncio.to_thread(delete_uploaded_file, rel_path, prune=prune)
+
+
+def flood_blocked_alert(chat_id: int) -> str:
+    """Pop-up for a tap whose screen can't change because the chat is under flood control."""
+    when = flood_guard.lift_text(chat_id) if flood_guard.blocked_for(chat_id) else "a while"
+    return (
+        f"Telegram blocks this bot from editing messages here until {when}. "
+        "Uploads and downloads keep running; typed commands may still get a reply."
+    )
+
+
+async def answer_upload_tap(query) -> None:
+    """Answer an Upload tap; while flood control blocks the chat, explain that in an alert.
+
+    Otherwise the message would sit on "Preparing upload..." with no hint why.
+    """
+    chat_id = query.message.chat_id
+    if flood_guard.blocked_for(chat_id):
+        await answer_once(query, flood_guard.blocked_notice(chat_id), show_alert=True)
+    else:
+        await answer_once(query)
+
+
+async def start_job_upload(app: Application, job: dict, files: list[str] | None = None, *, auto: bool = False):
+    """Upload a job's files. ``auto`` marks an automatic upload (GIF previews, folder cleanup)."""
+    if files is None:
+        files = job_files(job)
     if not files:
         return False
-    msg = await app.bot.send_message(
-        chat_id=job["chat_id"], text=f"{ICON_UPLOAD} Preparing upload of {len(files)} file(s)..."
-    )
+    try:
+        msg = await app.bot.send_message(
+            chat_id=job["chat_id"], text=f"{ICON_UPLOAD} Preparing upload of {len(files)} file(s)..."
+        )
+        message_id = msg.message_id
+    except RetryAfter:
+        # Flood control in this chat: upload anyway (it goes through the user
+        # account); the summary is posted once the limit lifts.
+        message_id = None
     run_in_background(
         upload_files_via_pyrogram(
-            app, job["chat_id"], msg.message_id, files,
+            app, job["chat_id"], message_id, files,
             title=f"Job #{job['id']}: {shorten(clean_download_name(job.get('name', '')), 60)}",
             user_id=job.get("user_id"),
+            auto=auto,
         ),
         name=f"upload-job-{job['id']}",
-        on_error=message_error_reporter(app, job["chat_id"], msg.message_id, "Upload"),
+        on_error=message_error_reporter(app, job["chat_id"], message_id, "Upload"),
     )
     return True
 
@@ -1730,8 +2205,22 @@ async def handle_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.debug("Old job card not deleted: %s", exc)
 
     elif action == "up":
-        if not await start_job_upload(app, job):
+        files = job_files(job)
+        if not files:
             await answer_once(query, "The downloaded files are no longer there.", show_alert=True)
+            return
+        await answer_upload_tap(query)
+        await start_job_upload(app, job, files)
+
+    elif action == "gp":
+        source = await asyncio.to_thread(job_preview_video, job)
+        if source is None:
+            await answer_once(query, "There is no video from this job on the server.", show_alert=True)
+            return
+        await answer_once(query, "Making GIF previews…")
+        run_in_background(
+            send_gif_previews(app, job["chat_id"], source), name=f"gif-previews-{job['id']}"
+        )
 
     elif action in ("del", "deln"):
         text, markup = render_job_card(job, confirm="delete" if action == "del" else None)
@@ -1760,11 +2249,290 @@ async def handle_job_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await answer_once(query, "Starting again…")
         await attach_job_card(app, new_job, message=query.message if is_card_message() else None)
 
+    elif action == "cmp":
+        source = await asyncio.to_thread(job_preview_video, job)
+        if source is None:
+            await answer_once(query, "There is no video from this job on the server.", show_alert=True)
+            return
+        await start_compress_job(app, job["chat_id"], job.get("user_id"), file_rel_path(source))
+
     elif action == "dismiss":
         try:
             await query.message.delete()
         except Exception:
             await safe_edit_message(query.message, "Dismissed.")
+
+
+# =========================================================
+# Compress (H.265): re-encode a video smaller, with a live card
+# =========================================================
+
+compress_jobs: dict[str, dict] = {}
+_compress_counter = 0
+COMPRESS_EDIT_INTERVAL = 5.0
+_compress_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _compress_lock() -> asyncio.Lock:
+    """One encode at a time: x265 keeps every core busy on its own."""
+    loop = asyncio.get_running_loop()
+    lock = _compress_locks.get(loop)
+    if lock is None:
+        lock = _compress_locks[loop] = asyncio.Lock()
+    return lock
+
+
+async def _run_ffmpeg_progress(cmd: list[str], duration: float | None, progress_callback=None, on_process=None):
+    """Run an ffmpeg command that writes ``-progress pipe:1``: (return code, stderr).
+
+    ``progress_callback(pct)`` gets every progress step; ``on_process(proc)``
+    receives the process so it can be killed. Cancelling kills ffmpeg.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    if on_process:
+        on_process(process)
+    stderr_task = asyncio.create_task(process.stderr.read())
+    try:
+        while True:
+            raw = await process.stdout.readline()
+            if not raw:
+                break
+            seconds = parse_ffmpeg_progress_seconds(raw.decode("utf-8", errors="ignore"))
+            if progress_callback and duration and seconds is not None:
+                await progress_callback(max(0, min(99, int(seconds / duration * 100))))
+        await process.wait()
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        stderr_task.cancel()
+        raise
+    stderr = (await stderr_task).decode("utf-8", errors="ignore").strip()
+    return process.returncode, stderr
+
+
+async def compress_video(
+    source: Path, target: Path, *, crf: int, preset: str, progress_callback=None, on_process=None
+) -> str:
+    """Re-encode ``source`` into ``target`` (MP4); returns the encoder used.
+
+    Audio is copied when MP4 can hold it; if that still fails, the encode is
+    retried with AAC audio. The file is written under a hidden name and
+    renamed at the end, so a half-done encode never shows up in Files.
+    """
+    encoder = await asyncio.to_thread(video_compress.pick_encoder, FFMPEG_BIN)
+    info = await asyncio.to_thread(video_split.probe, source, FFPROBE_BIN)
+    codecs = await asyncio.to_thread(video_compress.probe_audio_codecs, source, FFPROBE_BIN)
+    tmp = target.with_name(f".compressing_{target.name}")
+    stderr = ""
+    try:
+        for copy_audio in ([True, False] if video_compress.can_copy_audio(codecs) else [False]):
+            cmd = video_compress.build_compress_command(
+                FFMPEG_BIN, source, tmp, encoder=encoder, crf=crf, preset=preset, copy_audio=copy_audio
+            )
+            returncode, stderr = await _run_ffmpeg_progress(
+                cmd, info.duration, progress_callback, on_process
+            )
+            if returncode == 0:
+                break
+            if returncode < 0:  # killed: the user cancelled
+                raise RuntimeError("ffmpeg was stopped")
+            logger.warning("Compressing %s failed (copy audio=%s): %s", source, copy_audio, stderr[-300:])
+        else:
+            raise RuntimeError(f"ffmpeg failed: {stderr[-300:] or 'unknown error'}")
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return encoder
+
+
+def new_compress_job(chat_id: int, message_id: int, user_id: int | None, rel_path: str, back: str | None) -> dict:
+    global _compress_counter
+    _compress_counter += 1
+    settings = get_user_settings(user_id or 0)
+    encoder = video_compress.pick_encoder(FFMPEG_BIN)
+    job = {
+        "id": str(_compress_counter),
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "user_id": user_id,
+        "source": rel_path,
+        "output": None,
+        "codec": video_compress.codec_label(encoder),
+        "crf": video_compress.normalize_crf(settings.get("compress_crf")),
+        "preset": video_compress.normalize_preset(settings.get("compress_preset")),
+        "status": "queued",
+        "pct": 0,
+        "back": back,
+        "last_edit": 0.0,
+    }
+    compress_jobs[job["id"]] = job
+    return job
+
+
+def active_compress_for(rel_path: str) -> dict | None:
+    return next(
+        (j for j in compress_jobs.values()
+         if j["source"] == rel_path and j["status"] in ("queued", "encoding")),
+        None,
+    )
+
+
+async def refresh_compress_card(app: Application, job: dict, *, force: bool = False, confirm_replace: bool = False):
+    if not force and time.time() - job.get("last_edit", 0) < COMPRESS_EDIT_INTERVAL:
+        return
+    job["last_edit"] = time.time()
+    text, markup = compress_views.compress_card(job, encode_path, confirm_replace=confirm_replace)
+    try:
+        await _edit_dashboard_message(
+            app, job["chat_id"], job["message_id"], text, markup, parse_mode=ParseMode.HTML
+        )
+    except _DashboardMessageGone:
+        msg = await app.bot.send_message(
+            chat_id=job["chat_id"], text=text, reply_markup=markup,
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        )
+        job["message_id"] = msg.message_id
+
+
+async def run_compress_job(app: Application, job: dict) -> None:
+    """Wait for the encoder, re-encode the video and keep the card up to date."""
+    source = safe_join(DOWNLOAD_DIR, job["source"])
+    try:
+        async with _compress_lock():
+            if job["status"] == "cancelled":
+                return
+            if not source.is_file():
+                raise FileNotFoundError(f"{source.name} is no longer on the server.")
+            job.update(status="encoding", started_at=time.time(), original_size=source.stat().st_size)
+            await refresh_compress_card(app, job, force=True)
+
+            async def progress(pct: int):
+                job["pct"] = pct
+                await refresh_compress_card(app, job)
+
+            def remember(process):
+                job["process"] = process
+
+            target = video_compress.output_path(source, video_compress.pick_encoder(FFMPEG_BIN))
+            encoder = await compress_video(
+                source, target, crf=job["crf"], preset=job["preset"],
+                progress_callback=progress, on_process=remember,
+            )
+            job.pop("process", None)
+            if job["status"] == "cancelled":
+                target.unlink(missing_ok=True)
+                return
+            job.update(
+                status="done",
+                pct=100,
+                finished_at=time.time(),
+                codec=video_compress.codec_label(encoder),
+                output=file_rel_path(target),
+                new_size=target.stat().st_size,
+            )
+    except Exception as exc:
+        job.pop("process", None)
+        if job["status"] != "cancelled":
+            logger.warning("Compressing %s failed: %s", job["source"], exc)
+            job.update(status="failed", error=shorten(str(exc), 300), finished_at=time.time())
+    await refresh_compress_card(app, job, force=True)
+
+
+async def start_compress_job(
+    app: Application, chat_id: int, user_id: int | None, rel_path: str, *, message=None, back: str | None = None
+) -> dict:
+    """Start compressing ``rel_path``. Its card replaces ``message``, or is sent as a new one."""
+    running = active_compress_for(rel_path)
+    if running:
+        await refresh_compress_card(app, running, force=True)
+        return running
+    if message is None:
+        message = await app.bot.send_message(chat_id=chat_id, text="🗜 Preparing compression…")
+    job = new_compress_job(chat_id, message.message_id, user_id, rel_path, back)
+    await refresh_compress_card(app, job, force=True)
+    run_in_background(run_compress_job(app, job), name=f"compress-{job['id']}")
+    return job
+
+
+def cancel_compress_job(job: dict) -> bool:
+    if job["status"] not in ("queued", "encoding"):
+        return False
+    job["status"] = "cancelled"
+    process = job.get("process")
+    if process is not None and process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    return True
+
+
+def replace_with_compressed(job: dict) -> str:
+    """Delete the original and give the compressed file its name; returns the new path."""
+    source = safe_join(DOWNLOAD_DIR, job["source"])
+    output = safe_join(DOWNLOAD_DIR, job["output"])
+    if not output.is_file():
+        raise FileNotFoundError(f"{output.name} is no longer on the server.")
+    final = source.with_suffix(".mp4")
+    source.unlink(missing_ok=True)
+    if final.exists():
+        # Another file already has that name (e.g. an .mkv beside an .mp4 of
+        # the same name): keep the compressed file's own name.
+        final = output
+    else:
+        output.replace(final)
+    job.update(status="replaced", source=file_rel_path(final), output=file_rel_path(final))
+    return job["output"]
+
+
+@auto_answer
+async def handle_compress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Buttons on compress cards: cmp:<action>:<id>."""
+    query = update.callback_query
+    app = context.application
+    _, action, cid = (query.data.split(":", 2) + ["", ""])[:3]
+    job = compress_jobs.get(cid)
+    if job is None:
+        await answer_once(query, "This compression is no longer in the list.", show_alert=True)
+        return
+    job["message_id"] = query.message.message_id
+
+    if action == "cancel":
+        if cancel_compress_job(job):
+            await answer_once(query, "Cancelling…")
+        await refresh_compress_card(app, job, force=True)
+
+    elif action == "up":
+        if not job.get("output") or not safe_join(DOWNLOAD_DIR, job["output"]).is_file():
+            await answer_once(query, "The compressed file is no longer there.", show_alert=True)
+            return
+        await answer_upload_tap(query)
+        try:
+            msg = await app.bot.send_message(chat_id=job["chat_id"], text=f"{ICON_UPLOAD} Preparing upload...")
+            message_id = msg.message_id
+        except RetryAfter:
+            message_id = None  # flood control: upload anyway, the result is held
+        run_in_background(
+            send_single_file_via_pyrogram(app, job["chat_id"], message_id, job["output"], user_id=job.get("user_id")),
+            name="upload",
+            on_error=message_error_reporter(app, job["chat_id"], message_id, "Upload"),
+        )
+
+    elif action in ("rep", "repn") and job["status"] == "done":
+        await refresh_compress_card(app, job, force=True, confirm_replace=action == "rep")
+
+    elif action == "repy" and job["status"] == "done":
+        try:
+            await asyncio.to_thread(replace_with_compressed, job)
+        except OSError as exc:
+            await answer_once(query, f"Couldn't replace it: {shorten(str(exc), 150)}", show_alert=True)
+            return
+        await answer_once(query, "Replaced the original.")
+        await refresh_compress_card(app, job, force=True)
 
 
 def shorten(text: str, max_len: int = 38) -> str:
@@ -1799,6 +2567,9 @@ async def safe_edit_message(message, text, reply_markup=None, parse_mode=None):
             parse_mode=parse_mode,
             disable_web_page_preview=True,
         )
+    except RetryAfter:
+        # Flood control: a reply would be refused too, and prolong the block.
+        return
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
             return
@@ -1866,6 +2637,13 @@ def build_settings_screen(user_id: int) -> Screen:
     return settings_views.settings_screen(get_user_settings(user_id), current_cookies())
 
 
+def build_sites_screen(page: int = 0) -> Screen:
+    lines = supported_sites.site_lines()
+    shown, page, pages = supported_sites.page_of(lines, page)
+    total = sum(1 for line in lines if not line.startswith("§ "))
+    return home_views.sites_screen(shown, page, pages, total, SUPPORTED_SITES_URL)
+
+
 def current_cookies():
     path = cookies_file()
     return cookie_store.read_summary(Path(path)) if path else None
@@ -1887,6 +2665,109 @@ COOKIE_WAIT_SECONDS = 600
 def cookies_waiting(context) -> bool:
     since = context.user_data.get("cookies_wait")
     return bool(since) and time.time() - since < COOKIE_WAIT_SECONDS
+
+
+def build_target_screen(user_id: int, *, waiting: bool = False, error: str | None = None) -> Screen:
+    return settings_views.upload_target_screen(get_user_settings(user_id), waiting=waiting, error=error)
+
+
+def target_waiting(context) -> bool:
+    since = context.user_data.get("target_wait")
+    return bool(since) and time.time() - since < FILES_WAIT_SECONDS
+
+
+def forwarded_chat_id(message) -> int | None:
+    """The channel or group a forwarded message came from, if Telegram tells us."""
+    origin = getattr(message, "forward_origin", None)
+    chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+    return getattr(chat, "id", None)
+
+
+PYRO_GROUP_TYPES = {
+    pyro_enums.ChatType.CHANNEL,
+    pyro_enums.ChatType.SUPERGROUP,
+    pyro_enums.ChatType.GROUP,
+    pyro_enums.ChatType.FORUM,
+}
+
+
+async def _check_target_with_account(client, ref: int | str) -> tuple[int, str]:
+    try:
+        chat = await client.get_chat(ref)
+    except Exception as exc:
+        raise ValueError(
+            f"Telegram can't find {ref} ({exc}). Use its @username, or open the chat once "
+            "with your account so the numeric id is known."
+        ) from exc
+    if chat.type not in PYRO_GROUP_TYPES:
+        raise ValueError("That is not a channel or group.")
+    try:
+        member = await client.get_chat_member(chat.id, "me")
+    except Exception as exc:
+        raise ValueError("Your account is not a member of it; join it first.") from exc
+    status = member.status
+    is_channel = chat.type == pyro_enums.ChatType.CHANNEL
+    if status == pyro_enums.ChatMemberStatus.ADMINISTRATOR:
+        if is_channel and not getattr(member.privileges, "can_post_messages", False):
+            raise ValueError("Your account is an admin there but can't post messages.")
+    elif status == pyro_enums.ChatMemberStatus.MEMBER and is_channel:
+        raise ValueError("Only admins can post in a channel; make your account an admin.")
+    elif status == pyro_enums.ChatMemberStatus.RESTRICTED:
+        raise ValueError("Your account is restricted there and may not be able to send files.")
+    elif status not in (pyro_enums.ChatMemberStatus.OWNER, pyro_enums.ChatMemberStatus.MEMBER,
+                        pyro_enums.ChatMemberStatus.ADMINISTRATOR):
+        raise ValueError("Your account is not a member of it; join it first.")
+    return chat.id, chat.title or chat.username or str(chat.id)
+
+
+async def _check_target_with_bot(bot, ref: int | str) -> tuple[int, str]:
+    try:
+        chat = await bot.get_chat(ref)
+        member = await bot.get_chat_member(chat.id, bot.id)
+    except Exception as exc:
+        raise ValueError(
+            f"The bot can't open {ref} ({exc}). Add the bot to it as an admin first."
+        ) from exc
+    if chat.type not in ("channel", "group", "supergroup"):
+        raise ValueError("That is not a channel or group.")
+    status = member.status
+    if chat.type == "channel":
+        if status != "administrator" or not getattr(member, "can_post_messages", False):
+            if status != "creator":
+                raise ValueError("The bot must be an admin that can post in the channel.")
+    elif status == "restricted" and not getattr(member, "can_send_documents", False):
+        raise ValueError("The bot is restricted there and can't send files.")
+    elif status not in ("administrator", "creator", "member", "restricted"):
+        raise ValueError("The bot is not a member of that group; add it first.")
+    return chat.id, chat.title or chat.username or str(chat.id)
+
+
+async def resolve_upload_target(bot, ref: int | str) -> tuple[int, str]:
+    """Check uploads can be posted in ``ref``: (chat id, title), or ValueError saying why.
+
+    Uploads go through the user account (Pyrogram) when it is logged in, so
+    that account must be able to post; in bot-only mode the bot must.
+    """
+    try:
+        client = await get_pyrogram_client()
+    except PyrogramUnavailable:
+        return await _check_target_with_bot(bot, ref)
+    return await _check_target_with_account(client, ref)
+
+
+async def set_upload_target(update: Update, context, ref: int | str) -> None:
+    """Validate and save the upload target typed or forwarded by the user."""
+    user_id = update.effective_user.id
+    status = await update.message.reply_text(f"🔎 Checking {ref}…")
+    try:
+        chat_id, title = await resolve_upload_target(context.bot, ref)
+    except ValueError as exc:
+        await show_screen(status, build_target_screen(user_id, waiting=True, error=str(exc)))
+        return
+    context.user_data.pop("target_wait", None)
+    await update_setting(user_id, "target_chat_id", chat_id)
+    await update_setting(user_id, "target_chat_title", title)
+    await show_screen(status, build_target_screen(user_id))
 
 
 def looks_like_cookie_file(name: str | None) -> bool:
@@ -2219,7 +3100,7 @@ async def show_folder(message, rel_path: str, page: int = 0, *, edit: bool = Tru
     )
 
 
-async def show_file(message, rel_path: str, page: int = 0, *, edit: bool = True):
+async def show_file(message, rel_path: str, page: int = 0, *, edit: bool = True, user_id: int | None = None):
     info = await asyncio.to_thread(file_info, rel_path)
     if info["is_dir"]:
         await show_folder(message, rel_path, 0, edit=edit)
@@ -2230,6 +3111,7 @@ async def show_file(message, rel_path: str, page: int = 0, *, edit: bool = True)
         can_send_here=info["size"] <= BOT_MAX_DOCUMENT_BYTES,
         has_saved_messages=pyrogram_unavailable_reason() is None,
         send_limit=BOT_MAX_DOCUMENT_BYTES,
+        upload_label=upload_target_label(get_user_settings(user_id or 0)),
     ), edit=edit)
 
 
@@ -2361,7 +3243,7 @@ async def handle_file_selection(update: Update, context, action: str, parts: lis
             return
         if action == "sup":
             batch_select_sessions.pop(user_id, None)
-            await answer_once(query)
+            await answer_upload_tap(query)
             await safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing upload of {len(selected)} file(s)...")
             run_in_background(
                 send_folder_files_via_pyrogram(
@@ -2524,7 +3406,7 @@ def build_progress_bar(current: int, total: int, width: int = 20) -> str:
     return f"[{bar}] {pct}%"
 
 
-def split_file_into_chunks(file_path: str, chunk_size: int = 2 * 1024 * 1024 * 1024) -> list:
+def split_file_into_chunks(file_path: str, chunk_size: int = video_split.DEFAULT_PART_CAP) -> list:
     """
     Split a file into chunks if it exceeds chunk_size.
     Returns a list of (chunk_path, chunk_index, total_chunks) tuples.
@@ -2587,8 +3469,73 @@ def cleanup_file_chunks(chunks: list) -> None:
             pass
 
 
+def prepare_upload_parts(rel_path: str, cap: int) -> tuple[list, bool]:
+    """The pieces to upload for ``rel_path``: (parts, send them as documents).
+
+    Parts are split_file_into_chunks()-style (path, index, total) tuples. A
+    video over ``cap`` is cut by ffmpeg into parts that each play; anything
+    else (or a video ffmpeg can't cut) is split into raw byte chunks, which
+    only make sense as documents to join back together.
+    """
+    full = safe_join(DOWNLOAD_DIR, rel_path)
+    if full.stat().st_size <= cap:
+        return [(str(full), 1, 1)], False
+    if get_send_method(str(full)) == "video":
+        parts = video_split.split_video(
+            full, full.parent / f"{full.stem}_chunks", cap, ffmpeg=FFMPEG_BIN, ffprobe=FFPROBE_BIN
+        )
+        if parts:
+            return [(str(p), i, len(parts)) for i, p in enumerate(parts, start=1)], False
+        logger.warning("Couldn't split %s into playable parts; sending byte chunks", rel_path)
+    return split_file_into_chunks(rel_path, cap), True
+
+
+async def upload_part_cap(client) -> int:
+    """How big one upload may be for the logged-in account (Premium doubles it)."""
+    try:
+        me = await client.get_me()
+    except Exception as exc:
+        logger.debug("get_me failed, assuming no Premium: %s", exc)
+        return video_split.DEFAULT_PART_CAP
+    return video_split.part_cap(bool(getattr(me, "is_premium", False)))
+
+
+def _positive_int(value) -> int | None:
+    """``value`` as a whole number above zero, or None if it isn't one.
+
+    ffprobe prints ``N/A`` (or nothing) for files it can't fully read, such as
+    an MP4 whose moov atom hasn't been downloaded yet.
+    """
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return int(number)
+
+
+def video_send_kwargs(meta) -> dict:
+    """width/height/duration for Pyrogram's send_video, leaving out bad values.
+
+    Pyrogram packs these as raw numbers, so a None or a string crashes the
+    upload (struct.error); a missing key falls back to Pyrogram's default of 0.
+    """
+    meta = meta or {}
+    kwargs = {}
+    for key in ("width", "height", "duration"):
+        value = _positive_int(meta.get(key))
+        if value is not None:
+            kwargs[key] = value
+    return kwargs
+
+
 def get_video_metadata(file_path: str):
-    """Extract video width, height and duration using ffprobe."""
+    """Extract video width, height and duration using ffprobe.
+
+    Each value is a positive int, or None when ffprobe couldn't tell.
+    """
+    meta = {"width": None, "height": None, "duration": None}
     try:
         result = subprocess.run(
             [
@@ -2603,34 +3550,41 @@ def get_video_metadata(file_path: str):
             text=True,
             timeout=15,
         )
-
-        width = None
-        height = None
-        duration = None
-
-        for line in result.stdout.splitlines():
-            if line.startswith("width="):
-                width = int(float(line.split("=", 1)[1].strip()))
-            elif line.startswith("height="):
-                height = int(float(line.split("=", 1)[1].strip()))
-            elif line.startswith("duration="):
-                try:
-                    duration = int(float(line.split("=", 1)[1].strip()))
-                except Exception:
-                    duration = None
-
-        return {
-            "width": width,
-            "height": height,
-            "duration": duration,
-        }
-
     except Exception:
-        return {
-            "width": None,
-            "height": None,
-            "duration": None,
-        }
+        return meta
+
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key in meta and meta[key] is None:
+            meta[key] = _positive_int(value)
+    return meta
+
+
+UPLOAD_GUARD_STATUS_KEYS = ["gid", "status", "files"]
+
+
+async def unfinished_aria2_downloads() -> list[dict]:
+    """aria2's active and waiting downloads, with their files.
+
+    Calls RPC directly instead of tell_active(), which would start aria2 if it
+    isn't running; raises if it can't be reached.
+    """
+    active = await aria2_client.call("aria2.tellActive", UPLOAD_GUARD_STATUS_KEYS)
+    waiting = await aria2_client.call("aria2.tellWaiting", 0, 1000, UPLOAD_GUARD_STATUS_KEYS)
+    return list(active or []) + list(waiting or [])
+
+
+async def _video_metadata_readable(path: Path) -> bool:
+    meta = await asyncio.to_thread(get_video_metadata, str(path))
+    return any(meta.get(key) for key in ("width", "height", "duration"))
+
+
+async def upload_refusal(path: str | Path) -> str | None:
+    """Why this file (relative to Download/, or absolute) must not be uploaded yet, or None."""
+    full = Path(path) if Path(path).is_absolute() else safe_join(DOWNLOAD_DIR, str(path))
+    return await upload_guard.check_upload(
+        full, fetch_statuses=unfinished_aria2_downloads, probe_readable=_video_metadata_readable
+    )
 
 
 def cleanup_orphan_thumbnails(directory: Path = None) -> None:
@@ -2853,6 +3807,8 @@ def ytdlp_common_options(url: str, resolved_video) -> dict:
         opts["proxy"] = YTDLP_PROXY
     if requires_ytdlp_generic_impersonation(url):
         opts["extractor_args"] = {"generic": {"impersonate": ["chrome"]}}
+    if requires_ytdlp_impersonation(url):
+        opts["impersonate"] = ImpersonateTarget.from_str("chrome")
     if resolved_video.referer:
         opts["http_headers"]["Referer"] = resolved_video.referer
     return opts
@@ -3154,6 +4110,45 @@ async def convert_manga_folder_to_pdf_job(folder: Path, user_id: int) -> Path:
     return pdf_path
 
 
+download_slots = DownloadSlots()
+
+
+async def wait_for_download_slot(app: Application, job: dict, cancelled=None) -> bool:
+    """Hold a job until it may download (Settings › Downloads at once).
+
+    While it waits its card says "Queued (position n)". False if the job was
+    cancelled in the queue. The caller frees the slot with
+    ``download_slots.release`` when the download ends.
+    """
+    user_id = job.get("user_id") or 0
+    shown = {"position": None}
+
+    async def queued(position: int | None):
+        force = position != shown["position"]
+        shown["position"] = position
+        job["status"] = "queued"
+        job["queue_position"] = position
+        await maybe_auto_update_status_message(app, job, force=force)
+
+    acquired = await download_slots.acquire(
+        user_id, job["id"], lambda: limit_of(get_user_settings(user_id)),
+        on_wait=queued, cancelled=cancelled or (lambda: job.get("status") == "cancelled"),
+    )
+    job.pop("queue_position", None)
+    if acquired and job.get("status") == "queued":
+        job["status"] = "starting"
+    return acquired
+
+
+async def run_with_download_slot(app: Application, job: dict, run) -> None:
+    """Run ``run()`` once the job has a download slot, and free the slot after."""
+    try:
+        if await wait_for_download_slot(app, job):
+            await run()
+    finally:
+        download_slots.release(job.get("user_id") or 0, job["id"])
+
+
 async def start_manga_download(app: Application, chat_id: int, url: str, user_id: int = None):
     global job_counter, download_jobs
 
@@ -3216,7 +4211,7 @@ async def start_manga_download(app: Application, chat_id: int, url: str, user_id
             await maybe_auto_update_status_message(app, job, force=True)
             await finish_job_card(app, job)
 
-    job["task"] = run_in_background(run_job(), name=f"manga-{job_id}")
+    job["task"] = run_in_background(run_with_download_slot(app, job, run_job), name=f"manga-{job_id}")
     return job
 
 
@@ -3318,7 +4313,7 @@ async def start_gallery_download(
             job["process"] = None
             refresher.cancel()
 
-    job["task"] = run_in_background(run_job(), name=f"gallery-{job_id}")
+    job["task"] = run_in_background(run_with_download_slot(app, job, run_job), name=f"gallery-{job_id}")
     return job
 
 
@@ -3423,7 +4418,7 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
         finally:
             job["process"] = None
 
-    job["task"] = run_in_background(run_job(), name=f"spotify-{job_id}")
+    job["task"] = run_in_background(run_with_download_slot(app, job, run_job), name=f"spotify-{job_id}")
     return job
 
 
@@ -3670,6 +4665,17 @@ async def start_ytdlp_download(
             await finish_job_card(app, job)
 
     async def finish_download():
+        try:
+            # A playlist item runs under its batch's slot; waiting for one of
+            # its own would deadlock at a limit of 1.
+            if parent_job is None and not await wait_for_download_slot(app, job, is_cancelled):
+                await finish_cancelled()
+                return
+            await download()
+        finally:
+            download_slots.release(job.get("user_id") or 0, job_id)
+
+    async def download():
         refresh_task = asyncio.create_task(refresh_ytdlp_status())
         try:
             try:
@@ -3752,42 +4758,60 @@ async def upload_and_delete_batch_artifact(
         raise RuntimeError(f"Downloaded file is outside the managed Download folder: {full}") from exc
     if not full.is_file():
         raise FileNotFoundError(str(full))
-
-    chunks = split_file_into_chunks(rel_path)
-    try:
-        for chunk_path, chunk_index, chunk_total in chunks:
-            if job.get("status") == "cancelled":
-                return False
-            chunk = Path(chunk_path).resolve()
-            chunk_rel_path = file_rel_path(chunk)
-
-            async def progress(current, total, *, part=chunk_index, parts=chunk_total):
-                if job.get("status") == "cancelled":
-                    raise StopTransmission()
-                percent = (current / total * 100) if total else 0.0
-                part_text = f", part {part}/{parts}" if parts > 1 else ""
-                job["status"] = "uploading"
-                job["last_line"] = (
-                    f"Uploading {item_index}/{total_items}{part_text}: "
-                    f"{full.name} ({percent:.1f}%)"
-                )
-                job["upload_length"] = int(current or 0)
-                await maybe_auto_update_status_message(app, job)
-
-            job["status"] = "uploading"
-            job["last_line"] = f"Uploading {item_index}/{total_items}: {full.name}"
-            await maybe_auto_update_status_message(app, job, force=True)
-            try:
-                await pyrogram_send_file(chunk_rel_path, progress_callback=progress)
-            except StopTransmission:
-                return False
-    finally:
-        cleanup_file_chunks(chunks)
-
-    if job.get("status") == "cancelled":
+    refusal = await upload_refusal(full)
+    if refusal:
+        # Kept on disk, not deleted: it can be uploaded from Files once complete.
+        logger.info("Upload of %s refused: %s", rel_path, refusal)
+        job["last_line"] = f"{full.name}: {refusal}"
+        await maybe_auto_update_status_message(app, job, force=True)
         return False
 
-    full.unlink()
+    target = upload_target(get_user_settings(job.get("user_id") or 0))
+    # Held through the preview so this video and its preview stay adjacent.
+    async with _send_chain(job["chat_id"], target):
+        cap = await upload_part_cap(await get_pyrogram_client())
+        chunks, as_document = await asyncio.to_thread(prepare_upload_parts, rel_path, cap)
+        try:
+            for chunk_path, chunk_index, chunk_total in chunks:
+                if job.get("status") == "cancelled":
+                    return False
+                chunk = Path(chunk_path).resolve()
+                chunk_rel_path = file_rel_path(chunk)
+
+                async def progress(current, total, *, part=chunk_index, parts=chunk_total):
+                    if job.get("status") == "cancelled":
+                        raise StopTransmission()
+                    percent = (current / total * 100) if total else 0.0
+                    part_text = f", part {part}/{parts}" if parts > 1 else ""
+                    job["status"] = "uploading"
+                    job["last_line"] = (
+                        f"Uploading {item_index}/{total_items}{part_text}: "
+                        f"{full.name} ({percent:.1f}%)"
+                    )
+                    job["upload_length"] = int(current or 0)
+                    await maybe_auto_update_status_message(app, job)
+
+                job["status"] = "uploading"
+                job["last_line"] = f"Uploading {item_index}/{total_items}: {full.name}"
+                await maybe_auto_update_status_message(app, job, force=True)
+                try:
+                    await pyrogram_send_file(
+                        chunk_rel_path, progress_callback=progress, chat_id=target,
+                        force_document=as_document, max_size=cap,
+                    )
+                except StopTransmission:
+                    return False
+        finally:
+            cleanup_file_chunks(chunks)
+
+        if job.get("status") == "cancelled":
+            return False
+
+        if wants_upload_previews(job.get("user_id"), full):
+            await send_upload_previews(app, job["chat_id"], target, rel_path, delete_after=True)
+        else:
+            full.unlink()
+            await asyncio.to_thread(prune_empty_folders, full)
     job["uploaded_items"] = int(job.get("uploaded_items", 0) or 0) + 1
     job["deleted_items"] = int(job.get("deleted_items", 0) or 0) + 1
     job["upload_length"] = 0
@@ -3805,6 +4829,7 @@ async def run_video_batch(
 ) -> None:
     """Run provider batch items sequentially using the job's snapshotted mode."""
     mode = normalize_batch_download_mode(job.get("batch_download_mode"))
+    preset = get_user_settings(user_id or 0).get("auto_upload_types")
 
     async def process_item(item_url: str, index: int, total_items: int) -> dict:
         child = await start_ytdlp_download(
@@ -3826,6 +4851,20 @@ async def run_video_batch(
         if mode is BatchDownloadMode.UPLOAD_AND_DELETE:
             if not filepath:
                 raise RuntimeError(f"{item_label} {index} completed without an output file path.")
+            if not upload_filter.matches(preset, filepath):
+                full = Path(filepath).resolve()
+                full.unlink(missing_ok=True)
+                await asyncio.to_thread(prune_empty_folders, full)
+                job["filtered_items"] = int(job.get("filtered_items", 0) or 0) + 1
+                job["last_line"] = (
+                    f"Deleted {item_label.lower()} {index}/{total_items}: "
+                    f"not {upload_filter.label(preset)}"
+                )
+                logger.info(
+                    "Auto-upload filter %s deleted %s from job #%s",
+                    upload_filter.normalize(preset), full.name, job.get("id"),
+                )
+                return
             deleted = await upload_and_delete_batch_artifact(
                 app, job, filepath, index, total_items
             )
@@ -3858,6 +4897,13 @@ async def run_video_batch(
         on_progress=on_progress,
         is_cancelled=lambda: job.get("status") == "cancelled",
     )
+    filtered = int(job.get("filtered_items", 0) or 0)
+    if filtered and not job.get("uploaded_items"):
+        job["auto_upload_note"] = upload_filter.filtered_out_note(preset, filtered)
+    elif filtered:
+        job["auto_upload_note"] = (
+            f"🧹 {filtered} item(s) deleted by the auto-upload filter ({upload_filter.label(preset)})"
+        )
 
 
 async def start_hentai_playlist_download(
@@ -3937,7 +4983,7 @@ async def start_hentai_playlist_download(
             await maybe_auto_update_status_message(app, job, force=True)
             await finish_job_card(app, job)
 
-    asyncio.create_task(run_playlist())
+    run_in_background(run_with_download_slot(app, job, run_playlist), name=f"batch-{job_id}")
     return job
 
 
@@ -4018,7 +5064,7 @@ async def start_pornhub_model_download(
             await maybe_auto_update_status_message(app, job, force=True)
             await finish_job_card(app, job)
 
-    asyncio.create_task(run_model_playlist())
+    run_in_background(run_with_download_slot(app, job, run_model_playlist), name=f"batch-{job_id}")
     return job
 
 
@@ -4172,12 +5218,12 @@ def message_error_reporter(app: Application, chat_id: int, message_id: int, what
     """on_error callback that turns a progress message into a failure notice."""
 
     async def report(exc: Exception) -> None:
-        await _edit_dashboard_message(
-            app,
-            chat_id,
-            message_id,
+        # Without a progress message (flood control kept it from being sent)
+        # it is posted new; while the chat is blocked it is held until it lifts.
+        await show_or_hold(
+            app, chat_id, message_id,
             f"{ICON_FAIL} {what} failed.\n\nReason:\n{shorten(str(exc), 600)}",
-            InlineKeyboardMarkup([[InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")]]),
+            "files",
         )
 
     return report
@@ -4186,6 +5232,9 @@ def message_error_reporter(app: Application, chat_id: int, message_id: int, what
 # =========================================================
 # Pyrogram
 # =========================================================
+
+MAX_FLOOD_WAIT = 300  # seconds; a longer FloodWait fails the send instead of blocking uploads
+
 
 async def send_with_flood_wait_handling(send_coroutine, max_retries: int = 5):
     """
@@ -4207,6 +5256,11 @@ async def send_with_flood_wait_handling(send_coroutine, max_retries: int = 5):
             return await send_coroutine()
         except FloodWait as e:
             wait_time = e.value
+            if wait_time > MAX_FLOOD_WAIT:
+                # Callers hold the chat's send chain (and the preview lock):
+                # sleeping hours here would stall every other upload too.
+                logger.error("FloodWait of %ss is too long to wait out; giving up on this send", wait_time)
+                raise
             logger.warning(
                 f"FloodWait: Telegram rate-limiting. "
                 f"Waiting {wait_time} seconds (attempt {attempt + 1}/{max_retries})"
@@ -4239,10 +5293,25 @@ def pyrogram_unavailable_reason() -> str | None:
     )
 
 
+_pyro_start_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
 async def get_pyrogram_client():
+    """The started user-account client, starting it on first use.
+
+    Callers race here (uploads, previews, notices); the lock makes them share
+    one client instead of opening the same session file twice. The client is
+    only kept once it started, so a failed start is retried by the next call
+    rather than handing out a client that was never connected.
+    """
     global pyro_client
 
-    if pyro_client is None:
+    if pyro_client is not None:
+        return pyro_client
+    lock = _pyro_start_locks.setdefault(asyncio.get_running_loop(), asyncio.Lock())
+    async with lock:
+        if pyro_client is not None:
+            return pyro_client
         reason = pyrogram_unavailable_reason()
         if reason:
             raise PyrogramUnavailable(reason)
@@ -4251,23 +5320,26 @@ async def get_pyrogram_client():
             if PYRO_SESSION_STRING
             else {}
         )
-        pyro_client = Client(
+        client = Client(
             PYRO_SESSION_NAME,
             api_id=API_ID,
             api_hash=API_HASH,
             workdir=str(BASE_DIR),
             **session_kwargs,
         )
-        await pyro_client.start()
-
-        me = await pyro_client.get_me()
+        await client.start()
+        try:
+            me = await client.get_me()
+        except Exception:
+            await client.stop()
+            raise
         if getattr(me, "is_bot", False):
-            await pyro_client.stop()
-            pyro_client = None
+            await client.stop()
             raise RuntimeError(
                 f"Pyrogram session is logged in as a bot.\n"
                 f'Delete "{PYRO_SESSION_NAME}.session" and log in with your personal Telegram account.'
             )
+        pyro_client = client
 
     return pyro_client
 
@@ -4282,7 +5354,18 @@ async def stop_pyrogram_client():
         pyro_client = None
 
 
-async def pyrogram_send_file(rel_path: str, progress_callback=None):
+async def pyrogram_send_file(
+    rel_path: str,
+    progress_callback=None,
+    chat_id: int | str = "me",
+    *,
+    force_document: bool = False,
+    max_size: int | None = None,
+):
+    """Send one file with the user account, to Saved Messages unless ``chat_id`` is given.
+
+    ``force_document`` sends it as a plain file (byte-split parts can't play).
+    """
     client = await get_pyrogram_client()
     full = safe_join(DOWNLOAD_DIR, rel_path)
 
@@ -4292,11 +5375,11 @@ async def pyrogram_send_file(rel_path: str, progress_callback=None):
         raise IsADirectoryError(str(full))
 
     size = full.stat().st_size
-    if size > MAX_SEND_SIZE:
+    if size > (max_size or MAX_SEND_SIZE):
         raise ValueError(f"File exceeds configured limit: {human_size(size)}")
 
     caption = build_upload_caption(rel_path)
-    send_method = get_send_method(str(full))
+    send_method = "document" if force_document else get_send_method(str(full))
     thumbnail_path = None
 
     try:
@@ -4316,14 +5399,12 @@ async def pyrogram_send_file(rel_path: str, progress_callback=None):
 
             await send_with_flood_wait_handling(
                 lambda: client.send_video(
-                    chat_id="me",
+                    chat_id=chat_id,
                     video=str(full),
                     caption=caption,
                     thumb=thumbnail_path,
-                    width=video_meta.get("width"),
-                    height=video_meta.get("height"),
-                    duration=video_meta.get("duration"),
                     supports_streaming=True,
+                    **video_send_kwargs(video_meta),
                     progress=progress_callback,
                 )
             )
@@ -4331,7 +5412,7 @@ async def pyrogram_send_file(rel_path: str, progress_callback=None):
         elif send_method == "audio":
             await send_with_flood_wait_handling(
                 lambda: client.send_audio(
-                    chat_id="me",
+                    chat_id=chat_id,
                     audio=str(full),
                     caption=caption,
                     progress=progress_callback,
@@ -4341,7 +5422,7 @@ async def pyrogram_send_file(rel_path: str, progress_callback=None):
         elif send_method == "photo":
             await send_with_flood_wait_handling(
                 lambda: client.send_photo(
-                    chat_id="me",
+                    chat_id=chat_id,
                     photo=str(full),
                     caption=caption,
                     progress=progress_callback,
@@ -4351,7 +5432,7 @@ async def pyrogram_send_file(rel_path: str, progress_callback=None):
         else:
             await send_with_flood_wait_handling(
                 lambda: client.send_document(
-                    chat_id="me",
+                    chat_id=chat_id,
                     document=str(full),
                     caption=caption,
                     thumb=thumbnail_path,
@@ -4393,7 +5474,9 @@ def upload_done_markup() -> InlineKeyboardMarkup:
     ])
 
 
-def new_upload_job(chat_id: int, message_id: int, files: list) -> str:
+def new_upload_job(
+    chat_id: int, message_id: int, files: list, target: int | str = "me", target_label: str = "Saved Messages"
+) -> str:
     global upload_counter
     upload_counter += 1
     upload_id = f"upload_{upload_counter}"
@@ -4407,8 +5490,17 @@ def new_upload_job(chat_id: int, message_id: int, files: list) -> str:
         "sent_count": 0,
         "last_update": 0,
         "cancelled": False,
+        "target": target,
+        "target_label": target_label,
     }
+    # Finished uploads are kept for the dashboard, but not for ever.
+    finished = [uid for uid, j in upload_jobs.items() if j.get("status") != "uploading"]
+    for uid in finished[: max(0, len(finished) - MAX_FINISHED_UPLOADS)]:
+        upload_jobs.pop(uid, None)
     return upload_id
+
+
+MAX_FINISHED_UPLOADS = 100
 
 
 def cancel_upload(upload_id: str) -> bool:
@@ -4434,7 +5526,7 @@ async def update_upload_progress(app: Application, chat_id: int, message_id: int
     job["last_update"] = now
 
     text = (
-        f"{ICON_UPLOAD} Uploading to Saved Messages\n\n"
+        f"{ICON_UPLOAD} Uploading to {job.get('target_label', 'Saved Messages')}\n\n"
         f"{file_label}\n"
         f"{build_progress_bar(sent, total, width=15)}\n"
         f"{ICON_BOX} {human_size(sent)} / {human_size(total)}"
@@ -4448,17 +5540,21 @@ async def update_upload_progress(app: Application, chat_id: int, message_id: int
 
 
 async def _send_via_bot_api(app: Application, job: dict, rel_path: str) -> None:
-    """Bot-only mode: send a file of up to 50 MB to the chat through the Bot API."""
+    """Bot-only mode: send a file of up to 50 MB through the Bot API.
+
+    It goes to the upload target when one is set, otherwise to the chat.
+    """
     full = safe_join(DOWNLOAD_DIR, rel_path)
     size = full.stat().st_size
     if size > BOT_MAX_DOCUMENT_BYTES:
         raise RuntimeError(
             f"{full.name} is {human_size(size)}. Without the Pyrogram login only files up to "
-            "50 MB can be sent; set up the login to upload bigger files to Saved Messages."
+            "50 MB can be sent; set up the login to upload bigger files."
         )
+    target = job.get("target", "me")
     with open(full, "rb") as fh:
         await app.bot.send_document(
-            chat_id=job["chat_id"],
+            chat_id=job["chat_id"] if target == "me" else target,
             document=fh,
             caption=build_upload_caption(rel_path),
             read_timeout=300,
@@ -4475,7 +5571,19 @@ async def _upload_one_file(app: Application, upload_id: str, rel_path: str, labe
     except PyrogramUnavailable:
         await _send_via_bot_api(app, job, rel_path)
         return True
-    chunks = split_file_into_chunks(rel_path)
+    client = await get_pyrogram_client()
+    cap = await upload_part_cap(client)
+    if safe_join(DOWNLOAD_DIR, rel_path).stat().st_size > cap:
+        try:
+            await _edit_dashboard_message(
+                app, job["chat_id"], job["message_id"],
+                f"{ICON_UPLOAD} Uploading to {job.get('target_label', 'Saved Messages')}\n\n"
+                f"{label}\n✂️ Splitting into parts of up to {human_size(cap)}…",
+                upload_progress_markup(upload_id),
+            )
+        except Exception as exc:
+            logger.debug("Upload split notice not shown: %s", exc)
+    chunks, as_document = await asyncio.to_thread(prepare_upload_parts, rel_path, cap)
     try:
         for chunk_path, part, parts in chunks:
             if job["cancelled"]:
@@ -4488,7 +5596,10 @@ async def _upload_one_file(app: Application, upload_id: str, rel_path: str, labe
                 )
 
             try:
-                await pyrogram_send_file(chunk_path, progress_callback=progress)
+                await pyrogram_send_file(
+                    chunk_path, progress_callback=progress, chat_id=job["target"],
+                    force_document=as_document, max_size=cap,
+                )
             except StopTransmission:
                 return False
             except RPCError as exc:
@@ -4511,15 +5622,23 @@ async def upload_files_via_pyrogram(
     *,
     title: str,
     user_id: int = None,
+    auto: bool = False,
 ) -> dict:
-    """Upload ``files`` (paths relative to Download/) to Saved Messages.
+    """Upload ``files`` (paths relative to Download/) to the user's upload target.
 
+    That is Saved Messages unless a channel or group is set in Settings.
     Progress is shown on ``message_id`` with a Cancel button; the message ends
-    as a summary. Returns the upload job.
+    as a summary. Returns the upload job. Each video is followed by its GIF
+    preview in the same chat (unless turned off in Settings), for automatic
+    and manual uploads alike. ``auto`` (an automatic upload) also drops
+    folders emptied by deleting.
     """
     if not files:
         raise RuntimeError("No files to upload.")
-    upload_id = new_upload_job(chat_id, message_id, files)
+    settings = get_user_settings(user_id or 0)
+    upload_id = new_upload_job(
+        chat_id, message_id, files, upload_target(settings), upload_target_label(settings)
+    )
     job = upload_jobs[upload_id]
     total_files = len(files)
     try:
@@ -4529,32 +5648,228 @@ async def upload_files_via_pyrogram(
             job["current_file"] = idx
             name = os.path.basename(rel)
             label = f"File {idx}/{total_files}: {name}" if total_files > 1 else name
-            if not await _upload_one_file(app, upload_id, rel, label):
-                break
-            job["sent_count"] += 1
-            await maybe_delete_file_after_upload(user_id, rel)
+            refusal = await upload_refusal(rel)
+            if refusal:
+                # Sending a half-downloaded file gives a broken video; the file
+                # is kept (not deleted) so it can be uploaded once it's done.
+                logger.info("Upload of %s refused: %s", rel, refusal)
+                job.setdefault("refused", []).append((name, refusal))
+                continue
+            chain = _send_chain(chat_id, job["target"])
+            if chain.locked():
+                # Without this the message sits on "Preparing upload..." for as
+                # long as another upload (and its preview) takes.
+                try:
+                    await _edit_dashboard_message(
+                        app, chat_id, message_id,
+                        f"{ICON_UPLOAD} Waiting for the upload ahead to finish...\n\n{label}",
+                        upload_progress_markup(upload_id),
+                    )
+                except _DashboardMessageGone:
+                    pass
+            async with chain:
+                if not await _upload_one_file(app, upload_id, rel, label):
+                    break
+                job["sent_count"] += 1
+                if wants_upload_previews(user_id, rel):
+                    await send_upload_previews(
+                        app, chat_id, job["target"], rel,
+                        delete_after=bool(user_id and settings.get("auto_delete_files_after_upload")),
+                        prune=auto,
+                    )
+                else:
+                    await maybe_delete_file_after_upload(user_id, rel, prune=auto)
     except Exception:
         job["status"] = "failed"
         raise
 
     sent = job["sent_count"]
+    refused = job.get("refused") or []
     if job["cancelled"]:
         job["status"] = "cancelled"
         text = (
             f"{ICON_STOP} Upload cancelled\n\n{title}\n"
             f"Uploaded before cancelling: {sent}/{total_files}"
         )
+    elif refused and not sent:
+        job["status"] = "refused"
+        text = f"⏳ Upload refused\n\n{title}"
+        if total_files > 1:
+            text += f"\nFiles: 0/{total_files}"
     else:
         job["status"] = "completed"
-        destination = "this chat" if job.get("via_bot") else "Saved Messages"
+        destination = (
+            "this chat" if job.get("via_bot") and job["target"] == "me" else job["target_label"]
+        )
         text = f"{ICON_OK} Upload complete\n\n{title}\nSent to: {destination}"
         if total_files > 1:
             text += f"\nFiles: {sent}/{total_files}"
-    try:
-        await _edit_dashboard_message(app, chat_id, message_id, text, upload_done_markup())
-    except _DashboardMessageGone:
-        await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=upload_done_markup())
+    if refused:
+        text += "\n\n" + "\n".join(f"⏳ {name}: {reason}" for name, reason in refused[:10])
+        if len(refused) > 10:
+            text += f"\n…and {len(refused) - 10} more"
+    await _show_upload_result(app, chat_id, message_id, text)
     return job
+
+
+async def _show_upload_result(app: Application, chat_id: int, message_id: int | None, text: str) -> None:
+    """Show an upload's summary on its message, or a new one if there is none.
+
+    While Telegram's flood control blocks the chat the summary is held and
+    shown once it lifts (``hold_message``), so the message does not stay on
+    "Preparing upload..." or a stale progress bar for good.
+    """
+    await show_or_hold(app, chat_id, message_id, text, "upload_done")
+
+
+# Buttons a held message gets when it is finally posted (markups aren't JSON).
+_HELD_MARKUPS = {
+    "upload_done": lambda: upload_done_markup(),
+    "files": lambda: InlineKeyboardMarkup(
+        [[InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")]]
+    ),
+}
+HELD_SPACING = 2.0  # seconds between held messages, so posting them doesn't re-trigger flood control
+HELD_MAX_ATTEMPTS = 5
+HELD_RECHECK = 30.0  # seconds between checks whether a blocked chat takes new messages again
+_held_flushers: dict[int, asyncio.Task] = {}
+
+
+async def show_or_hold(
+    app: Application, chat_id: int, message_id: int | None, text: str, buttons: str | None = None
+) -> None:
+    """Turn ``message_id`` into ``text`` (or post it new); while the chat is blocked, hold it."""
+    if flood_guard.can_send(chat_id) and await _post_message_now(
+        app, chat_id, message_id, text, buttons
+    ):
+        return
+    if flood_guard.blocked_for(chat_id):
+        hold_message(app, chat_id, {"text": text, "message_id": message_id, "buttons": buttons})
+
+
+async def _post_message_now(
+    app: Application, chat_id: int, message_id: int | None, text: str, buttons: str | None
+) -> bool:
+    """Edit ``message_id`` to ``text``, or send it new. False if Telegram refused (flood control)."""
+    markup = _HELD_MARKUPS[buttons]() if buttons else None
+    if message_id:
+        try:
+            if await _edit_dashboard_message(app, chat_id, message_id, text, markup):
+                return True
+            if not flood_guard.can_send(chat_id):
+                return False
+            # Edit refused (by flood control, which may still let a new message
+            # through, or for another reason): the result must still be seen.
+        except _DashboardMessageGone:
+            pass
+    try:
+        await app.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        return True
+    except RetryAfter as exc:
+        flood_guard.note(chat_id, _retry_seconds(exc))
+        return False
+
+
+def _retry_seconds(exc: RetryAfter) -> float:
+    retry_after = getattr(exc, "retry_after", 5) or 5
+    if hasattr(retry_after, "total_seconds"):
+        retry_after = retry_after.total_seconds()
+    return float(retry_after)
+
+
+def hold_message(app: Application, chat_id: int, item: dict) -> None:
+    """Post ``item`` in ``chat_id`` once its flood control lifts (kept across restarts)."""
+    flood_guard.hold(chat_id, item)
+    logger.info("Message for chat %s held until flood control lifts (%s)", chat_id, flood_guard.lift_text(chat_id))
+    schedule_held_flush(app, chat_id)
+    run_in_background(announce_flood_block(chat_id), name=f"flood-notice-{chat_id}")
+
+
+def schedule_held_flush(app: Application, chat_id: int) -> None:
+    """Start the one task per chat that posts its held messages when the block lifts."""
+    task = _held_flushers.get(chat_id)
+    if task is not None and not task.done():
+        return
+    _held_flushers[chat_id] = run_in_background(
+        _flush_held_messages(app, chat_id), name=f"held-messages-{chat_id}"
+    )
+
+
+async def _flush_held_messages(app: Application, chat_id: int) -> None:
+    """Wait out the block, then post the held messages one by one (oldest first).
+
+    A 429 on the way just waits for the new block; each message gets a few
+    attempts, so a message Telegram never accepts can't loop for ever.
+    """
+    attempts: dict[int, int] = {}
+    while True:
+        items = flood_guard.held(chat_id)
+        if not items:
+            return
+        remaining = flood_guard.blocked_for(chat_id)
+        if remaining:
+            # Telegram may take new messages before the block ends (a reply
+            # proved it): post plain results as new messages then. Job cards
+            # are edits, so they wait for the end.
+            items = [i for i in items if i.get("job_id") is None] if flood_guard.sends_open(chat_id) else []
+            if not items:
+                await asyncio.sleep(min(remaining + 5, HELD_RECHECK))
+                continue
+        item = items[0]
+        key = id(item)
+        try:
+            if item.get("job_id") is not None:
+                job = download_jobs.get(item["job_id"])
+                posted = True
+                if job is not None:
+                    await finish_job_card(app, job)
+                    posted = job.get("card_final") == job.get("status")
+            else:
+                posted = await _post_message_now(
+                    app, chat_id, item.get("message_id"), item.get("text", ""), item.get("buttons")
+                )
+        except Exception:
+            logger.exception("Posting a held message in chat %s failed", chat_id)
+            posted = False
+        if not remaining or flood_guard.sends_open(chat_id):
+            # A refusal by the still-running block is no reason to give up.
+            attempts[key] = attempts.get(key, 0) + 1
+        if posted or attempts.get(key, 0) >= HELD_MAX_ATTEMPTS:
+            flood_guard.release(chat_id, item)
+        await asyncio.sleep(HELD_SPACING)
+
+
+async def announce_flood_block(chat_id: int) -> None:
+    """Once per block, tell the user in Saved Messages why the bot went quiet.
+
+    The bot itself can't post in its chat, so without this nothing at all
+    explains why messages and commands get no answer. Only the user account
+    (Pyrogram) can say it, and only to its own Saved Messages, so this is done
+    only when the blocked chat is that user's private chat with the bot.
+    """
+    if not flood_guard.blocked_for(chat_id):
+        return
+    try:
+        client = await get_pyrogram_client()
+        me = getattr(client, "me", None) or await client.get_me()
+    except Exception as exc:
+        logger.debug("No user account to report the flood block with: %s", exc)
+        return
+    if getattr(me, "id", None) != chat_id or not flood_guard.take_announcement(chat_id):
+        return
+    try:
+        await client.send_message(
+            "me",
+            "⚠️ Telegram's flood control blocks the bot from posting or editing messages "
+            f"in its chat until {flood_guard.lift_text(chat_id)}.\n\n"
+            "Downloads and uploads keep running, and uploads still arrive here. Results "
+            "the bot could not post are shown in its chat when the block lifts. Buttons "
+            "still answer with a pop-up. Telegram sometimes takes new messages during a block, "
+            "so the bot tries a reply at most once a minute; if a command gets no answer, "
+            "try again a minute later.",
+        )
+    except Exception as exc:
+        logger.warning("Could not post the flood-control notice in Saved Messages: %s", exc)
 
 
 async def send_single_file_via_pyrogram(
@@ -4594,17 +5909,21 @@ async def upload_mini_app_selection(
     if not files:
         raise RuntimeError("No files selected.")
 
-    status_msg = await app.bot.send_message(
-        chat_id=chat_id,
-        text=f"{ICON_UPLOAD} Preparing mini-app upload ({len(files)} files)...",
-    )
-    await send_folder_files_via_pyrogram(
-        app,
-        chat_id,
-        status_msg.message_id,
-        "",
-        file_list=files,
-        user_id=user_id,
+    try:
+        status_msg = await app.bot.send_message(
+            chat_id=chat_id,
+            text=f"{ICON_UPLOAD} Preparing mini-app upload ({len(files)} files)...",
+        )
+        message_id = status_msg.message_id
+    except RetryAfter:
+        message_id = None  # flood control: upload anyway, the result is held
+    # In the background: the web request waits only 30 s for this, and an
+    # upload taking longer used to come back as an error, inviting a second
+    # (duplicate) upload while the first was still running.
+    run_in_background(
+        send_folder_files_via_pyrogram(app, chat_id, message_id, "", file_list=files, user_id=user_id),
+        name="upload-mini-app",
+        on_error=message_error_reporter(app, chat_id, message_id, "Upload"),
     )
     return f"Queued upload for {len(files)} file(s)."
 
@@ -4744,6 +6063,9 @@ def _extract_rpc_name(status: dict, fallback: str) -> str:
     return clean_download_name(fallback)
 
 
+TORRENT_UNREACHABLE_AFTER = 5 * 60  # seconds with no peers and no data
+
+
 def _apply_aria2_status(job: dict, status: dict):
     total_length = _parse_int_field(status.get("totalLength"))
     completed_length = _parse_int_field(status.get("completedLength"))
@@ -4796,6 +6118,17 @@ def _apply_aria2_status(job: dict, status: dict):
     elif rpc_status == "removed":
         job["status"] = "cancelled"
 
+    # A torrent that is still at zero peers and zero bytes after a few minutes
+    # is almost always blocked from reaching trackers/peers; say so on the card
+    # instead of "Fetching torrent metadata…" forever.
+    job["unreachable"] = (
+        rpc_status == "active"
+        and job.get("source_type") in ("magnet", "torrent")
+        and connections == 0
+        and completed_length == 0
+        and now_ts() - (job.get("started_at") or now_ts()) >= TORRENT_UNREACHABLE_AFTER
+    )
+
 
 def _split_torrent_source(source: str) -> tuple[str, str | None]:
     if " --select-file=" in source:
@@ -4836,27 +6169,134 @@ def switch_to_followed_gid(job: dict, status: dict) -> bool:
     return True
 
 
+MAGNET_RESOLVE_AFTER = 60  # seconds a magnet may sit at 0 peers before we fetch its .torrent
+ITORRENTS_URL = "https://itorrents.org/torrent/{}.torrent"
+
+
+async def fetch_torrent_file(info_hash: str) -> Path | None:
+    """Download a magnet's .torrent over HTTPS from itorrents.org.
+
+    HTTPS still works on hosts whose firewalls block tracker and DHT ports,
+    so this gets the metadata (and its tracker list) when the magnet can't.
+    """
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", info_hash or ""):
+        return None
+    try:
+        async with httpx.AsyncClient(
+            timeout=30, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}
+        ) as client:
+            response = await client.get(ITORRENTS_URL.format(info_hash.upper()))
+    except httpx.HTTPError as exc:
+        logger.warning("itorrents fetch failed for %s: %s", info_hash, exc)
+        return None
+    body = response.content
+    if response.status_code != 200 or not body.startswith(b"d") or b"4:info" not in body:
+        return None
+    path = DOWNLOAD_DIR / ".torrents" / f"{info_hash.lower()}.torrent"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(path.write_bytes, body)
+    return path
+
+
+async def maybe_resolve_magnet_via_torrent_file(job: dict, status: dict) -> bool:
+    """Swap a magnet stuck at 0 peers for its .torrent from itorrents.org, once."""
+    if (
+        job.get("source_type") != "magnet"
+        or job.get("metadata_gid")
+        or job.get("torrent_fallback_tried")
+        or status.get("status") != "active"
+        or _parse_int_field(status.get("connections"))
+        or now_ts() - (job.get("started_at") or now_ts()) < MAGNET_RESOLVE_AFTER
+    ):
+        return False
+    job["torrent_fallback_tried"] = True
+    torrent_path = await fetch_torrent_file(extract_info_hash(job.get("magnet") or ""))
+    if not torrent_path:
+        return False
+
+    old_gid = job["gid"]
+    try:
+        await aria2_client.remove(old_gid, force=True)
+    except Aria2RpcError:
+        pass
+    _, selected_files = _split_torrent_source(job.get("source") or "")
+    spec = f"{torrent_path} --select-file={selected_files}" if selected_files else str(torrent_path)
+    # aria2 keeps the info hash registered until the removal settles.
+    for _ in range(20):
+        gid, existing, _ = await aria2_add_source(spec)
+        if existing is None or gid != old_gid:
+            break
+        await asyncio.sleep(0.5)
+    else:
+        return False
+
+    job["metadata_gid"] = old_gid
+    job.setdefault("gid_history", []).append(gid)
+    job["gid"] = gid
+    job["aria2_gid"] = gid
+    job["last_line"] = "Magnet found no peers; fetched its .torrent from itorrents.org."
+    logger.info("Job %s: magnet %s replaced by .torrent (gid %s)", job.get("id"), old_gid, gid)
+    return True
+
+
 async def monitor_aria2_job(app: Application, job_id: int):
     job = download_jobs[job_id]
+    user_id = job.get("user_id") or 0
+    try:
+        if job["status"] in JOB_ACTIVE_STATES and not download_slots.try_acquire(
+            user_id, job_id, limit_of(get_user_settings(user_id))
+        ):
+            # Over the limit: hold it paused in aria2 until a slot frees up.
+            job["slot_held"] = True
+            try:
+                await aria2_client.pause(job["gid"], force=True)
+            except Aria2RpcError as exc:
+                logger.debug("Could not hold job %s in the queue: %s", job_id, exc)
+            if not await wait_for_download_slot(app, job):
+                return  # cancelled while queued; cancel_job removed it from aria2
+        job.pop("queue_position", None)
+        # Held by the queue (also before a restart) and not paused by the user since.
+        if job.pop("slot_held", False) and job["status"] != "paused":
+            try:
+                await aria2_client.unpause(job["gid"])
+            except Aria2RpcError as exc:
+                logger.debug("Could not start queued job %s: %s", job_id, exc)
+        await _monitor_aria2_job(app, job)
+    finally:
+        download_slots.release(user_id, job_id)
+
+
+async def _monitor_aria2_job(app: Application, job: dict):
+    job_id = job["id"]
 
     while job["status"] not in ("completed", "failed", "cancelled"):
         try:
             status = await aria2_client.tell_status(job["gid"])
             _apply_aria2_status(job, status)
-            if switch_to_followed_gid(job, status):
+            if switch_to_followed_gid(job, status) or await maybe_resolve_magnet_via_torrent_file(
+                job, status
+            ):
                 await maybe_auto_update_status_message(app, job, force=True)
                 await asyncio.sleep(1)
                 continue
             await maybe_auto_update_status_message(app, job)
         except Aria2RpcError as exc:
-            if "not found" in str(exc).lower() and job["status"] == "cancelled":
-                return
-            job["status"] = "failed"
-            job["last_line"] = str(exc)
-            break
+            if not isinstance(exc, Aria2ConnectionError):
+                if "not found" in str(exc).lower() and job["status"] == "cancelled":
+                    return
+                job["status"] = "failed"
+                job["last_line"] = str(exc)
+                break
+            transient_error = exc
         except Exception as exc:
-            # A dropped RPC connection used to kill this task silently and leave
-            # the job "downloading" forever. Retry for a while before giving up.
+            transient_error = exc
+        else:
+            transient_error = None
+        if transient_error is not None:
+            # A dropped RPC connection, or aria2 restarting (it resumes its
+            # session under the same GIDs), must not fail the job at once.
+            # Retry for a while before giving up.
+            exc = transient_error
             job["monitor_errors"] = job.get("monitor_errors", 0) + 1
             logger.warning("aria2 monitor error for job %s: %s", job_id, exc)
             if job["monitor_errors"] >= 30:
@@ -4906,6 +6346,9 @@ async def aria2_add_source(source_spec: str) -> tuple[str, dict | None, str]:
     options = {
         "dir": str(DOWNLOAD_DIR),
         "continue": "true",
+        # Re-adding a torrent whose file is already on disk (finished, or its
+        # control file lost) hash-checks it instead of failing with errorCode 13.
+        "check-integrity": "true",
         "follow-torrent": "true",
         "bt-save-metadata": "true",
         "bt-metadata-only": "false",
@@ -4913,6 +6356,14 @@ async def aria2_add_source(source_spec: str) -> tuple[str, dict | None, str]:
     }
     if selected_files:
         options["select-file"] = selected_files
+    if source.lower().startswith("magnet:") or _is_local_torrent_file(source):
+        options["bt-tracker"] = ",".join(DEFAULT_BT_TRACKERS)
+    if source.lower().startswith("magnet:") and info_hash:
+        # aria2 accepts a magnet it already has and only fails it later with
+        # "InfoHash ... is already registered", so check for a live copy first.
+        existing = await find_aria2_status_by_info_hash(info_hash)
+        if existing and existing.get("status") in ("active", "waiting", "paused"):
+            return existing["gid"], existing, info_hash
     try:
         if _is_local_torrent_file(source):
             gid = await aria2_client.add_torrent(Path(source), options)
@@ -5190,6 +6641,8 @@ async def cancel_input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cancelled.append("torrent file selection")
     if context.user_data.pop("cookies_wait", None):
         cancelled.append("cookies upload")
+    if context.user_data.pop("target_wait", None):
+        cancelled.append("upload target")
     if wait := context.user_data.pop("files_wait", None):
         cancelled.append("file rename" if wait.get("kind") == "rename" else "file search")
     text = (
@@ -5227,7 +6680,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def supported_sites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_screen(update.message, home_views.sites_screen(SUPPORTED_SITES_URL), edit=False)
+    await show_screen(update.message, build_sites_screen(0), edit=False)
 
 
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5312,6 +6765,95 @@ async def build_archive_menu_screen(user_id: int):
 # Text handler
 # =========================================================
 
+async def start_batch_link(app: Application, chat_id: int, link: str, user_id: int) -> dict | None:
+    """Start one link of a multi-link message right away; None if it isn't supported.
+
+    No prompts: duplicates download anyway, video links use Settings › Video
+    links (best quality if that is "ask"), and playlists download every item.
+    """
+    if link.lower().startswith("magnet:"):
+        return await start_aria2_download(app, chat_id, link, user_id)
+    if is_manga_url(link):
+        return await start_manga_download(app, chat_id, extract_manga_url(link), user_id)
+    if is_spotify_url(link):
+        return await start_spotify_download(app, chat_id, extract_spotify_url(link), user_id)
+    if is_hentai_playlist_url(link):
+        playlist = await resolve_hentai_playlist(link)
+        if not playlist.urls:
+            raise RuntimeError("No episode links found on this playlist page.")
+        return await start_hentai_playlist_download(app, chat_id, playlist, user_id)
+    if is_pornhub_model_url(link):
+        playlist = await resolve_pornhub_model_playlist(
+            link, cookies_file=cookies_file(), proxy=YTDLP_PROXY or None
+        )
+        if not playlist.urls:
+            raise RuntimeError("No public videos found on this PornHub model page.")
+        return await start_pornhub_model_download(app, chat_id, playlist, user_id)
+    if is_video_url(link):
+        audio_only, max_height = video_default_choice(user_id) or (False, None)
+        return await start_ytdlp_download(
+            app, chat_id, link, audio_only=audio_only, user_id=user_id,
+            run_in_background=True, max_height=max_height,
+        )
+    if is_direct_http_download_url(link):
+        return await start_aria2_download(app, chat_id, link, user_id)
+    if category := await asyncio.to_thread(gallery_category, link):
+        return await start_gallery_download(app, chat_id, link, category, user_id)
+    return None
+
+
+def link_batch_summary(
+    batch: LinkBatch, started: list[dict], failed: list[tuple[str, str]], limit: int
+) -> str:
+    """The reply to a multi-link message: what was queued and what was skipped."""
+    lines = [f"📥 <b>{len(started)} of {len(batch.links)} links queued</b>"]
+    if started:
+        lines.append("Jobs " + ", ".join(f"#{job['id']}" for job in started))
+        lines.append(
+            f"Up to {limit} download{'s' if limit != 1 else ''} at once; "
+            "the rest show “Queued (position n)” until a slot frees up."
+        )
+    if batch.duplicates:
+        lines.append(f"Repeated links skipped: {batch.duplicates}")
+    if failed:
+        lines += ["", f"{ICON_FAIL} <b>Not started ({len(failed)})</b>"]
+        lines += [f"• {html.escape(shorten(link, 60))}: {html.escape(shorten(reason, 120))}" for link, reason in failed[:15]]
+        if len(failed) > 15:
+            lines.append(f"… and {len(failed) - 15} more")
+    if batch.invalid:
+        lines += ["", f"{ICON_WARN} <b>Lines without a link ({len(batch.invalid)})</b>"]
+        lines += [f"• {html.escape(shorten(line, 60))}" for line in batch.invalid[:10]]
+        if len(batch.invalid) > 10:
+            lines.append(f"… and {len(batch.invalid) - 10} more")
+    return "\n".join(lines)
+
+
+async def start_link_batch(app: Application, chat_id: int, user_id: int, batch: LinkBatch) -> str:
+    """Start every link of a multi-link message in order; returns the summary text.
+
+    Each job gets its own card; jobs over Settings › Downloads at once wait
+    and show "Queued (position n)". A bad link is reported, not fatal.
+    """
+    started: list[dict] = []
+    failed: list[tuple[str, str]] = []
+    for link in batch.links:
+        try:
+            job = await start_batch_link(app, chat_id, link, user_id)
+        except Exception as exc:
+            logger.warning("Link batch: %s failed to start: %s", link, exc)
+            failed.append((link, str(exc) or type(exc).__name__))
+            continue
+        if job is None:
+            failed.append((link, "not a supported link"))
+            continue
+        started.append(job)
+        try:
+            await attach_job_card(app, job)
+        except Exception as exc:
+            logger.debug("Link batch: no card for #%s: %s", job.get("id"), exc)
+    return link_batch_summary(batch, started, failed, limit_of(get_user_settings(user_id)))
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -5361,8 +6903,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # A link always wins over a pending search, rename or find prompt;
     # anything else typed while one is open is its answer.
-    is_link = lower.startswith("magnet:") or is_http_url(text)
+    batch = split_links(text) if "\n" in text or text.count("://") > 1 else LinkBatch()
+    is_link = lower.startswith("magnet:") or is_http_url(text) or batch.is_batch
     is_keyboard_button = text in KEYBOARD_LABELS
+
+    if target_waiting(context):
+        ref = forwarded_chat_id(update.message) or parse_chat_ref(text)
+        if ref is not None:
+            await set_upload_target(update, context, ref)
+            return
+        if not (is_link or is_keyboard_button):
+            await update.message.reply_text(
+                f"{ICON_FAIL} Send @username, a t.me link or a numeric chat id "
+                "(like -1001234567890), or /cancel."
+            )
+            return
+        context.user_data.pop("target_wait", None)
     if is_link or is_keyboard_button:
         context.user_data.pop("files_wait", None)
     elif rename := files_wait(context, "rename"):
@@ -5373,7 +6929,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"{ICON_FAIL} {reason} Send another name or /cancel.")
             return
         context.user_data.pop("files_wait", None)
-        await show_file(update.message, new_rel, rename.get("page", 0), edit=False)
+        await show_file(update.message, new_rel, rename.get("page", 0), edit=False, user_id=user_id)
         return
     elif files_wait(context, "find"):
         context.user_data.pop("files_wait", None)
@@ -5385,6 +6941,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (is_link or is_keyboard_button) and search_ui is not None:
         search_ui.cancel_waiting(context)
     elif search_ui is not None and await search_ui.handle_text(update, context):
+        return
+
+    if batch.is_batch:
+        summary = await start_link_batch(context.application, chat_id, user_id, batch)
+        await update.message.reply_text(
+            summary, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
         return
 
     # normalize button text by removing emojis and extra spaces
@@ -5589,7 +7152,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif is_http_url(text):
-            text_, markup = home_views.sites_screen(SUPPORTED_SITES_URL)
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Supported sites", callback_data="sites:0")]])
             await update.message.reply_text(
                 f"{ICON_WARN} I don't know how to download this link.\n\n"
                 "Supported: magnets, .torrent files, direct file links (ending in a file "
@@ -5616,6 +7179,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{ICON_FAIL} aria2 error:\n{shorten(str(e), 900)}",
             reply_markup=build_reply_menu(user_id),
         )
+    except RetryAfter:
+        raise  # flood control: a reply would be refused too; error_handler explains it elsewhere
     except Exception as e:
         # FIX #2: Sanitize error messages to avoid exposing internal details
         logger.error(f"on_text error: {type(e).__name__}: {e}", exc_info=e)
@@ -5771,7 +7336,34 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_screen(query.message, build_home_screen())
 
         elif data in ("nav:settings", "menu:settings", "menu:manga_settings"):
+            context.user_data.pop("target_wait", None)
             await show_screen(query.message, build_settings_screen(user_id))
+
+        elif data == "nav:upload_filter":
+            await show_screen(query.message, settings_views.upload_filter_screen(get_user_settings(user_id)))
+
+        elif data.startswith("uf:"):
+            value = data.split(":", 1)[1]
+            if value not in upload_filter.PRESETS:
+                await answer_once(query, "This filter no longer exists.", show_alert=True)
+                return
+            await update_setting(user_id, "auto_upload_types", value)
+            await answer_once(query, f"Auto-upload filter: {upload_filter.label(value)}")
+            await show_screen(query.message, settings_views.upload_filter_screen(get_user_settings(user_id)))
+
+        elif data in ("nav:target", "tg:cancel"):
+            context.user_data.pop("target_wait", None)
+            await show_screen(query.message, build_target_screen(user_id))
+
+        elif data == "tg:set":
+            context.user_data["target_wait"] = time.time()
+            await show_screen(query.message, build_target_screen(user_id, waiting=True))
+
+        elif data == "tg:reset":
+            await update_setting(user_id, "target_chat_id", None)
+            await update_setting(user_id, "target_chat_title", "")
+            await answer_once(query, "Uploads go to Saved Messages again.")
+            await show_screen(query.message, build_target_screen(user_id))
 
         elif data in ("nav:cookies", "ck:cancel"):
             context.user_data.pop("cookies_wait", None)
@@ -5804,8 +7396,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "nav:help":
             await show_screen(query.message, home_views.help_screen(SUPPORTED_SITES_URL))
 
+        elif data.startswith("sites:"):
+            raw = data.split(":", 1)[1]
+            await show_screen(query.message, build_sites_screen(int(raw) if raw.isdigit() else 0))
+
         elif data in ("nav:status", "menu:status"):
             await show_status_dashboard(context.application, chat_id, user_id, replace=query.message)
+
+        elif data.startswith("mcd:"):
+            raw = data.split(":", 1)[1]
+            if not raw.isdigit():
+                await answer_once(query, "This setting no longer exists.", show_alert=True)
+                return
+            value = limit_of({"max_concurrent_downloads": int(raw)})
+            await update_setting(user_id, "max_concurrent_downloads", value)
+            await answer_once(query, f"Downloads at once: {value}")
+            await show_screen(query.message, build_settings_screen(user_id))
 
         elif data.startswith("set:"):
             key = data.split(":", 1)[1]
@@ -5816,6 +7422,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update_setting(
                     user_id, key, settings_views.next_video_default(settings.get(key))
                 )
+            elif key == "compress_crf":
+                await update_setting(user_id, key, video_compress.next_crf(settings.get(key)))
+            elif key == "compress_preset":
+                await update_setting(user_id, key, video_compress.next_preset(settings.get(key)))
             elif key == "batch_download_mode":
                 current = normalize_batch_download_mode(settings.get(key))
                 next_mode = (
@@ -5984,7 +7594,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if action in ("list", "o", "file", "more", "send_yes", "send_folder_confirm", "send_folder_yes",
                           "delete_confirm", "delete_yes", "deleteall_confirm", "deleteall_yes", "zipdir",
-                          "sel", "manga_pdf", "conv_menu", "thumb_send",
+                          "sel", "manga_pdf", "conv_menu", "thumb_send", "gifprev", "compress",
                           "here", "zip1", "ren", "sort", "find"):
                 rel_path = decode_path(encoded.split(":", 1)[0]) if encoded else ""
 
@@ -6044,13 +7654,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if full.is_dir():
                     await show_folder(query.message, rel_path, 0)
                 elif full.is_file():
-                    await show_file(query.message, rel_path, page)
+                    await show_file(query.message, rel_path, page, user_id=user_id)
                 else:
                     raise FileNotFoundError(rel_path)
 
             elif action == "file":
                 context.user_data.pop("files_wait", None)
-                await show_file(query.message, rel_path, page)
+                await show_file(query.message, rel_path, page, user_id=user_id)
 
             elif action == "more":
                 info = await asyncio.to_thread(folder_info, rel_path)
@@ -6062,7 +7672,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "send_yes":
                 if not safe_join(DOWNLOAD_DIR, rel_path).is_file():
                     raise FileNotFoundError(rel_path)
-                await answer_once(query)
+                await answer_upload_tap(query)
                 await safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing upload...")
                 run_in_background(
                     send_single_file_via_pyrogram(
@@ -6083,7 +7693,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_message(
                     query.message,
                     f"{ICON_UPLOAD} Upload {info['file_count']} file(s) "
-                    f"({human_size(info['total_size'])}) from /{rel_path} to Saved Messages?",
+                    f"({human_size(info['total_size'])}) from /{rel_path} to "
+                    f"{upload_target_label(get_user_settings(user_id))}?",
                     InlineKeyboardMarkup([
                         [InlineKeyboardButton(f"{ICON_OK} Yes, upload all", callback_data=f"fb:send_folder_yes:{page}:{encoded}")],
                         [InlineKeyboardButton("✖ Cancel", callback_data=f"fb:more:{page}:{encoded}")],
@@ -6091,7 +7702,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             elif action == "send_folder_yes":
-                await answer_once(query)
+                await answer_upload_tap(query)
                 await safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing folder upload...")
                 run_in_background(
                     send_folder_files_via_pyrogram(
@@ -6196,6 +7807,26 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await answer_once(query, "Making thumbnails…")
                 await send_thumbnail(update, context, rel_path)
 
+            elif action == "gifprev":
+                full = safe_join(DOWNLOAD_DIR, rel_path)
+                if not full.is_file():
+                    raise FileNotFoundError(rel_path)
+                await answer_once(query, "Making GIF previews…")
+                run_in_background(
+                    send_gif_previews(context.application, chat_id, full), name="gif-previews"
+                )
+
+            elif action == "compress":
+                full = safe_join(DOWNLOAD_DIR, rel_path)
+                if not full.is_file() or not is_video_file(str(full)):
+                    await answer_once(query, "This is not a video file (any more).", show_alert=True)
+                    return
+                await answer_once(query, "Compressing…")
+                await start_compress_job(
+                    context.application, chat_id, user_id, rel_path,
+                    message=query.message, back=f"fb:file:{page}:{encoded}",
+                )
+
             elif action == "organize":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
                 encoded = parts[3] if len(parts) > 3 else ""
@@ -6298,6 +7929,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
                 original_encoded, _, converted_encoded = (parts[3] if len(parts) > 3 else "").partition(":")
                 converted_rel = decode_path(converted_encoded) if converted_encoded else ""
+                await answer_upload_tap(query)
                 await safe_edit_message(query.message, f"{ICON_UPLOAD} Uploading converted file...")
                 run_in_background(
                     send_single_file_via_pyrogram(
@@ -6454,6 +8086,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_screen(query.message, build_archive_settings_screen(user_id, context))
 
     except Exception as e:
+        if isinstance(e, RetryAfter):
+            # Flood control: the screen can't change, but a pop-up still can.
+            flood_guard.note(chat_id, _retry_seconds(e))
+            logger.warning("Button %r: chat %s is under flood control", data, chat_id)
+            await answer_once(query, flood_blocked_alert(chat_id), show_alert=True)
+            run_in_background(announce_flood_block(chat_id), name=f"flood-notice-{chat_id}")
+            return
         if isinstance(e, NetworkError) and not isinstance(e, BadRequest):
             # The connection to Telegram dropped; the screen is unchanged, a new tap works.
             logger.warning("Button %r failed: Telegram connection error: %s", data, e)
@@ -6526,6 +8165,8 @@ async def reattach_aria2_job(app: Application, job: dict) -> None:
             status = await find_aria2_status_by_info_hash(job["info_hash"])
         if status is not None:
             job["gid"] = status.get("gid", job.get("gid"))
+            if status.get("status") == "paused" and job.get("status") != "paused":
+                job["slot_held"] = True  # paused by the download queue, not the user
         elif job.get("source"):
             job["gid"], _, _ = await aria2_add_source(job["source"])
         else:
@@ -6613,6 +8254,18 @@ async def post_init(app: Application):
     asyncio.create_task(cleanup_task())
     logger.info("✅ Auto-cleanup task started")
 
+    # Before anything posts: a block recorded by the last run is honoured
+    # straight away, and results it held are posted when the block lifts.
+    flood_guard.configure(FLOOD_STATE_PATH)
+    for held_chat in flood_guard.chats_with_held():
+        schedule_held_flush(app, held_chat)
+    for blocked_chat in list(flood_guard._blocked_until):
+        if flood_guard.blocked_for(blocked_chat):
+            logger.warning(
+                "Telegram flood control in chat %s continues until %s",
+                blocked_chat, flood_guard.lift_text(blocked_chat),
+            )
+
     global job_store
     try:
         job_store = JobStore(JOB_DB_PATH)
@@ -6677,21 +8330,57 @@ class RetryingRequest(HTTPXRequest):
 
     Only failures before anything was sent (connect errors, connect timeouts)
     are retried, so a message is never sent twice.
+
+    Also honours Telegram's per-chat flood control (see ``flood_guard``): once
+    a chat answers 429, sends and edits there fail locally until it lifts.
     """
 
-    async def do_request(self, *args, **kwargs):
+    async def do_request(self, url, method, request_data=None, *args, **kwargs):
+        params = request_data.parameters if request_data is not None else None
+        chat_id = flood_guard.guarded_chat(url, params)
+        api_method = url.rstrip("/").rsplit("/", 1)[-1]
+        if not flood_guard.admit(chat_id, api_method):
+            raise RetryAfter(int(flood_guard.blocked_for(chat_id)) + 1)
+        probing = chat_id is not None and flood_guard.is_send(api_method) and flood_guard.blocked_for(chat_id)
         try:
-            return await super().do_request(*args, **kwargs)
+            code, payload = await super().do_request(url, method, request_data, *args, **kwargs)
         except NetworkError as exc:
             if not isinstance(exc.__cause__, (httpx.ConnectError, httpx.ConnectTimeout)):
                 raise
             logger.info("Telegram connection failed (%s); retrying once", exc)
             await asyncio.sleep(1)
-            return await super().do_request(*args, **kwargs)
+            code, payload = await super().do_request(url, method, request_data, *args, **kwargs)
+        if code == 429 and chat_id is not None:
+            retry_after = flood_guard.retry_after_from(payload)
+            if retry_after:
+                if not flood_guard.blocked_for(chat_id):
+                    logger.warning(
+                        "Telegram flood control in chat %s: sends and edits paused for %.0fs",
+                        chat_id, retry_after,
+                    )
+                flood_guard.note(chat_id, retry_after)
+        if probing and (code == 429 or 200 <= code < 300):
+            if flood_guard.send_result(chat_id, code != 429):
+                logger.warning(
+                    "Telegram takes new messages in chat %s again; edits stay paused until %s",
+                    chat_id, flood_guard.lift_text(chat_id),
+                )
+        return code, payload
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
+    if isinstance(err, RetryAfter):
+        # Flood control: every reply in that chat is refused until it lifts. That
+        # is not a bug in the handler, so no traceback; the user is told once in
+        # Saved Messages, since the bot can't say it in its own chat.
+        chat = getattr(update, "effective_chat", None)
+        chat_id = getattr(chat, "id", None)
+        if chat_id is not None:
+            flood_guard.note(chat_id, _retry_seconds(err))
+            run_in_background(announce_flood_block(chat_id), name=f"flood-notice-{chat_id}")
+        logger.warning("No reply in chat %s: Telegram flood control (%s)", chat_id, err)
+        return
     if isinstance(err, (TimedOut, NetworkError)):
         logger.warning(f"Telegram network error: {err}")
         return
@@ -6719,6 +8408,34 @@ async def start_search_download(update, context, source: str, force: bool = Fals
     return job
 
 
+_instance_lock_file = None
+
+
+def acquire_instance_lock() -> None:
+    """Exit if another copy of the bot is already running from this directory.
+
+    Two copies fight over getUpdates (Telegram "Conflict"), the web ports and
+    the Pyrogram session database, leaving the newer one half-started.
+    """
+    global _instance_lock_file
+    import fcntl
+
+    lock_path = BASE_DIR / "data" / "bot.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(lock_path, "a+")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.seek(0)
+        other = lock_file.read().strip() or "?"
+        raise SystemExit(f"Another bot instance (PID {other}) is already running; exiting.")
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    _instance_lock_file = lock_file
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN missing")
@@ -6730,6 +8447,7 @@ def main():
             "(message @userinfobot to find it). The bot refuses to start without it "
             "because anyone could otherwise control your server's downloads and files."
         )
+    acquire_instance_lock()
 
     # Configure HTTP request with proper timeouts
     request = RetryingRequest(
@@ -6838,6 +8556,7 @@ def main():
     # Legacy handlers
     app.add_handler(CallbackQueryHandler(handle_link_request_callback, pattern=r"^lp:"))
     app.add_handler(CallbackQueryHandler(handle_job_callback, pattern=r"^job:"))
+    app.add_handler(CallbackQueryHandler(handle_compress_callback, pattern=r"^cmp:"))
     app.add_handler(
         CallbackQueryHandler(
             handle_stale_prompt_callback,

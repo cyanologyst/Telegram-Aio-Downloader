@@ -1,6 +1,7 @@
 """Regression tests for the bot's button and message flows."""
 
 import asyncio
+import time
 
 import pytest
 from pyrogram import StopTransmission
@@ -17,6 +18,13 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(tb, "link_requests", {})
     monkeypatch.setattr(tb, "torrent_select_sessions", {})
     monkeypatch.setattr(tb, "upload_jobs", {})
+    monkeypatch.setattr(tb.flood_guard, "_blocked_until", {})
+    monkeypatch.setattr(tb.flood_guard, "_held", {})
+    monkeypatch.setattr(tb.flood_guard, "_announced", {})
+    monkeypatch.setattr(tb.flood_guard, "_sends_open", set())
+    monkeypatch.setattr(tb.flood_guard, "_last_probe", {})
+    monkeypatch.setattr(tb.flood_guard, "_state_path", None)
+    monkeypatch.setattr(tb, "_held_flushers", {})
     return tmp_path
 
 
@@ -67,7 +75,7 @@ async def test_upload_cancel_stops_the_transfer_and_skips_remaining_files(monkey
         (tb.DOWNLOAD_DIR / name).write_bytes(b"x" * 10)
     sent = []
 
-    async def fake_send(rel_path, progress_callback=None):
+    async def fake_send(rel_path, progress_callback=None, chat_id="me", **_):
         sent.append(rel_path)
         await progress_callback(1, 10)
         tb.cancel_upload(next(iter(tb.upload_jobs)))
@@ -568,3 +576,171 @@ async def test_buttons_survive_a_dropped_connection(monkeypatch):
     await tb.on_button(update, context)
 
     assert "Tap again" in update.callback_query.answers[0]["text"]
+
+
+# ---------------------------------------------------------------- flood control
+
+
+async def test_rate_limited_edit_does_not_sleep_and_pauses_that_chat(monkeypatch):
+    """A RetryAfter used to sleep inside the edit, which stalled Pyrogram uploads
+    (their progress callback edits the status message) to one part per back-off."""
+    from telegram.error import RetryAfter
+
+    monkeypatch.setattr(tb.flood_guard, "_blocked_until", {})
+    context = make_context()
+    calls = []
+
+    async def flooded(**kwargs):
+        calls.append(kwargs)
+        raise RetryAfter(3600)
+
+    monkeypatch.setattr(context.bot, "edit_message_text", flooded, raising=False)
+
+    async def no_sleep(_):
+        raise AssertionError("an edit must not sleep on a rate limit")
+
+    monkeypatch.setattr(tb.asyncio, "sleep", no_sleep)
+    app = context.application
+
+    assert await tb._edit_dashboard_message(app, 7, 1, "a", None) is False
+    assert await tb._edit_dashboard_message(app, 7, 1, "b", None) is False
+    assert len(calls) == 1  # the second edit is skipped without calling Telegram
+    # Other chats are unaffected.
+    assert await tb._edit_dashboard_message(app, 8, 1, "c", None) is False
+    assert len(calls) == 2
+
+
+async def test_upload_queued_behind_another_says_it_is_waiting(monkeypatch):
+    (tb.DOWNLOAD_DIR / "queued.txt").write_bytes(b"x")
+
+    async def unavailable():
+        raise tb.PyrogramUnavailable("no login")
+
+    monkeypatch.setattr(tb, "get_pyrogram_client", unavailable)
+    context = make_context()
+    chain = tb._send_chain(1, "me")
+    await chain.acquire()
+    task = asyncio.create_task(
+        tb.upload_files_via_pyrogram(context.application, 1, 2, ["queued.txt"], title="t")
+    )
+    await asyncio.sleep(0)
+    assert "Waiting for the upload ahead" in context.bot.texts()[-1]
+    chain.release()
+    job = await task
+    assert job["status"] == "completed"
+
+
+def _request_data(**params):
+    from telegram.request import RequestData
+    from telegram.request._requestparameter import RequestParameter
+
+    return RequestData([RequestParameter.from_input(k, v) for k, v in params.items()])
+
+
+async def test_a_flood_blocked_chat_is_not_called_again_until_it_lifts(monkeypatch):
+    """Telegram answered every send/edit in the chat with "retry after 52016"; the
+    bot kept calling (dashboard, cards, previews, replies), which kept the block up."""
+    from telegram.error import RetryAfter
+    from telegram.request import HTTPXRequest
+
+    calls = []
+
+    async def telegram(self, url, method, request_data=None, *args, **kwargs):
+        calls.append(url)
+        if url.endswith("/sendMessage") and request_data.parameters["chat_id"] == 7:
+            return 429, b'{"ok":false,"error_code":429,"parameters":{"retry_after":52016}}'
+        return 200, b'{"ok":true,"result":true}'
+
+    monkeypatch.setattr(HTTPXRequest, "do_request", telegram)
+    request = tb.RetryingRequest()
+    base = "https://api.telegram.org/botT/"
+
+    code, _ = await request.do_request(base + "sendMessage", "POST", _request_data(chat_id=7, text="a"))
+    assert code == 429
+    assert 52000 < tb.flood_guard.blocked_for(7) <= 52016
+
+    with pytest.raises(RetryAfter):
+        await request.do_request(base + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="b"))
+    assert len(calls) == 1  # refused locally
+
+    # Other chats, chat actions and calls without a chat still go out.
+    await request.do_request(base + "sendMessage", "POST", _request_data(chat_id=8, text="c"))
+    await request.do_request(base + "sendChatAction", "POST", _request_data(chat_id=7, action="typing"))
+    await request.do_request(base + "answerCallbackQuery", "POST", _request_data(callback_query_id="q"))
+    assert len(calls) == 4
+
+    tb.flood_guard._blocked_until[7] = 0  # lifted
+    await request.do_request(base + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="d"))
+    assert len(calls) == 5
+
+
+async def test_rate_limited_safe_edit_does_not_reply_instead():
+    from telegram.error import RetryAfter
+
+    context = make_context()
+    message = callback_update(context, "x").callback_query.message
+
+    async def flooded(*args, **kwargs):
+        raise RetryAfter(60)
+
+    message.edit_text = flooded
+    await tb.safe_edit_message(message, "hello")
+    assert not context.bot.called("reply_text")
+
+
+async def test_upload_tap_in_a_flood_blocked_chat_explains_and_still_uploads(monkeypatch):
+    """The card used to sit on "Preparing upload..." with no hint, and a job card's
+    Upload button did not upload at all (its "Preparing" message could not be sent)."""
+    from telegram.error import RetryAfter
+
+    (tb.DOWNLOAD_DIR / "clip.mp4").write_bytes(b"x")
+    tb.download_jobs[3] = {
+        "id": 3, "name": "clip.mp4", "status": "completed", "chat_id": 1, "files": ["clip.mp4"],
+        "filepath": str(tb.DOWNLOAD_DIR / "clip.mp4"),
+    }
+    monkeypatch.setattr(tb, "job_files", lambda job: ["clip.mp4"])
+    tb.flood_guard.note(1, 3600)
+    context = make_context()
+
+    async def blocked_send(**kwargs):
+        raise RetryAfter(3600)
+
+    monkeypatch.setattr(context.bot, "send_message", blocked_send, raising=False)
+    started = []
+
+    async def fake_upload(app, chat_id, message_id, files, **kwargs):
+        started.append((chat_id, message_id, files))
+
+    monkeypatch.setattr(tb, "upload_files_via_pyrogram", fake_upload)
+    update = callback_update(context, "job:up:3")
+
+    await tb.handle_job_callback(update, context)
+    await _drain_background()
+
+    answer = update.callback_query.answers[0]
+    assert answer["show_alert"] and "UTC" in answer["text"] and len(answer["text"]) <= 200
+    assert started == [(1, None, ["clip.mp4"])]
+
+
+async def test_upload_result_is_shown_once_flood_control_lifts(monkeypatch):
+    context = make_context()
+    tb.flood_guard.note(1, 3600)
+    tb.flood_guard._last_probe[1] = time.time()  # a send there was just refused too
+    waited = []
+
+    async def wait(seconds):
+        waited.append(seconds)
+        tb.flood_guard._blocked_until.clear()  # time passes; the block lifts
+
+    monkeypatch.setattr(tb.asyncio, "sleep", wait)
+    await tb._show_upload_result(context.application, 1, 42, "Upload complete")
+    assert not context.bot.calls  # nothing sent into the blocked chat
+    await _drain_background()
+
+    assert waited and waited[0] == tb.HELD_RECHECK
+    edit = context.bot.called("edit_message_text")[0]
+    assert edit.kwargs["message_id"] == 42 and edit.kwargs["text"] == "Upload complete"
+
+    # With no progress message (it could not be sent) the summary is posted fresh.
+    await tb._show_upload_result(context.application, 1, None, "Upload complete")
+    assert context.bot.called("send_message")[0].kwargs["text"] == "Upload complete"

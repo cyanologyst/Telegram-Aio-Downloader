@@ -7,7 +7,9 @@ adapter wraps the existing crawler/client and normalises its results into
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -238,6 +240,95 @@ class RARBGProvider:
         if not magnet:
             raise RuntimeError("The mirror did not return a magnet for this result.")
         return ResolvedSource(source=magnet)
+
+
+# Result sorting: (criterion, direction) stored as "seeders:desc". Picking a
+# criterion starts at its natural direction (most seeders, biggest, newest, A-Z).
+SORT_FIELDS: dict[str, tuple[str, str]] = {
+    "seeders": ("🟢 Seeders", "desc"),
+    "size": ("💾 Size", "desc"),
+    "date": ("📅 Date", "desc"),
+    "name": ("🔤 Name", "asc"),
+}
+DEFAULT_SORT = "seeders:desc"
+# What each direction means for a criterion, for the direction button.
+SORT_DIRECTIONS: dict[str, dict[str, str]] = {
+    "seeders": {"desc": "↓ Most", "asc": "↑ Fewest"},
+    "size": {"desc": "↓ Largest", "asc": "↑ Smallest"},
+    "date": {"desc": "↓ Newest", "asc": "↑ Oldest"},
+    "name": {"asc": "↑ A–Z", "desc": "↓ Z–A"},
+}
+
+_SIZE_RE = re.compile(r"([\d.,]+)\s*([KMGTP]?)(i?)B", re.IGNORECASE)
+_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
+
+
+def parse_sort(value: Any) -> tuple[str, str]:
+    """``"size:asc"`` -> ("size", "asc"); anything unknown -> the default."""
+    field_name, _, direction = str(value or "").partition(":")
+    if field_name not in SORT_FIELDS:
+        field_name, _, direction = DEFAULT_SORT.partition(":")
+    if direction not in ("asc", "desc"):
+        direction = SORT_FIELDS[field_name][1]
+    return field_name, direction
+
+
+def next_sort_field(value: Any) -> str:
+    """The next criterion, at its natural direction."""
+    names = list(SORT_FIELDS)
+    current, _ = parse_sort(value)
+    following = names[(names.index(current) + 1) % len(names)]
+    return f"{following}:{SORT_FIELDS[following][1]}"
+
+
+def flip_sort_direction(value: Any) -> str:
+    field_name, direction = parse_sort(value)
+    return f"{field_name}:{'asc' if direction == 'desc' else 'desc'}"
+
+
+def sort_label(value: Any) -> str:
+    """``"size:asc"`` -> "💾 Size ↑"."""
+    field_name, direction = parse_sort(value)
+    return f"{SORT_FIELDS[field_name][0]} {'↓' if direction == 'desc' else '↑'}"
+
+
+def size_bytes(text: Any) -> int | None:
+    """``"1.4 GB"`` / ``"700 MiB"`` -> bytes; None when it can't be read."""
+    match = _SIZE_RE.search(str(text or ""))
+    if not match:
+        return None
+    try:
+        number = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    unit = match.group(2).upper()
+    power = "KMGTP".index(unit) + 1 if unit else 0
+    return int(number * 1024**power)
+
+
+def _date_key(text: Any) -> tuple[int, ...] | None:
+    match = _DATE_RE.search(str(text or ""))
+    return tuple(int(part or 0) for part in match.groups()) if match else None
+
+
+def _sort_value(item: dict[str, Any], field_name: str) -> Any:
+    if field_name == "seeders":
+        return _to_int(item.get("seeders"))
+    if field_name == "size":
+        return size_bytes(item.get("size"))
+    if field_name == "date":
+        return _date_key(item.get("added"))
+    title = html.unescape(str(item.get("title") or "")).strip().casefold()
+    return title or None
+
+
+def sort_items(items: list[dict[str, Any]], value: Any) -> None:
+    """Sort result dicts in place; results missing the value go last either way."""
+    field_name, direction = parse_sort(value)
+    known = [(v, item) for item in items if (v := _sort_value(item, field_name)) is not None]
+    unknown = [item for item in items if _sort_value(item, field_name) is None]
+    known.sort(key=lambda pair: pair[0], reverse=direction == "desc")
+    items[:] = [item for _, item in known] + unknown
 
 
 def _identity(item: dict[str, Any]) -> tuple[str, ...]:

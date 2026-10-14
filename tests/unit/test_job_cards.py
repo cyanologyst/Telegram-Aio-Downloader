@@ -177,7 +177,7 @@ async def test_upload_and_delete_buttons_use_the_job_outputs(isolated, monkeypat
     )
     uploads = []
 
-    async def fake_upload(app, chat_id, message_id, files, *, title, user_id=None):
+    async def fake_upload(app, chat_id, message_id, files, *, title, user_id=None, **kwargs):
         uploads.append(sorted(files))
 
     monkeypatch.setattr(tb, "upload_files_via_pyrogram", fake_upload)
@@ -202,7 +202,7 @@ async def test_auto_upload_when_enabled(isolated, monkeypatch):
     (isolated / "clip.mp4").write_bytes(b"v")
     uploads = []
 
-    async def fake_upload(app, chat_id, message_id, files, *, title, user_id=None):
+    async def fake_upload(app, chat_id, message_id, files, *, title, user_id=None, **kwargs):
         uploads.append(files)
 
     monkeypatch.setattr(tb, "upload_files_via_pyrogram", fake_upload)
@@ -286,3 +286,159 @@ def test_quality_actions_hide_caps_the_video_cannot_use():
     assert [a for _, a in tb.quality_actions([720], 12)] == ["best", "h480", "mp3", "gif"]
     assert tb.quality_actions([])[-1] == ("🎞 GIF", "gif")
     assert tb.video_format_selector(720) == "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"
+
+
+def test_stuck_torrent_shows_unreachable_after_five_minutes(monkeypatch):
+    job = _job(status="metadata", total_length=0, completed_length=0, connections=0)
+    stuck = {"status": "active", "totalLength": "0", "completedLength": "0", "connections": "0"}
+
+    monkeypatch.setattr(tb, "now_ts", lambda: 1000 + 60)
+    tb._apply_aria2_status(job, stuck)
+    text, _ = job_views.job_card(job)
+    assert not job["unreachable"]
+    assert "Fetching torrent metadata" in text
+
+    monkeypatch.setattr(tb, "now_ts", lambda: 1000 + tb.TORRENT_UNREACHABLE_AFTER)
+    tb._apply_aria2_status(job, stuck)
+    text, _ = job_views.job_card(job)
+    assert job["unreachable"]
+    assert "Can't reach any trackers or peers (outbound ports blocked?)" in text
+    assert "Fetching torrent metadata" not in text
+    assert "trackers or peers" in job_views.status_screen([job], None)[0]
+
+    # The first peer clears the warning.
+    tb._apply_aria2_status(job, {**stuck, "connections": "1"})
+    assert not job["unreachable"]
+    assert "Fetching torrent metadata" in job_views.job_card(job)[0]
+
+
+def test_http_download_never_marked_unreachable(monkeypatch):
+    job = _job(source_type="http", status="downloading")
+    monkeypatch.setattr(tb, "now_ts", lambda: 1000 + 3600)
+    tb._apply_aria2_status(job, {"status": "active", "connections": "0", "completedLength": "0"})
+    assert not job["unreachable"]
+
+
+async def test_torrent_adds_get_default_trackers(monkeypatch):
+    added = []
+
+    async def fake_add_uri(uri, options):
+        added.append((uri, options))
+        return "gid1"
+
+    async def no_existing(info_hash):
+        return None
+
+    monkeypatch.setattr(tb.aria2_client, "add_uri", fake_add_uri)
+    monkeypatch.setattr(tb, "find_aria2_status_by_info_hash", no_existing)
+    await tb.aria2_add_source("magnet:?xt=urn:btih:" + "a" * 40)
+    await tb.aria2_add_source("https://example.com/file.bin")
+
+    assert added[0][1]["bt-tracker"].split(",") == list(tb.DEFAULT_BT_TRACKERS)
+    assert "bt-tracker" not in added[1][1]
+
+
+async def test_readding_a_live_magnet_reattaches_instead_of_failing(monkeypatch):
+    added = []
+    live = {"gid": "livegid", "status": "active", "infoHash": "a" * 40}
+
+    async def fake_add_uri(uri, options):
+        added.append(uri)
+        return "newgid"
+
+    async def find(info_hash):
+        return live
+
+    monkeypatch.setattr(tb.aria2_client, "add_uri", fake_add_uri)
+    monkeypatch.setattr(tb, "find_aria2_status_by_info_hash", find)
+    gid, existing, _ = await tb.aria2_add_source("magnet:?xt=urn:btih:" + "a" * 40)
+    assert (gid, existing, added) == ("livegid", live, [])
+
+    # A finished or failed copy doesn't count; add the magnet again.
+    live["status"] = "error"
+    gid, existing, _ = await tb.aria2_add_source("magnet:?xt=urn:btih:" + "a" * 40)
+    assert (gid, existing) == ("newgid", None)
+
+
+async def test_aria2_restart_does_not_fail_the_job(monkeypatch):
+    job = _job(source_type="magnet", status="downloading", gid="g1")
+    monkeypatch.setitem(tb.download_jobs, job["id"], job)
+    replies = iter(
+        [
+            tb.Aria2ConnectionError("<urlopen error [Errno 104] Connection reset by peer>"),
+            {"gid": "g1", "status": "complete", "totalLength": "10", "completedLength": "10"},
+        ]
+    )
+
+    async def fake_tell_status(gid):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    async def no_sleep(_):
+        return None
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(tb.aria2_client, "tell_status", fake_tell_status)
+    monkeypatch.setattr(tb.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(tb, "maybe_auto_update_status_message", nothing)
+    monkeypatch.setattr(tb, "finish_job_card", nothing)
+    await tb.monitor_aria2_job(None, job["id"])
+
+    assert job["status"] == "completed"
+
+
+async def test_stuck_magnet_falls_back_to_itorrents_torrent(monkeypatch, tmp_path):
+    info_hash = "81A9A602C13BB039E44EAA90510FE4944D66B5AF"
+    job = _job(
+        source_type="magnet",
+        magnet=f"magnet:?xt=urn:btih:{info_hash}",
+        source=f"magnet:?xt=urn:btih:{info_hash}",
+        gid="magnetgid",
+        gid_history=["magnetgid"],
+        metadata_gid=None,
+    )
+    stuck = {"status": "active", "connections": "0"}
+    torrent = tmp_path / "x.torrent"
+    torrent.write_bytes(b"d4:infod4:name1:xee")
+    fetched, removed, added = [], [], []
+
+    async def fake_fetch(h):
+        fetched.append(h)
+        return torrent
+
+    async def fake_remove(gid, force=False):
+        removed.append((gid, force))
+        return gid
+
+    async def fake_add_torrent(path, options):
+        added.append(path)
+        return "torrentgid"
+
+    monkeypatch.setattr(tb, "fetch_torrent_file", fake_fetch)
+    monkeypatch.setattr(tb.aria2_client, "remove", fake_remove)
+    monkeypatch.setattr(tb.aria2_client, "add_torrent", fake_add_torrent)
+
+    # Too early: leave the magnet alone.
+    monkeypatch.setattr(tb, "now_ts", lambda: 1000 + tb.MAGNET_RESOLVE_AFTER - 1)
+    assert not await tb.maybe_resolve_magnet_via_torrent_file(job, stuck)
+    # Peers arrived: nothing to do.
+    monkeypatch.setattr(tb, "now_ts", lambda: 1000 + tb.MAGNET_RESOLVE_AFTER)
+    assert not await tb.maybe_resolve_magnet_via_torrent_file(job, {**stuck, "connections": "2"})
+
+    assert await tb.maybe_resolve_magnet_via_torrent_file(job, stuck)
+    assert fetched == [info_hash.lower()]
+    assert removed == [("magnetgid", True)]
+    assert added == [torrent]
+    assert job["gid"] == "torrentgid" and job["metadata_gid"] == "magnetgid"
+
+    # Only tried once.
+    assert not await tb.maybe_resolve_magnet_via_torrent_file(job, stuck)
+    assert len(fetched) == 1
+
+
+async def test_fetch_torrent_file_rejects_bad_hash():
+    assert await tb.fetch_torrent_file("not-a-hash") is None

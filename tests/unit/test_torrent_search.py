@@ -6,6 +6,7 @@ import pytest
 
 from app.bot import search as search_mod
 from app.bot.search import PER_PAGE, SearchUI
+from app.services import user_settings
 from app.services.torrent_search import (
     RARBGProvider,
     SearchResult,
@@ -16,6 +17,12 @@ from tests.fakes import callback_update, make_context, text_update
 
 CALLBACK_DATA_LIMIT = 64
 PERSIAN = "بازی تاج و تخت فصل اول قسمت دوم با زیرنویس فارسی"
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    # The saved search sort is per-user settings JSON; keep tests off the real files.
+    monkeypatch.setattr(user_settings, "SETTINGS_DIR", tmp_path)
 
 
 # ---------------------------------------------------------------- providers
@@ -114,7 +121,7 @@ class FakeProvider:
             SearchResult(
                 title=f"{query} <{i}>",
                 size="1 GB",
-                seeders=i,
+                seeders=self.count - i,  # most first: the default sort keeps this order
                 magnet=f"magnet:?xt=urn:btih:{i}",
                 raw={"id": str(i)},
             )
@@ -336,9 +343,11 @@ async def test_results_are_one_list_with_deep_links():
     assert "'show'" in text and "&#039;" not in text  # entities decoded, then escaped once
     assert text.count("?start=sd1_") == search_mod.LINK_PER_PAGE
     assert 'href="https://t.me/my_bot?start=sm1_0"' in text
-    assert "💾 1 GB · 🟢 0" in text
+    assert "💾 1 GB · 🟢 14" in text
     assert [b.text for b in _buttons(_markup(results))] == [
         "Next Page 👉",
+        "Sort: 🟢 Seeders",
+        "↓ Most",
         "🏷 Category",
         "🔁 New search",
         "✖",
