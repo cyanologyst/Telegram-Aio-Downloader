@@ -441,3 +441,90 @@ async def test_real_browser_finds_the_stream_and_yt_dlp_downloads_it(
     )
     probe = ffprobe.stdout.split()
     assert "h264,720" in probe and "aac" in probe
+
+
+@pytest.mark.parametrize(
+    ("url", "referer", "is_ad"),
+    [
+        ("https://cdn.pornfhd.com/files/Top_Banner/728x90/19035.mp4", "", True),
+        ("https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4", "", True),
+        ("https://cdn.x/v.mp4", "https://cdn.x/files/banner_300x250.html?targetUrl=https%3A", True),
+        ("https://poweredby.jads.co/adshow.php?adzone=847494", "", True),
+        ("https://ads.example/vast/creative.mp4", "", True),
+        ("https://cdn.site/hls/1280x720/index.m3u8", "https://player.site/p/abc", False),
+        ("https://cdn.site/hls/640x360/index.m3u8", "", False),
+        ("https://s.example/download/video.mp4", "", False),
+        (
+            "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+            "https://hlsjs.video-dev.org/demo/",
+            False,
+        ),
+    ],
+)
+def test_ad_videos_are_recognised(url, referer, is_ad):
+    assert ps.looks_like_ad(url, referer) is is_ad
+
+
+def test_site_of_groups_subdomains():
+    assert ps.site_of("https://www.javhdporn.net/video/x") == "javhdporn.net"
+    assert ps.site_of("https://video1.javhdporn.net/p/x") == "javhdporn.net"
+    assert ps.site_of("https://a.b.example.co.uk/x") == "example.co.uk"
+    assert ps.site_of("https://stripchat.com/room") != ps.site_of("https://www.javhdporn.net/")
+
+
+ADS_PAGE = b"""<!doctype html><title>Ads only</title>
+<iframe src="/banner_300x250.html?targetUrl=https%3A%2F%2Ftrk.example" width="300" height="250"></iframe>"""
+AD_FRAME = (
+    b"""<!doctype html><video src="/files/Top_Banner/300x250/1.mp4" autoplay muted loop></video>"""
+)
+
+
+@REAL
+async def test_a_page_with_only_ad_videos_has_no_video(tmp_path):
+    clip = tmp_path / "ad.mp4"
+    await asyncio.to_thread(
+        subprocess.run,
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=300x250:duration=20",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            str(clip),
+        ],
+        check=True,
+    )
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            body, ctype = {
+                "/watch": (ADS_PAGE, "text/html"),
+                "/banner_300x250.html": (AD_FRAME, "text/html"),
+                "/files/Top_Banner/300x250/1.mp4": (clip.read_bytes(), "video/mp4"),
+            }.get(path, (b"", "text/plain"))
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        result = await ps.sniff_page(
+            f"http://127.0.0.1:{server.server_address[1]}/watch", wait_seconds=8
+        )
+    finally:
+        server.shutdown()
+
+    assert result.candidates == []  # the banner video is never offered as "the video"

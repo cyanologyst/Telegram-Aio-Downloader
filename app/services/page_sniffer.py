@@ -45,6 +45,16 @@ NOT_MEDIA_TYPES = re.compile(
 )
 # Playwright resource types a player fetches manifests and media with.
 STREAM_REQUEST_TYPES = {"xhr", "fetch", "media", "document", "other"}
+# Ad creatives: standard banner sizes, click-tracking redirects, ad-server paths.
+_AD_SIZES = (
+    "300x250|728x90|160x600|300x600|320x50|320x100|468x60|970x90|970x250|336x280|"
+    "120x600|250x250|200x200|300x100"
+)
+AD_HINT = re.compile(
+    rf"(?<!\d)(?:{_AD_SIZES})(?!\d)|targetUrl=|[/._-](?:ads?|adserver|adshow|adzone|banners?|"
+    r"vast|vpaid|preroll|popunder|sponsor)(?:[/._?=&-]|$)|//(?:ads?|adserver|track|trk|click)[.-]",
+    re.I,
+)
 REPLAY_HEADERS = re.compile(r"^(referer|origin|cookie|authorization|x-[\w-]+)$", re.I)
 
 PLAY_SELECTORS = (
@@ -118,6 +128,19 @@ class SniffResult:
     @property
     def main(self) -> Candidate | None:
         return self.candidates[0] if self.candidates else None
+
+
+def looks_like_ad(url: str, referer: str = "") -> bool:
+    """An ad video (or one loaded inside an ad's frame), not the page's own player."""
+    return bool(AD_HINT.search(url) or (referer and AD_HINT.search(referer)))
+
+
+def site_of(url: str) -> str:
+    """The registrable-ish domain: "video.example.co.uk" -> "example.co.uk"."""
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    parts = host.split(".")
+    keep = 3 if len(parts) >= 3 and len(parts[-1]) == 2 and len(parts[-2]) <= 3 else 2
+    return ".".join(parts[-keep:])
 
 
 def is_enabled() -> bool:
@@ -391,21 +414,42 @@ async def _sniff(browser, url, wait_seconds, cookies_file, is_cancelled) -> Snif
     title = ""
 
     deadline = time.monotonic() + wait_seconds
-    clicked = False
+    clicks = 0
+    rounds = 0
+    home = site_of(url)
+    ad_sites: set[str] = set()  # sites the page sent us to instead of playing
+
+    def is_ad(candidate: Candidate) -> bool:
+        referer_site = site_of(candidate.headers.get("referer", ""))
+        return _is_ad(candidate) or referer_site in ad_sites
+
     while time.monotonic() < deadline and not is_cancelled():
-        streams = [c for c in found.values() if c.kind != "direct" and c.url not in children]
-        direct = [c for c in found.values() if c.kind == "direct"]
-        newest = max((c.order for c in found.values()), default=0)
-        if streams or direct:
+        if site_of(main_page.url) not in (home, ""):
+            # "Tab-under": the click sent this tab to an ad (and the video page to a
+            # new tab). Note the ad site, come back, and press play again.
+            ad_sites.add(site_of(main_page.url))
+            with contextlib.suppress(Exception):
+                await main_page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            continue
+        # Ads (banner videos start on their own) never count as "found".
+        real = [c for c in found.values() if not is_ad(c) and c.url not in children]
+        streams = [c for c in real if c.kind != "direct"]
+        # Small files can be hover previews; keep starting the player for a real one.
+        files = [c for c in real if c.kind == "direct" and (not c.size or c.size >= 5 << 20)]
+        if streams or files:
+            newest = max(c.order for c in found.values())
             # Give the player a moment to fetch the master/other qualities, then stop.
             await asyncio.sleep(3 if streams else 6)
-            if max((c.order for c in found.values()), default=0) == newest:
+            if max(c.order for c in found.values()) == newest:
                 break
             continue
         for frame in main_page.frames:
-            await _start_player(frame)
-        if not clicked:
-            clicked = await _click_player(main_page)
+            if frame is main_page.main_frame or not looks_like_ad(frame.url):
+                await _start_player(frame)
+        # A real click on the player; the first one often only opens a pop-up ad.
+        if clicks < 3 and rounds % 2 == 0 and await _click_player(main_page):
+            clicks += 1
+        rounds += 1
         await asyncio.sleep(1.5)
 
     for frame in list(main_page.frames):
@@ -432,7 +476,7 @@ async def _sniff(browser, url, wait_seconds, cookies_file, is_cancelled) -> Snif
         master = found.get(master_of.get(child_url, ""))
         if candidate.drm and master is not None:
             master.drm = True
-    usable = [c for u, c in found.items() if u not in children]
+    usable = [c for u, c in found.items() if u not in children and not is_ad(c)]
     drm = [c for c in usable if c.drm]
     # Files from the server of a DRM-protected stream are its encrypted pieces.
     drm_hosts = {urlparse(c.url).hostname for c in drm}
@@ -480,15 +524,36 @@ async def _start_player(frame) -> None:
         await frame.evaluate(PLAY_JS)
 
 
+def _is_ad(candidate: Candidate) -> bool:
+    return looks_like_ad(candidate.url, candidate.headers.get("referer", ""))
+
+
+# The biggest visible player-looking box that isn't an ad frame; its center, in page pixels.
+PLAYER_BOX_JS = """(adPattern) => {
+  const ad = new RegExp(adPattern, 'i');
+  let best = null, bestArea = 0;
+  const els = document.querySelectorAll(
+    'video, iframe, [class*=player], [id*=player], [class*=play-button], [class*=poster]');
+  for (const el of els) {
+    if (el.tagName === 'IFRAME' && ad.test(el.src || '')) continue;
+    const r = el.getBoundingClientRect();
+    const area = r.width * r.height;
+    if (r.width < 200 || r.height < 100 || r.bottom < 0 || r.top > innerHeight) continue;
+    if (area > bestArea) { bestArea = area; best = r; }
+  }
+  return best && {x: best.x + best.width / 2, y: best.y + best.height / 2};
+}"""
+
+
 async def _click_player(page) -> bool:
-    """A real click in the middle of the biggest player-looking box (works in iframes)."""
-    for selector in ("video", "iframe", "[class*=player]", "[id*=player]"):
-        try:
-            box = await page.locator(selector).first.bounding_box(timeout=500)
-        except Exception:
-            continue
-        if box and box["width"] > 200 and box["height"] > 100:
-            with contextlib.suppress(Exception):
-                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                return True
+    """A real click in the middle of the player (works on players in iframes too)."""
+    try:
+        point = await page.evaluate(PLAYER_BOX_JS, AD_HINT.pattern)
+    except Exception:
+        return False
+    if not point:
+        return False
+    with contextlib.suppress(Exception):
+        await page.mouse.click(point["x"], point["y"])
+        return True
     return False
