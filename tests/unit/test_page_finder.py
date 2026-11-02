@@ -528,3 +528,51 @@ async def test_a_page_with_only_ad_videos_has_no_video(tmp_path):
         server.shutdown()
 
     assert result.candidates == []  # the banner video is never offered as "the video"
+
+
+# The first press of Play does a "tab-under": the page opens itself in a new tab and
+# sends this tab to an ad on another site. Only the second press starts the player.
+TAB_UNDER_PAGE = b"""<!doctype html><title>Tab-under</title>
+<button id="play" style="position:absolute;inset:0">Play</button><script>
+let presses = 0;
+document.getElementById('play').onclick = async () => {
+  presses += 1;
+  if (presses === 1) { window.open(location.href); location.href = 'http://localhost:PORT/ad'; return; }
+  await (await fetch('/stream/master.m3u8')).text();
+};</script>"""
+
+
+@REAL
+async def test_tab_under_redirects_are_blocked_and_play_is_pressed_again():
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            hits.append(self.path)
+            port = self.server.server_address[1]
+            if self.path == "/watch":
+                body, ctype = TAB_UNDER_PAGE.replace(b"PORT", str(port).encode()), "text/html"
+            elif self.path == "/stream/master.m3u8":
+                body, ctype = MASTER.encode(), "application/vnd.apple.mpegurl"
+            else:
+                body, ctype = b"ad", "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        result = await ps.sniff_page(
+            f"http://127.0.0.1:{server.server_address[1]}/watch", wait_seconds=15
+        )
+    finally:
+        server.shutdown()
+
+    assert result.main is not None and result.main.url.endswith("/stream/master.m3u8")
+    assert "/ad" not in hits  # the redirect never left the browser

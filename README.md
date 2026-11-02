@@ -125,6 +125,7 @@ Common optional settings:
 | `YTDLP_PROXY` | Optional proxy for yt-dlp and spotDL |
 | `COBALT_API_URL` / `COBALT_API_KEY` | Your own [cobalt](https://github.com/imputnet/cobalt) instance, tried when yt-dlp fails (see below) |
 | `PAGE_FINDER` / `PAGE_FINDER_TIMEOUT` | The page finder (`auto` or `off`), and how many seconds it waits for the player (see below) |
+| `PAGE_FINDER_ADBLOCK` / `ADBLOCK_LISTS` | Ad blocking in the page finder's browser (`on`/`off`) and its filter lists (default EasyList) |
 | `DENO_BIN` | Absolute Deno path when required by a provider |
 | `PROWLARR_URL` / `PROWLARR_API_KEY` | Prowlarr torrent search |
 | `TPB_API_URL` / `RARBG_BASE_URL` | Torrent-search endpoints |
@@ -172,7 +173,8 @@ Many streaming sites only reveal their video link once the player starts. For li
 - HLS (`.m3u8`) and DASH (`.mpd`) playlists and direct video files are detected, including ones in embedded players from other sites and ones fetched by service workers;
 - the headers the player sent (its own Referer, cookies, signature headers) are replayed for the download, and the playlist text is reused because such links often work only once;
 - the main video is picked (the longest, highest-quality stream) and the usual quality picker appears; **🎞 Other videos** lists trailers and previews found on the same page;
-- DRM-protected streams are refused.
+- DRM-protected streams are refused;
+- ads are blocked in that browser (Brave's ad-block engine with EasyList, downloaded to `data/adblock/` and refreshed weekly), pop-up windows are suppressed, and "tab-under" redirects (a click that sends the tab to an ad site) are stopped, so the click starts the player. Ad videos that still load are recognised and never offered as the video. `PAGE_FINDER_ADBLOCK=off` turns the blocking off; `ADBLOCK_LISTS` sets other filter lists.
 
 yt-dlp then downloads the stream (qualities, AES-128 decryption, merging). Cookies from Settings → Cookies are loaded into the browser for age gates and logins.
 

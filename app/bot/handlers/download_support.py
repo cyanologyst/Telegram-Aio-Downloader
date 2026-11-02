@@ -19,6 +19,7 @@ from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_AUDIO, ICON_DOWNLOAD, ICON_IMAGE
 from app.bot.views import jobs as job_views
 from app.services import animation, page_sniffer
+from app.services.ad_blocker import AdBlocker
 from app.services.cobalt import CobaltError
 from app.services.hentai_playlist import HentaiPlaylist
 from app.services.page_sniffer import Candidate, SniffResult
@@ -268,8 +269,22 @@ def page_finder_available(url: str = "") -> bool:
     return not any(host == h or host.endswith("." + h) for h in PAGE_FINDER_SKIP_HOSTS)
 
 
+_ad_blocker: AdBlocker | None = None
+
+
+async def page_ad_blocker() -> AdBlocker | None:
+    """The page finder's ad blocker, loaded once (EasyList downloads on first use)."""
+    global _ad_blocker
+    if tb.PAGE_FINDER_ADBLOCK == "off" or not AdBlocker.available():
+        return None
+    if _ad_blocker is None:
+        _ad_blocker = AdBlocker(tb.BASE_DIR / "data" / "adblock", tb.ADBLOCK_LISTS)
+    return _ad_blocker if await asyncio.to_thread(_ad_blocker.load) else None
+
+
 async def find_video_on_page(url: str, is_cancelled=lambda: False) -> SniffResult:
     """Open the page headlessly and return the videos its player loads."""
+    blocker = await page_ad_blocker()
     try:
         return await page_sniffer.sniff_page(
             url,
@@ -277,6 +292,7 @@ async def find_video_on_page(url: str, is_cancelled=lambda: False) -> SniffResul
             cookies_file=tb.cookies_file(),
             proxy=tb.YTDLP_PROXY or None,
             is_cancelled=is_cancelled,
+            blocker=blocker,
         )
     except Exception as exc:
         text = str(exc)

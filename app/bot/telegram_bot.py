@@ -255,6 +255,13 @@ COBALT_API_URL = os.getenv("COBALT_API_URL", "").strip()
 # (Playwright), start the player and catch the stream. "off" disables it.
 PAGE_FINDER = os.getenv("PAGE_FINDER", "auto").strip().lower()
 PAGE_FINDER_TIMEOUT = parse_env_int("PAGE_FINDER_TIMEOUT", 30)
+# Ad blocking in the page finder's browser (EasyList, cached in data/adblock/).
+PAGE_FINDER_ADBLOCK = os.getenv("PAGE_FINDER_ADBLOCK", "on").strip().lower()
+ADBLOCK_LISTS = tuple(
+    u.strip()
+    for u in (os.getenv("ADBLOCK_LISTS") or "https://easylist.to/easylist/easylist.txt").split(",")
+    if u.strip()
+)
 COBALT_API_KEY = os.getenv("COBALT_API_KEY", "").strip()
 ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
 ARIA2_RPC_PORT = parse_env_int("ARIA2_RPC_PORT", 6800)

@@ -23,4 +23,6 @@ beautifulsoup4>=4.12.0
 # Page finder: opens pages nothing else understands in headless Chromium and
 # catches the stream the player loads (`python -m playwright install chromium`).
 playwright>=1.49
+# Ad blocking in the page finder's browser (Brave's engine; EasyList is downloaded and cached)
+adblock>=0.6
 

@@ -293,8 +293,12 @@ async def sniff_page(
     cookies_file: str | None = None,
     proxy: str | None = None,
     is_cancelled=lambda: False,
+    blocker: Any = None,
 ) -> SniffResult:
-    """Open ``url`` headlessly, start its player, and return the videos it loaded."""
+    """Open ``url`` headlessly, start its player, and return the videos it loaded.
+
+    ``blocker`` (an ``AdBlocker``) refuses ad requests before they leave the browser.
+    """
     from playwright.async_api import async_playwright  # optional dependency
 
     async with _browser_lock, async_playwright() as pw:
@@ -309,13 +313,13 @@ async def sniff_page(
             launch["proxy"] = {"server": proxy}
         browser = await pw.chromium.launch(**launch)
         try:
-            return await _sniff(browser, url, wait_seconds, cookies_file, is_cancelled)
+            return await _sniff(browser, url, wait_seconds, cookies_file, is_cancelled, blocker)
         finally:
             with contextlib.suppress(Exception):
                 await browser.close()
 
 
-async def _sniff(browser, url, wait_seconds, cookies_file, is_cancelled) -> SniffResult:
+async def _sniff(browser, url, wait_seconds, cookies_file, is_cancelled, blocker) -> SniffResult:
     probe = await browser.new_page()
     user_agent = browser_user_agent(await probe.evaluate("navigator.userAgent"))
     await probe.close()
@@ -336,6 +340,30 @@ async def _sniff(browser, url, wait_seconds, cookies_file, is_cancelled) -> Snif
     pending: set[asyncio.Task] = set()
     counter = iter(range(1, 1_000_000))
     main_page = None
+    home = site_of(url)
+    ad_sites: set[str] = set()  # sites the page tried to send us to instead of playing
+    opened = False  # the page has loaded; from now on it may not leave its site
+
+    async def route_request(route) -> None:
+        request = route.request
+        try:
+            frame = request.frame
+            if request.is_navigation_request() and frame.parent_frame is None:
+                target = site_of(request.url)
+                if opened and target not in (home, ""):
+                    ad_sites.add(target)  # "tab-under": the click sends the tab to an ad
+                    # 204 No Content keeps the tab on the page (abort shows an error page).
+                    await route.fulfill(status=204, body="")
+                    return
+            elif blocker is not None and blocker.should_block(
+                request.url, frame.url, request.resource_type
+            ):
+                await route.abort()
+                return
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            await route.continue_()
 
     async def on_response(response) -> None:
         request = response.request
@@ -405,19 +433,20 @@ async def _sniff(browser, url, wait_seconds, cookies_file, is_cancelled) -> Snif
     context.on("response", lambda response: track(on_response(response)))
     context.on("page", on_page)
 
+    await context.route("**/*", route_request)
+    await context.add_init_script("window.open = function () { return null; };")  # pop-ups
     main_page = await context.new_page()
     try:
         await main_page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     except Exception as exc:
         if not found:
             raise RuntimeError(f"The page didn't open: {exc}") from exc
+    opened = True
     title = ""
 
     deadline = time.monotonic() + wait_seconds
     clicks = 0
     rounds = 0
-    home = site_of(url)
-    ad_sites: set[str] = set()  # sites the page sent us to instead of playing
 
     def is_ad(candidate: Candidate) -> bool:
         referer_site = site_of(candidate.headers.get("referer", ""))
