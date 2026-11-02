@@ -22,6 +22,7 @@ An asynchronous Telegram bot and Mini App for downloading, organizing, processin
 - GIFs come back as GIFs: short silent clips (X/Twitter and Reddit GIFs, Imgur, …) are sent to the chat as Telegram GIFs
 - GIF previews: one tap on a finished video's card (or its file card) sends ONE preview video made of 10 six-second clips spread across the video, captioned with each clip's timestamp; auto-uploaded videos get it automatically in the same chat as the upload
 - Optional [cobalt](https://github.com/imputnet/cobalt) instance as a second engine when yt-dlp fails
+- Page finder: links nothing else understands are opened in headless Chromium, the player is started automatically, and the HLS/DASH stream it loads is downloaded
 - Cookies (for YouTube's "confirm you're not a bot", private or age-restricted videos) can be sent to the bot as a file
 - Optional automatic upload to Saved Messages when a download finishes
 - Unified torrent search across Prowlarr, The Pirate Bay and RARBG mirrors
@@ -123,6 +124,7 @@ Common optional settings:
 | `YTDLP_COOKIES_FILE` | Netscape cookies file; needed when YouTube says "confirm you're not a bot" (common on VPS IPs) and for private or age-restricted videos. Easier: send the file to the bot in **⚙️ Settings → 🍪 Cookies** |
 | `YTDLP_PROXY` | Optional proxy for yt-dlp and spotDL |
 | `COBALT_API_URL` / `COBALT_API_KEY` | Your own [cobalt](https://github.com/imputnet/cobalt) instance, tried when yt-dlp fails (see below) |
+| `PAGE_FINDER` / `PAGE_FINDER_TIMEOUT` | The page finder (`auto` or `off`), and how many seconds it waits for the player (see below) |
 | `DENO_BIN` | Absolute Deno path when required by a provider |
 | `PROWLARR_URL` / `PROWLARR_API_KEY` | Prowlarr torrent search |
 | `TPB_API_URL` / `RARBG_BASE_URL` | Torrent-search endpoints |
@@ -162,6 +164,19 @@ COBALT_API_URL=http://127.0.0.1:9000/
 ```
 
 cobalt reaches YouTube through its own client but is subject to the same IP blocks.
+
+### Page finder
+
+Many streaming sites only reveal their video link once the player starts. For links nothing else understands, and for video sites where yt-dlp (and cobalt) fail, the bot opens the page in headless Chromium, presses the player's play button itself, and watches the network the way a video-grabber browser extension does:
+
+- HLS (`.m3u8`) and DASH (`.mpd`) playlists and direct video files are detected, including ones in embedded players from other sites and ones fetched by service workers;
+- the headers the player sent (its own Referer, cookies, signature headers) are replayed for the download, and the playlist text is reused because such links often work only once;
+- the main video is picked (the longest, highest-quality stream) and the usual quality picker appears; **🎞 Other videos** lists trailers and previews found on the same page;
+- DRM-protected streams are refused.
+
+yt-dlp then downloads the stream (qualities, AES-128 decryption, merging). Cookies from Settings → Cookies are loaded into the browser for age gates and logins.
+
+It needs Chromium: `setup_ubuntu.sh` installs it, or run `python -m playwright install --with-deps chromium` in the bot's venv. Opening a page takes 5–30 seconds and a few hundred MB of RAM, so only one page is opened at a time. Sites behind a "verify you are human" challenge and YouTube can't be read this way. Set `PAGE_FINDER=off` to turn it off.
 
 ## Using the Bot
 

@@ -23,6 +23,8 @@ YouTube often blocks server IPs ("Sign in to confirm you're not a bot"); send a 
 
 Short clips without sound and `.gif` files are sent to the chat as Telegram GIFs.
 
+**Any other site with a video player:** links nothing else understands go to the page finder, which opens the page in headless Chromium, starts the player and downloads the HLS/DASH stream or video file it loads (DRM-protected streams excepted). It is also tried when yt-dlp and cobalt fail on a listed site. See *Page finder* in the README.
+
 When you send a video link the bot shows its title and length and offers **Best**, lower resolution caps (only those the video actually has), **MP3**, and **🎞 GIF** for clips of up to a minute. Settings → *Video links* can skip the question with a default quality.
 
 ## Spotify

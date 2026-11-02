@@ -205,6 +205,20 @@ install_python_requirements() {
   pip install -r "${PROJECT_ROOT}/requirements.txt"
 }
 
+install_page_finder_browser() {
+  # Chromium for the page finder (links no other downloader understands).
+  # The browser goes into the bot user's cache; its system libraries need root.
+  log "Installing Chromium for the page finder"
+  if [[ "${EUID}" -eq 0 ]]; then
+    python -m playwright install-deps chromium || log "Could not install Chromium's system libraries"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$(command -v python)" -m playwright install-deps chromium \
+      || log "Could not install Chromium's system libraries"
+  fi
+  python -m playwright install chromium \
+    || log "Chromium download failed; the page finder stays off until it is installed"
+}
+
 read_prowlarr_api_key() {
   local config_file="$1"
   if [[ ! -f "${config_file}" ]]; then
@@ -418,6 +432,7 @@ main() {
   install_prowlarr_optional
   create_venv
   install_python_requirements
+  install_page_finder_browser
   write_env
 
   log "Setup complete."

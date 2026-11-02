@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
 from pyrogram import StopTransmission
@@ -312,11 +314,17 @@ async def start_ytdlp_download(
     parent_job: dict | None = None,
     max_height: int | None = None,
     gif: bool = False,
+    page: dict | None = None,
+    find_on_page: bool = False,
 ):
     """Download one video with yt-dlp (``max_height`` caps the resolution).
 
     ``gif`` makes a silent clip that is sent to the chat as a GIF. When yt-dlp
-    fails and a cobalt instance is configured, cobalt gets a try.
+    fails, cobalt gets a try (if configured), then the page finder: the page is
+    opened in a headless browser and the stream its player loads is downloaded.
+
+    ``page`` is a stream the page finder already found (from the picker);
+    ``find_on_page`` skips yt-dlp and looks on the page straight away.
 
     ``parent_job`` is the batch (playlist/model page) this item belongs to;
     cancelling the batch aborts the item that is downloading.
@@ -329,6 +337,9 @@ async def start_ytdlp_download(
     is_hentai = tb.is_hentai_video_url(url)
     is_adult = tb.is_adult_video_url(url)
     platform = tb.video_platform_label(url)
+    page_mode = bool(page) or find_on_page
+    if page_mode and platform == "Video":
+        platform = (urlparse(url).hostname or "Video").removeprefix("www.")
     if gif:
         audio_only, max_height = False, min(max_height or tb.GIF_MAX_HEIGHT, tb.GIF_MAX_HEIGHT)
     if is_hentai:
@@ -366,7 +377,11 @@ async def start_ytdlp_download(
         "audio_only": audio_only,
         "max_height": None if audio_only else max_height,
         "gif": gif,
+        "page": page,
+        "find_on_page": page_mode,
     }
+    if page and page.get("title"):
+        job["name"] = page["title"]
 
     tb.download_jobs[job_id] = job
 
@@ -426,13 +441,16 @@ async def start_ytdlp_download(
             await tb.maybe_auto_update_status_message(app, job)
             await asyncio.sleep(1)
 
-    def run_download():
-        if tb.requires_deno_runtime(url) and not tb.DENO_VERSION:
+    def run_download(page_candidate: dict | None = None):
+        if page_candidate is None and tb.requires_deno_runtime(url) and not tb.DENO_VERSION:
             raise RuntimeError(
                 "Hanime requires Deno. Install Deno, ensure `deno --version` works for "
                 "the bot service user, or set DENO_BIN=/absolute/path/to/deno in .env."
             )
-        resolved_video = tb.resolve_adult_video_url(url)
+        if page_candidate is None:
+            resolved_video = tb.resolve_adult_video_url(url)
+        else:  # its headers travel with its formats (page_ytdlp_info)
+            resolved_video = tb.ResolvedAdultVideo(page_candidate["url"])
         download_url = resolved_video.url
         existing_files = {path.resolve() for path in output_dir.iterdir() if path.is_file()}
         output_template = str(output_dir / "%(title).200B [%(id)s].%(ext)s")
@@ -475,7 +493,12 @@ async def start_ytdlp_download(
             )
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(download_url, download=True)
+            if page_candidate is None:
+                info = ydl.extract_info(download_url, download=True)
+            else:
+                info = ydl.process_ie_result(
+                    tb.page_ytdlp_info(ydl, page_candidate, url), download=True
+                )
 
             if info is None:
                 raise RuntimeError("Failed to extract video info")
@@ -560,23 +583,73 @@ async def start_ytdlp_download(
         finally:
             tb.download_slots.release(job.get("user_id") or 0, job_id)
 
+    async def find_stream(first_reason: str | None) -> dict:
+        """Open the page in the page finder and pick its main video."""
+        job.update(status="finding", note="found on the page", last_line="")
+        if notify:
+            await tb.maybe_auto_update_status_message(app, job, force=True)
+        try:
+            result = await tb.find_video_on_page(url, is_cancelled)
+        except tb.DownloadFailed as exc:
+            why = exc.reason
+        else:
+            if result.main is not None:
+                candidate = {"title": result.title, **result.main.to_dict()}
+                job["page"] = candidate
+                if job.get("name") == "Fetching video info...":
+                    job["name"] = result.title
+                job["status"] = "starting"
+                return candidate
+            why = tb.no_video_reason(result)
+        raise tb.DownloadFailed(f"{first_reason}\n\nPage finder: {why}" if first_reason else why)
+
+    async def download_from_page(first_reason: str | None = None):
+        candidate = job.get("page") or await find_stream(first_reason)
+        try:
+            return await loop.run_in_executor(None, run_download, candidate)
+        except Exception as error:
+            if is_cancelled() or job.get("disk_refused"):
+                raise
+            reason = tb.explain_ytdlp_error(error)[0]
+            if re.search(r"HTTP Error (401|403|404|410)", str(error)):
+                # The link expired (one-time tokens): look again for a fresh one.
+                job["page"] = None
+                candidate = await find_stream(first_reason)
+                return await loop.run_in_executor(None, run_download, candidate)
+            raise tb.DownloadFailed(
+                f"{first_reason}\n\nPage finder: {reason}" if first_reason else reason
+            ) from error
+
     async def download():
         refresh_task = asyncio.create_task(refresh_ytdlp_status())
         try:
-            try:
-                title, filepath = await loop.run_in_executor(None, run_download)
-            except Exception as ytdlp_error:
-                if (
-                    is_cancelled()
-                    or job.get("disk_refused")
-                    or not tb.cobalt_client.enabled
-                    or is_hentai
-                    or is_adult
-                ):
-                    raise
-                title, filepath = await tb.download_with_cobalt(
-                    job, url, output_dir, tb.explain_ytdlp_error(ytdlp_error)[0], is_cancelled
-                )
+            if page_mode:
+                title, filepath = await download_from_page()
+            else:
+                try:
+                    title, filepath = await loop.run_in_executor(None, run_download)
+                except Exception as ytdlp_error:
+                    if is_cancelled() or job.get("disk_refused"):
+                        raise
+                    reason = tb.explain_ytdlp_error(ytdlp_error)[0]
+                    use_cobalt = tb.cobalt_client.enabled and not is_hentai and not is_adult
+                    use_page = tb.page_finder_available(url)
+                    if not use_cobalt and not use_page:
+                        raise
+                    result = None
+                    if use_cobalt:
+                        try:
+                            result = await tb.download_with_cobalt(
+                                job, url, output_dir, reason, is_cancelled
+                            )
+                        except tb.DownloadFailed as failed:
+                            if not use_page:
+                                raise
+                            reason = failed.reason
+                    if result is None:
+                        job.update(engine="page", note="found on the page")
+                        result = await download_from_page(reason)
+                    title, filepath = result
             if is_cancelled():
                 await finish_cancelled()
                 return

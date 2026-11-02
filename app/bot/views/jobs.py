@@ -17,6 +17,7 @@ from app.services.gallery import site_label
 
 ACTIVE = {
     "starting",
+    "finding",
     "downloading",
     "uploading",
     "metadata",
@@ -38,6 +39,7 @@ ENGINE_LABELS = {
 
 STATE_LINES = {
     "starting": "Starting…",
+    "finding": "🔎 Opening the page to find the video…",
     "metadata": "Fetching torrent metadata…",
     "queued": "Queued",
     "allocating": "Allocating disk space…",

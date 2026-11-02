@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes
 
 from app.bot import telegram_bot as tb
@@ -187,6 +188,19 @@ async def handle_link_request_callback(update: Update, context: ContextTypes.DEF
             show_alert=True,
         )
         return
+    if request["kind"] == "page" and (action in ("others", "back") or action.startswith("pick")):
+        # Moving around the page's videos: the prompt stays open.
+        tb.link_requests[rid] = request
+        await tb.answer_once(query)
+        if action.startswith("pick") and action[4:].isdigit():
+            request["index"] = min(int(action[4:]), len(request.get("candidates", [])) - 1)
+        screen = (
+            tb.page_others_screen(rid, request)
+            if action == "others"
+            else tb.page_picker_screen(rid, request)
+        )
+        await tb.safe_edit_message(query.message, *screen, parse_mode=ParseMode.HTML)
+        return
     try:
         await tb._run_link_request(query, context, request, action, user_id)
     except Exception:
@@ -217,6 +231,23 @@ async def _run_link_request(query, context, request: dict, action: str, user_id:
             run_in_background=True,
             max_height=max_height,
             gif=action == "gif",
+        )
+    elif kind == "page":
+        if not request.get("candidates"):
+            return  # still looking; the picker isn't up yet
+        candidate = request["candidates"][request.get("index", 0)]
+        audio_only = action == "mp3"
+        max_height = int(action[1:]) if action.startswith("h") and action[1:].isdigit() else None
+        job = await tb.start_ytdlp_download(
+            app,
+            chat_id,
+            request["url"],
+            audio_only=audio_only,
+            user_id=user_id,
+            run_in_background=True,
+            max_height=max_height,
+            gif=action == "gif",
+            page={"title": request.get("title"), **candidate},
         )
     elif kind == "manga":
         job = await tb.start_manga_download(app, chat_id, request["url"], user_id)

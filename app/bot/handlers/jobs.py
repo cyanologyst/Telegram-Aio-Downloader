@@ -175,6 +175,7 @@ async def restart_job(app: Application, job: dict) -> dict | None:
             run_in_background=True,
             max_height=job.get("max_height"),
             gif=bool(job.get("gif")),
+            find_on_page=bool(job.get("find_on_page")),
         )
     if provider == "spotify":
         return await tb.start_spotify_download(app, chat_id, job["url"], user_id)

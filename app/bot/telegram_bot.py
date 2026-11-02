@@ -106,6 +106,7 @@ from app.infrastructure.aria2_rpc import (
     Aria2RpcError,
 )
 from app.services.adult_video_resolver import (
+    ResolvedAdultVideo,
     resolve_adult_video_url,
     resolved_video_output_template,
 )
@@ -250,6 +251,10 @@ YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 UPLOADED_COOKIES_PATH = BASE_DIR / "data" / "cookies.txt"
 # Your own cobalt instance (https://github.com/imputnet/cobalt), tried when yt-dlp fails.
 COBALT_API_URL = os.getenv("COBALT_API_URL", "").strip()
+# Last resort for pages nothing else understands: open them in headless Chromium
+# (Playwright), start the player and catch the stream. "off" disables it.
+PAGE_FINDER = os.getenv("PAGE_FINDER", "auto").strip().lower()
+PAGE_FINDER_TIMEOUT = parse_env_int("PAGE_FINDER_TIMEOUT", 30)
 COBALT_API_KEY = os.getenv("COBALT_API_KEY", "").strip()
 ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "127.0.0.1").strip() or "127.0.0.1"
 ARIA2_RPC_PORT = parse_env_int("ARIA2_RPC_PORT", 6800)
@@ -799,6 +804,7 @@ YTDLP_KNOWN_ERRORS = (
     ("members-only", "This video is for channel members only. " + _COOKIE_HINT),
     ("video unavailable", "This video is unavailable (removed, blocked or region-locked)."),
     ("unsupported url", "This link isn't supported by yt-dlp."),
+    ("drm protected", "This video is DRM-protected, so it can't be downloaded."),
 )
 
 
@@ -1126,6 +1132,13 @@ from app.bot.handlers.download_support import (  # noqa: E402,F401
     convert_manga_folder_to_pdf_job,
     wait_for_download_slot,
     run_with_download_slot,
+    page_finder_available,
+    find_video_on_page,
+    no_video_reason,
+    page_ytdlp_info,
+    page_picker_screen,
+    page_others_screen,
+    show_page_picker,
 )
 from app.bot.handlers.disk import (  # noqa: E402,F401
     disk_protected_paths,

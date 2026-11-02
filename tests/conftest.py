@@ -40,3 +40,15 @@ def _disk_guard_off(monkeypatch):
     tb = sys.modules.get("app.bot.telegram_bot")
     if tb is not None:
         monkeypatch.setattr(tb, "DISK_GUARD_ENABLE", False)
+
+
+@pytest.fixture(autouse=True)
+def _page_finder_off(monkeypatch):
+    """The page finder launches a real Chromium when Playwright is installed.
+
+    Tests must behave the same with or without it, so it is off;
+    test_page_finder turns it on with a fake browser.
+    """
+    tb = sys.modules.get("app.bot.telegram_bot")
+    if tb is not None:
+        monkeypatch.setattr(tb, "PAGE_FINDER", "off")

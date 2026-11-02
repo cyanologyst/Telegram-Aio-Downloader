@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,9 +18,10 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_AUDIO, ICON_DOWNLOAD, ICON_IMAGE
 from app.bot.views import jobs as job_views
-from app.services import animation
+from app.services import animation, page_sniffer
 from app.services.cobalt import CobaltError
 from app.services.hentai_playlist import HentaiPlaylist
+from app.services.page_sniffer import Candidate, SniffResult
 from app.services.pornhub_model import PornHubModelPlaylist
 
 
@@ -251,6 +254,156 @@ def video_default_choice(user_id: int) -> tuple[bool, int | None] | None:
     if value.isdigit():
         return False, int(value)
     return None
+
+
+# Sites whose players can't be read from a page (scrambled, per-session URLs).
+PAGE_FINDER_SKIP_HOSTS = ("youtube.com", "youtu.be", "spotify.com")
+
+
+def page_finder_available(url: str = "") -> bool:
+    """The headless-browser page finder is installed, switched on, and fits ``url``."""
+    if tb.PAGE_FINDER == "off" or not page_sniffer.is_enabled():
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    return not any(host == h or host.endswith("." + h) for h in PAGE_FINDER_SKIP_HOSTS)
+
+
+async def find_video_on_page(url: str, is_cancelled=lambda: False) -> SniffResult:
+    """Open the page headlessly and return the videos its player loads."""
+    try:
+        return await page_sniffer.sniff_page(
+            url,
+            wait_seconds=tb.PAGE_FINDER_TIMEOUT,
+            cookies_file=tb.cookies_file(),
+            proxy=tb.YTDLP_PROXY or None,
+            is_cancelled=is_cancelled,
+        )
+    except Exception as exc:
+        text = str(exc)
+        if "Executable doesn't exist" in text or "playwright install" in text:
+            raise DownloadFailed(
+                "The page finder's browser isn't installed. On the server run: "
+                "python -m playwright install --with-deps chromium"
+            ) from exc
+        raise DownloadFailed(f"Couldn't open the page: {tb.shorten(text, 200)}") from exc
+
+
+def no_video_reason(result: SniffResult) -> str:
+    if result.drm_only:
+        return "This video is DRM-protected, so it can't be downloaded."
+    return (
+        "No video showed up on the page. The player may need a login or an age "
+        "check (add cookies in ⚙️ Settings → 🍪 Cookies), or the site blocks this server."
+    )
+
+
+def page_ytdlp_info(ydl, candidate: dict, page_url: str) -> dict:
+    """A yt-dlp info dict for a stream found on a page, built from the playlist text
+    the browser already received (re-fetching it often fails: one-time links)."""
+    from yt_dlp.extractor.common import InfoExtractor
+    from yt_dlp.utils import compat_etree_fromstring
+
+    cand = Candidate.from_dict(candidate)
+    headers = {k.title(): v for k, v in cand.headers.items()}
+    ie = InfoExtractor(ydl)
+    if cand.kind == "hls":
+        formats, _ = ie._parse_m3u8_formats_and_subtitles(
+            cand.manifest, cand.url, ext="mp4", m3u8_id="hls"
+        )
+    elif cand.kind == "dash":
+        formats, _ = ie._parse_mpd_formats_and_subtitles(
+            compat_etree_fromstring(cand.manifest.encode()),
+            mpd_base_url=cand.url.rsplit("/", 1)[0],
+            mpd_url=cand.url,
+        )
+    else:
+        ext = Path(urlparse(cand.url).path).suffix.lstrip(".").lower() or "mp4"
+        formats = [{"url": cand.url, "ext": ext, "format_id": "file"}]
+    if not formats:
+        raise DownloadFailed("The stream found on the page has no playable formats.")
+    for fmt in formats:
+        fmt["http_headers"] = {**fmt.get("http_headers", {}), **headers}
+    title = str(candidate.get("title") or urlparse(page_url).netloc)
+    return {
+        "id": hashlib.sha1(page_url.encode()).hexdigest()[:10],
+        "title": tb.shorten(title, 150),
+        "formats": formats,
+        "http_headers": headers,
+        "webpage_url": page_url,
+        "extractor": "page",
+        "extractor_key": "Page",
+    }
+
+
+def page_picker_screen(rid: str, request: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """The quality picker for the video a page finder lookup picked."""
+    candidates = request["candidates"]
+    cand = Candidate.from_dict(candidates[request.get("index", 0)])
+    host = urlparse(request["url"]).netloc.removeprefix("www.")
+    lines = [
+        f"🎬 <b>{html.escape(tb.shorten(request.get('title') or host, 90))}</b>",
+        f"{html.escape(host)} · {html.escape(cand.describe())} · found on the page",
+        "",
+        "Choose a quality:",
+    ]
+    if cand.kind == "direct":
+        actions = [("⭐ Download", "best"), ("🎵 MP3", "mp3")]
+        if cand.duration is None or cand.duration <= animation.GIF_MAX_SECONDS:
+            actions.append(("🎞 GIF", "gif"))
+    else:
+        actions = tb.quality_actions(cand.heights, cand.duration)
+    if len(candidates) > 1:
+        actions.append((f"🎞 Other videos ({len(candidates) - 1})", "others"))
+    return "\n".join(lines), tb.link_request_markup(rid, actions)
+
+
+def page_others_screen(rid: str, request: dict) -> tuple[str, InlineKeyboardMarkup]:
+    candidates = [Candidate.from_dict(c) for c in request["candidates"]]
+    current = request.get("index", 0)
+    actions = [
+        (("• " if i == current else "") + f"{i + 1}. {c.describe()}", f"pick{i}")
+        for i, c in enumerate(candidates[:8])
+    ]
+    actions.append(("⬅ Back", "back"))
+    text = (
+        f"🎞 <b>{len(candidates)} videos on this page</b>\n\n"
+        "The first one is the main video; the others are usually trailers, previews or ads."
+    )
+    return text, tb.link_request_markup(rid, actions)
+
+
+async def show_page_picker(message, rid: str, url: str):
+    """Fill the "looking for a video" prompt once the page finder is done."""
+    reason = ""
+    result: SniffResult | None = None
+    try:
+        result = await tb.find_video_on_page(url, is_cancelled=lambda: rid not in tb.link_requests)
+    except DownloadFailed as exc:
+        reason = exc.reason
+    if rid not in tb.link_requests:
+        return  # cancelled while we were looking
+    if result is None or result.main is None:
+        tb.link_requests.pop(rid, None)
+        if result is not None:
+            reason = tb.no_video_reason(result)
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🍪 Add cookies", callback_data="nav:cookies")]]
+        )
+        await tb.safe_edit_message(
+            message,
+            f"❌ <b>No video found</b>\n\n{html.escape(reason)}",
+            markup,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    request = tb.link_requests[rid]
+    request.update(
+        title=result.title,
+        index=0,
+        candidates=[c.to_dict() for c in result.candidates[:8]],
+    )
+    text, markup = tb.page_picker_screen(rid, request)
+    await tb.safe_edit_message(message, text, markup, parse_mode=ParseMode.HTML)
 
 
 def video_format_selector(max_height: int | None) -> str:

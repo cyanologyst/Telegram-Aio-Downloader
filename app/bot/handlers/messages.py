@@ -58,6 +58,18 @@ async def start_batch_link(app: Application, chat_id: int, link: str, user_id: i
         return await tb.start_aria2_download(app, chat_id, link, user_id)
     if category := await asyncio.to_thread(tb.gallery_category, link):
         return await tb.start_gallery_download(app, chat_id, link, category, user_id)
+    if tb.is_http_url(link) and tb.page_finder_available(link):
+        audio_only, max_height = tb.video_default_choice(user_id) or (False, None)
+        return await tb.start_ytdlp_download(
+            app,
+            chat_id,
+            tb.extract_http_url(link),
+            audio_only=audio_only,
+            user_id=user_id,
+            run_in_background=True,
+            max_height=max_height,
+            find_on_page=True,
+        )
     return None
 
 
@@ -447,6 +459,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
+
+        elif tb.is_http_url(text) and tb.page_finder_available(tb.extract_http_url(text)):
+            page_url = tb.extract_http_url(text)
+            rid = tb.store_link_request("page", chat_id, url=page_url)
+            prompt = await update.message.reply_text(
+                "🔎 <b>Looking for a video on this page…</b>\n"
+                "Opening it in a browser and starting the player; this takes up to "
+                "half a minute.",
+                reply_markup=tb.link_request_markup(rid, []),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            tb.run_in_background(tb.show_page_picker(prompt, rid, page_url), name="page-finder")
 
         elif tb.is_http_url(text):
             markup = InlineKeyboardMarkup(
