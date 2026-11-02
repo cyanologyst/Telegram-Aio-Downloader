@@ -1,0 +1,32 @@
+"""Emoji-safe UI constants shared by every bot screen."""
+
+ICON_HOME = "\U0001F3E0"        # 🏠
+ICON_FOLDER = "\U0001F4C1"      # 📁
+ICON_FILE = "\U0001F4C4"        # 📄
+ICON_VIDEO = "\U0001F39E"       # 🎞
+ICON_AUDIO = "\U0001F3B5"       # 🎵
+ICON_IMAGE = "\U0001F5BC"       # 🖼
+ICON_ARCHIVE = "\U0001F5DC"     # 🗜
+ICON_MAGNET = "\U0001F9F2"      # 🧲
+ICON_STATUS = "\U0001F4CA"      # 📊
+ICON_QUEUE = "\U0001F4CB"       # 📋
+ICON_UPLOAD = "\U0001F4E4"      # 📤
+ICON_DOWNLOAD = "\U0001F4E5"    # 📥
+ICON_DELETE = "\U0001F5D1"      # 🗑
+ICON_INFO = "\u2139"            # ℹ
+ICON_PIN = "\U0001F4CD"         # 📍
+ICON_BOX = "\U0001F4E6"         # 📦
+ICON_SPEED = "\U0001F680"       # 🚀
+ICON_CLOCK = "\U000023F1"       # ⏱
+ICON_WARN = "\u26A0"            # ⚠
+ICON_OK = "\u2705"              # ✅
+ICON_FAIL = "\u274C"            # ❌
+ICON_UP = "\u2B06"              # ⬆
+ICON_BACK = "\u2B05"            # ⬅
+ICON_NEXT = "\u27A1"            # ➡
+ICON_REFRESH = "\U0001F504"     # 🔄
+ICON_HELP = "\u2753"            # ❓
+ICON_BROOM = "\U0001F9F9"       # 🧹
+ICON_STOP = "\U0001F6D1"        # 🛑
+ICON_SETTINGS = "\u2699"        # ⚙
+ICON_LANGUAGE = "\U0001F310"    # 🌐

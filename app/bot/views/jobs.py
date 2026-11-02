@@ -52,6 +52,8 @@ UNREACHABLE_LINE = "⚠️ Can't reach any trackers or peers (outbound ports blo
 def _state_line(job: dict[str, Any]) -> str | None:
     if job.get("unreachable"):
         return UNREACHABLE_LINE
+    if job.get("status") == "paused" and job.get("disk_hold"):
+        return e(f"{job['disk_hold']}. Free some space, then tap Resume.")
     if job.get("status") == "queued" and job.get("queue_position"):
         return f"Queued (position {job['queue_position']})"
     return STATE_LINES.get(str(job.get("status")))
@@ -139,6 +141,8 @@ def _progress_lines(job: dict[str, Any]) -> list[str]:
         lines.append(f"Peers {job.get('connections', 0)} · seeders {job.get('num_seeders', 0)}")
     elif job.get("provider") in ("spotify", "manga", "gallery-dl") and job.get("last_line"):
         lines.append(e(short(job["last_line"], 90)))
+    if job.get("disk_note") and status in ACTIVE:
+        lines.append(e(job["disk_note"]))
     return lines
 
 

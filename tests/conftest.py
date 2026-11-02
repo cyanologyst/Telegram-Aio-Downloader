@@ -27,3 +27,15 @@ def _upload_guard_off(monkeypatch):
 
         monkeypatch.setattr(tb, "upload_refusal", allow)
         monkeypatch.setattr(tb, "unfinished_aria2_downloads", no_downloads)
+
+
+@pytest.fixture(autouse=True)
+def _disk_guard_off(monkeypatch):
+    """The disk guard may delete old files under Download/ to make room.
+
+    Tests must not depend on (or purge) the host's real disk, so it is off;
+    test_disk_guard turns it back on against a temporary folder.
+    """
+    tb = sys.modules.get("app.bot.telegram_bot")
+    if tb is not None:
+        monkeypatch.setattr(tb, "DISK_GUARD_ENABLE", False)
