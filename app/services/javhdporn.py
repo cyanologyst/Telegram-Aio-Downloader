@@ -12,6 +12,7 @@ video page with a direct MP4, which is kept as the fallback.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 from html import unescape
@@ -137,10 +138,8 @@ def player_urls_from_api(payload: dict, video_id: str) -> tuple[str, ...]:
     blobs = [payload.get("data")]
     reserve = rc4_decrypt(_seed_key(video_id, API_SALT), payload.get("reserve") or "")
     if reserve:
-        try:
+        with contextlib.suppress(ValueError):
             blobs.extend(item.get("data") for item in json.loads(reserve) if isinstance(item, dict))
-        except ValueError:
-            pass
 
     urls: list[str] = []
     for blob in blobs:
@@ -173,7 +172,7 @@ def media_url_from_player_page(html: str, player_url: str) -> str | None:
     files = [str(source.get("file") or "") for source in sources if isinstance(source, dict)]
     files = [media_url.replace("\\/", "/") for media_url in files if media_url.startswith("http")]
     playlists = [media_url for media_url in files if ".m3u8" in media_url]
-    return (playlists or files or [None])[0]
+    return (playlists or files)[0] if playlists or files else None
 
 
 def rc4_decrypt(key: bytes, blob: str) -> str | None:

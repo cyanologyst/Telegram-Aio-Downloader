@@ -17,8 +17,9 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any
 
 from app.services import upload_filter
 

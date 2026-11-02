@@ -66,7 +66,9 @@ def test_segment_time_comes_from_the_average_bitrate():
     assert seconds == int(target / MIB)
     assert video_split.expected_parts(5000 * MIB, target) == 3
     # A short, dense video never gets segments under the minimum.
-    assert video_split.segment_seconds(10_000 * MIB, 20.0, target) == video_split.MIN_SEGMENT_SECONDS
+    assert (
+        video_split.segment_seconds(10_000 * MIB, 20.0, target) == video_split.MIN_SEGMENT_SECONDS
+    )
     with pytest.raises(ValueError):
         video_split.segment_seconds(100, 0, target)
 
@@ -93,7 +95,9 @@ def test_segment_command_copies_streams_into_faststart_mp4_parts(tmp_path):
 def test_non_mp4_containers_keep_their_format_without_faststart(tmp_path):
     assert video_split.part_suffix(Path("a.MOV")) == ".mp4"
     assert video_split.part_suffix(Path("a.mkv")) == ".mkv"
-    cmd = video_split.build_segment_command("ffmpeg", Path("a.mkv"), tmp_path / "segment_%03d.mkv", 60, ".mkv")
+    cmd = video_split.build_segment_command(
+        "ffmpeg", Path("a.mkv"), tmp_path / "segment_%03d.mkv", 60, ".mkv"
+    )
     assert "-segment_format_options" not in cmd
 
 
@@ -115,7 +119,9 @@ def _fake_ffmpeg(sizes_per_attempt, calls):
 def test_split_video_names_parts_and_shrinks_segments_after_an_overshoot(tmp_path, monkeypatch):
     source = tmp_path / "50% [clip].mp4"
     source.write_bytes(b"x")
-    monkeypatch.setattr(video_split, "probe", lambda path, ffprobe="ffprobe": video_split.MediaInfo(300.0, 3000))
+    monkeypatch.setattr(
+        video_split, "probe", lambda path, ffprobe="ffprobe": video_split.MediaInfo(300.0, 3000)
+    )
     calls = []
     run = _fake_ffmpeg([[1200, 900, 900], [950, 950, 950, 150]], calls)
 
@@ -132,10 +138,14 @@ def test_split_video_names_parts_and_shrinks_segments_after_an_overshoot(tmp_pat
 def test_split_video_gives_up_when_duration_is_unknown_or_ffmpeg_fails(tmp_path, monkeypatch):
     source = tmp_path / "a.mp4"
     source.write_bytes(b"x")
-    monkeypatch.setattr(video_split, "probe", lambda path, ffprobe="ffprobe": video_split.MediaInfo(None, 3000))
+    monkeypatch.setattr(
+        video_split, "probe", lambda path, ffprobe="ffprobe": video_split.MediaInfo(None, 3000)
+    )
     assert video_split.split_video(source, tmp_path / "out", 1000, run=None) is None
 
-    monkeypatch.setattr(video_split, "probe", lambda path, ffprobe="ffprobe": video_split.MediaInfo(60.0, 3000))
+    monkeypatch.setattr(
+        video_split, "probe", lambda path, ffprobe="ffprobe": video_split.MediaInfo(60.0, 3000)
+    )
     failed = lambda cmd, **_: subprocess.CompletedProcess(cmd, 1, "", "boom")  # noqa: E731
     assert video_split.split_video(source, tmp_path / "out", 1000, run=failed) is None
 
@@ -165,7 +175,9 @@ def test_big_videos_split_playable_and_other_files_as_document_chunks(monkeypatc
     parts, as_document = tb.prepare_upload_parts("movie.mp4", 12)
     assert seen["cap"] == 12 and as_document is False
     assert [(Path(p).name, i, n) for p, i, n in parts] == [
-        ("movie_part_001.mp4", 1, 3), ("movie_part_002.mp4", 2, 3), ("movie_part_003.mp4", 3, 3)
+        ("movie_part_001.mp4", 1, 3),
+        ("movie_part_002.mp4", 2, 3),
+        ("movie_part_003.mp4", 3, 3),
     ]
 
     parts, as_document = tb.prepare_upload_parts("disk.iso", 12)
@@ -242,7 +254,9 @@ async def test_upload_uses_the_accounts_cap_for_splitting_and_sending(monkeypatc
     assert seen == {"prepare_cap": expected, "max_size": expected, "force_document": False}
 
 
-async def test_each_video_part_is_sent_as_a_streamable_video_and_byte_parts_as_documents(monkeypatch):
+async def test_each_video_part_is_sent_as_a_streamable_video_and_byte_parts_as_documents(
+    monkeypatch,
+):
     (tb.DOWNLOAD_DIR / "part.mp4").write_bytes(b"x" * 10)
     client = _Client(False)
 
@@ -251,7 +265,9 @@ async def test_each_video_part_is_sent_as_a_streamable_video_and_byte_parts_as_d
 
     monkeypatch.setattr(tb, "get_pyrogram_client", get_client)
     monkeypatch.setattr(tb, "generate_thumbnail", lambda path: "")
-    monkeypatch.setattr(tb, "get_video_metadata", lambda path: {"width": 1280, "height": 720, "duration": 60})
+    monkeypatch.setattr(
+        tb, "get_video_metadata", lambda path: {"width": 1280, "height": 720, "duration": 60}
+    )
 
     await tb.pyrogram_send_file("part.mp4", max_size=100)
     await tb.pyrogram_send_file("part.mp4", force_document=True, max_size=100)
@@ -264,13 +280,16 @@ async def test_each_video_part_is_sent_as_a_streamable_video_and_byte_parts_as_d
     assert (video["width"], video["height"], video["duration"]) == (1280, 720, 60)
 
 
-@pytest.mark.parametrize("meta", [
-    {"width": None, "height": None, "duration": None},
-    {"width": "N/A", "height": "", "duration": "N/A"},
-    {"width": "1280", "height": 720.0, "duration": "61.7"},
-    {"width": -1, "height": 0, "duration": float("nan")},
-    {},
-])
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"width": None, "height": None, "duration": None},
+        {"width": "N/A", "height": "", "duration": "N/A"},
+        {"width": "1280", "height": 720.0, "duration": "61.7"},
+        {"width": -1, "height": 0, "duration": float("nan")},
+        {},
+    ],
+)
 async def test_unreadable_video_metadata_still_sends(monkeypatch, meta):
     # An MP4 still downloading has no moov atom: ffprobe gives no duration,
     # and Pyrogram crashed packing None as a Double (struct.error).
@@ -294,7 +313,9 @@ async def test_unreadable_video_metadata_still_sends(monkeypatch, meta):
         assert key not in video or (isinstance(video[key], int) and video[key] > 0)
     # What Pyrogram would build from these arguments must serialize.
     raw.types.DocumentAttributeVideo(
-        duration=video.get("duration", 0), w=video.get("width", 0), h=video.get("height", 0),
+        duration=video.get("duration", 0),
+        w=video.get("width", 0),
+        h=video.get("height", 0),
         supports_streaming=True,
     ).write()
 
@@ -313,8 +334,13 @@ def test_video_metadata_of_a_file_ffprobe_cannot_read(monkeypatch):
 
 def test_compress_command_x265_with_audio_copy(tmp_path):
     cmd = video_compress.build_compress_command(
-        "ffmpeg", tmp_path / "a.mkv", tmp_path / "a_x265.mp4",
-        encoder="libx265", crf=28, preset="slow", copy_audio=True,
+        "ffmpeg",
+        tmp_path / "a.mkv",
+        tmp_path / "a_x265.mp4",
+        encoder="libx265",
+        crf=28,
+        preset="slow",
+        copy_audio=True,
     )
     joined = " ".join(cmd)
     assert "-c:v libx265 -crf 28 -preset slow" in joined
@@ -327,8 +353,13 @@ def test_compress_command_x265_with_audio_copy(tmp_path):
 
 def test_compress_command_x264_fallback_reencodes_audio(tmp_path):
     cmd = video_compress.build_compress_command(
-        "ffmpeg", tmp_path / "a.mkv", tmp_path / "a_x264.mp4",
-        encoder="libx264", crf=26, preset="medium", copy_audio=False,
+        "ffmpeg",
+        tmp_path / "a.mkv",
+        tmp_path / "a_x264.mp4",
+        encoder="libx264",
+        crf=26,
+        preset="medium",
+        copy_audio=False,
     )
     joined = " ".join(cmd)
     assert "-c:v libx264 -crf 26" in joined
@@ -345,7 +376,10 @@ def test_audio_copy_only_for_codecs_mp4_can_hold():
 
 def test_encoder_falls_back_to_x264(monkeypatch):
     REAL_PICK_ENCODER.cache_clear()
-    listing = {"x264": " V....D libx264  H.264\n", "x265": " V....D libx264 H.264\n V....D libx265 HEVC\n"}
+    listing = {
+        "x264": " V....D libx264  H.264\n",
+        "x265": " V....D libx264 H.264\n V....D libx265 HEVC\n",
+    }
     fake = lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, listing[cmd[0]], "")  # noqa: E731
     monkeypatch.setattr(video_compress.subprocess, "run", fake)
     assert REAL_PICK_ENCODER("x264") == "libx264"
@@ -434,10 +468,20 @@ async def test_compress_from_the_file_card_then_replace_the_original(monkeypatch
 
 async def test_compress_from_a_job_card_and_upload_the_result(monkeypatch):
     (tb.DOWNLOAD_DIR / "v.mp4").write_bytes(b"o" * 100)
-    monkeypatch.setattr(tb, "download_jobs", {
-        3: {"id": 3, "chat_id": 1, "user_id": 1, "status": "completed", "provider": "yt-dlp",
-            "filepath": str(tb.DOWNLOAD_DIR / "v.mp4")},
-    })
+    monkeypatch.setattr(
+        tb,
+        "download_jobs",
+        {
+            3: {
+                "id": 3,
+                "chat_id": 1,
+                "user_id": 1,
+                "status": "completed",
+                "provider": "yt-dlp",
+                "filepath": str(tb.DOWNLOAD_DIR / "v.mp4"),
+            },
+        },
+    )
     monkeypatch.setattr(tb, "compress_video", _fake_compress([]))
     uploads = []
 
@@ -466,7 +510,9 @@ async def test_cancelling_a_compression_stops_it(monkeypatch):
     killed = asyncio.Event()
     process = SimpleNamespace(returncode=None, kill=killed.set)
 
-    async def slow_compress(source, target, *, crf, preset, progress_callback=None, on_process=None):
+    async def slow_compress(
+        source, target, *, crf, preset, progress_callback=None, on_process=None
+    ):
         on_process(process)
         started.set()
         await asyncio.wait_for(killed.wait(), 5)

@@ -10,6 +10,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter
 from telegram.ext import ContextTypes
 
 from app.bot import flood_guard
+from app.bot import telegram_bot as tb
 from app.bot.icons import (
     ICON_BROOM,
     ICON_FAIL,
@@ -19,10 +20,11 @@ from app.bot.icons import (
     ICON_UPLOAD,
     ICON_WARN,
 )
-from app.bot.views import files as file_views, home as home_views, settings as settings_views
+from app.bot.views import files as file_views
+from app.bot.views import home as home_views
+from app.bot.views import settings as settings_views
 from app.services import upload_filter, video_compress
 from app.services.batch_download import BatchDownloadMode
-from app.bot import telegram_bot as tb
 
 
 @tb.auto_answer
@@ -45,7 +47,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await tb.show_screen(query.message, tb.build_settings_screen(user_id))
 
         elif data == "nav:upload_filter":
-            await tb.show_screen(query.message, settings_views.upload_filter_screen(tb.get_user_settings(user_id)))
+            await tb.show_screen(
+                query.message, settings_views.upload_filter_screen(tb.get_user_settings(user_id))
+            )
 
         elif data.startswith("uf:"):
             value = data.split(":", 1)[1]
@@ -54,7 +58,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await tb.update_setting(user_id, "auto_upload_types", value)
             await tb.answer_once(query, f"Auto-upload filter: {upload_filter.label(value)}")
-            await tb.show_screen(query.message, settings_views.upload_filter_screen(tb.get_user_settings(user_id)))
+            await tb.show_screen(
+                query.message, settings_views.upload_filter_screen(tb.get_user_settings(user_id))
+            )
 
         elif data in ("nav:target", "tg:cancel"):
             context.user_data.pop("target_wait", None)
@@ -79,7 +85,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await tb.show_screen(query.message, tb.build_cookies_screen(context))
 
         elif data == "ck:del":
-            await tb.show_screen(query.message, tb.build_cookies_screen(context, confirm_delete=True))
+            await tb.show_screen(
+                query.message, tb.build_cookies_screen(context, confirm_delete=True)
+            )
 
         elif data == "ck:dely":
             tb.UPLOADED_COOKIES_PATH.unlink(missing_ok=True)
@@ -103,10 +111,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("sites:"):
             raw = data.split(":", 1)[1]
-            await tb.show_screen(query.message, tb.build_sites_screen(int(raw) if raw.isdigit() else 0))
+            await tb.show_screen(
+                query.message, tb.build_sites_screen(int(raw) if raw.isdigit() else 0)
+            )
 
         elif data in ("nav:status", "menu:status"):
-            await tb.show_status_dashboard(context.application, chat_id, user_id, replace=query.message)
+            await tb.show_status_dashboard(
+                context.application, chat_id, user_id, replace=query.message
+            )
 
         elif data.startswith("mcd:"):
             raw = data.split(":", 1)[1]
@@ -144,9 +156,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await tb.show_screen(query.message, tb.build_settings_screen(user_id))
 
-        elif data in ("menu:forwarded_posts", "menu:batch_mode", "menu:language") or data.startswith(
-            "set_lang:"
-        ):
+        elif data in (
+            "menu:forwarded_posts",
+            "menu:batch_mode",
+            "menu:language",
+        ) or data.startswith("set_lang:"):
             # Buttons from the old settings menu.
             if data == "menu:forwarded_posts":
                 settings = tb.get_user_settings(user_id)
@@ -167,7 +181,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data in ("refresh_status", "refresh_dashboard"):
             # Buttons from the old status and live-dashboard messages.
-            await tb.show_status_dashboard(context.application, chat_id, user_id, replace=query.message)
+            await tb.show_status_dashboard(
+                context.application, chat_id, user_id, replace=query.message
+            )
 
         elif data == "menu:file_browser":
             await tb.show_folder(query.message, "", 0)
@@ -180,7 +196,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Buttons from older menus still in the chat history.
             provider_key = data.split(":", 1)[1]
             await tb.search_ui.open(
-                context, query.message, None if provider_key == "search" else provider_key, edit=True
+                context,
+                query.message,
+                None if provider_key == "search" else provider_key,
+                edit=True,
             )
 
         elif data.startswith(("cancel_confirm:", "job_cancel:", "job_pause:", "job_resume:")):
@@ -188,7 +207,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # buttons from status messages sent before job cards existed.
             kind, _, raw_id = data.partition(":")
             jid = int(raw_id)
-            action = {"job_pause": tb.pause_job, "job_resume": tb.resume_job}.get(kind, tb.cancel_job)
+            action = {"job_pause": tb.pause_job, "job_resume": tb.resume_job}.get(
+                kind, tb.cancel_job
+            )
             ok, msg = await action(jid)
             await tb.answer_once(query, msg, show_alert=not ok)
             job = tb.download_jobs.get(jid)
@@ -217,17 +238,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "clear_confirm":
             removed = tb.clear_finished_jobs()
-            await tb.safe_edit_message(query.message, f"{ICON_OK} Cleared {removed} finished job(s).")
+            await tb.safe_edit_message(
+                query.message, f"{ICON_OK} Cleared {removed} finished job(s)."
+            )
 
         elif data == "clear_cancel":
             await tb.safe_edit_message(query.message, "Nothing was cleared.")
-        
+
         # ===== Torrent Selection =====
-        elif data in ("tconfirm", "tall", "tcancel", "tselall", "tselnone") or data.startswith(("tsel:", "tpage:")):
+        elif data in ("tconfirm", "tall", "tcancel", "tselall", "tselnone") or data.startswith(
+            ("tsel:", "tpage:")
+        ):
             session = tb.torrent_select_sessions.get(user_id)
             if session is None:
                 await tb.answer_once(
-                    query, "This file list has expired. Send the .torrent file again.", show_alert=True
+                    query,
+                    "This file list has expired. Send the .torrent file again.",
+                    show_alert=True,
                 )
                 return
 
@@ -238,7 +265,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if data in ("tconfirm", "tall"):
                 if data == "tconfirm" and not session["selected"]:
-                    await tb.answer_once(query, tb.get_lang(user_id, 'select_at_least'), show_alert=True)
+                    await tb.answer_once(
+                        query, tb.get_lang(user_id, "select_at_least"), show_alert=True
+                    )
                     return
                 tb.torrent_select_sessions.pop(user_id, None)
                 source = session["torrent_path"]
@@ -293,14 +322,46 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             page = int(page_raw) if page_raw.lstrip("-").isdigit() else 0
             encoded = parts[3] if len(parts) > 3 else ""
 
-            if action in ("st", "sp", "sall", "snone", "sup", "szip", "sdel", "sdelyes", "sdone", "bupload_empty"):
+            if action in (
+                "st",
+                "sp",
+                "sall",
+                "snone",
+                "sup",
+                "szip",
+                "sdel",
+                "sdelyes",
+                "sdone",
+                "bupload_empty",
+            ):
                 await tb.handle_file_selection(update, context, action, parts)
                 return
 
-            if action in ("list", "o", "file", "more", "send_yes", "send_folder_confirm", "send_folder_yes",
-                          "delete_confirm", "delete_yes", "deleteall_confirm", "deleteall_yes", "zipdir",
-                          "sel", "manga_pdf", "conv_menu", "thumb_send", "gifprev", "compress",
-                          "here", "zip1", "ren", "sort", "find"):
+            if action in (
+                "list",
+                "o",
+                "file",
+                "more",
+                "send_yes",
+                "send_folder_confirm",
+                "send_folder_yes",
+                "delete_confirm",
+                "delete_yes",
+                "deleteall_confirm",
+                "deleteall_yes",
+                "zipdir",
+                "sel",
+                "manga_pdf",
+                "conv_menu",
+                "thumb_send",
+                "gifprev",
+                "compress",
+                "here",
+                "zip1",
+                "ren",
+                "sort",
+                "find",
+            ):
                 rel_path = tb.decode_path(encoded.split(":", 1)[0]) if encoded else ""
 
             if action == "list":
@@ -322,7 +383,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise FileNotFoundError(rel_path)
                 await tb.answer_once(query, "Sending…")
 
-                async def report_send_error(exc: BaseException, name=tb.rel_name(rel_path)):
+                async def report_send_error(exc: BaseException, name=None):
+                    name = name or tb.rel_name(rel_path)
                     await context.application.bot.send_message(
                         chat_id=chat_id,
                         text=f"{ICON_FAIL} Couldn't send {name}: {tb.shorten(str(exc), 300)}",
@@ -339,7 +401,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not full.is_file():
                     raise FileNotFoundError(rel_path)
                 await tb.ask_zip_name(
-                    query.message, user_id, chat_id, [full],
+                    query.message,
+                    user_id,
+                    chat_id,
+                    [full],
                     default_name=full.stem[:100] or tb.default_archive_name(),
                     cancel_data=f"fb:file:{page}:{encoded}",
                 )
@@ -348,7 +413,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not tb.safe_join(tb.DOWNLOAD_DIR, rel_path).is_file():
                     raise FileNotFoundError(rel_path)
                 context.user_data["files_wait"] = {
-                    "kind": "rename", "rel": rel_path, "page": page, "since": time.time(),
+                    "kind": "rename",
+                    "rel": rel_path,
+                    "page": page,
+                    "since": time.time(),
                 }
                 await tb.show_screen(
                     query.message, file_views.rename_prompt_screen(rel_path, page, tb.encode_path)
@@ -369,10 +437,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "more":
                 info = await asyncio.to_thread(tb.folder_info, rel_path)
-                await tb.show_screen(query.message, file_views.more_screen(
-                    rel_path, info, page, tb.encode_path,
-                    is_manga=tb.is_manga_gallery_folder(tb.safe_join(tb.DOWNLOAD_DIR, rel_path)),
-                ))
+                await tb.show_screen(
+                    query.message,
+                    file_views.more_screen(
+                        rel_path,
+                        info,
+                        page,
+                        tb.encode_path,
+                        is_manga=tb.is_manga_gallery_folder(
+                            tb.safe_join(tb.DOWNLOAD_DIR, rel_path)
+                        ),
+                    ),
+                )
 
             elif action == "send_yes":
                 if not tb.safe_join(tb.DOWNLOAD_DIR, rel_path).is_file():
@@ -381,42 +457,69 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await tb.safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing upload...")
                 tb.run_in_background(
                     tb.send_single_file_via_pyrogram(
-                        context.application, query.message.chat_id, query.message.message_id,
-                        rel_path, user_id=user_id,
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        rel_path,
+                        user_id=user_id,
                     ),
                     name="upload",
                     on_error=tb.message_error_reporter(
-                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        "Upload",
                     ),
                 )
 
             elif action == "send_folder_confirm":
                 info = await asyncio.to_thread(tb.folder_info, rel_path)
                 if not info["file_count"]:
-                    await tb.answer_once(query, "There are no files in this folder.", show_alert=True)
+                    await tb.answer_once(
+                        query, "There are no files in this folder.", show_alert=True
+                    )
                     return
                 await tb.safe_edit_message(
                     query.message,
                     f"{ICON_UPLOAD} Upload {info['file_count']} file(s) "
                     f"({tb.human_size(info['total_size'])}) from /{rel_path} to "
                     f"{tb.upload_target_label(tb.get_user_settings(user_id))}?",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_OK} Yes, upload all", callback_data=f"fb:send_folder_yes:{page}:{encoded}")],
-                        [InlineKeyboardButton("✖ Cancel", callback_data=f"fb:more:{page}:{encoded}")],
-                    ]),
+                    InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    f"{ICON_OK} Yes, upload all",
+                                    callback_data=f"fb:send_folder_yes:{page}:{encoded}",
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    "✖ Cancel", callback_data=f"fb:more:{page}:{encoded}"
+                                )
+                            ],
+                        ]
+                    ),
                 )
 
             elif action == "send_folder_yes":
                 await tb.answer_upload_tap(query)
-                await tb.safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing folder upload...")
+                await tb.safe_edit_message(
+                    query.message, f"{ICON_UPLOAD} Preparing folder upload..."
+                )
                 tb.run_in_background(
                     tb.send_folder_files_via_pyrogram(
-                        context.application, query.message.chat_id, query.message.message_id,
-                        rel_path, user_id=user_id,
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        rel_path,
+                        user_id=user_id,
                     ),
                     name="upload",
                     on_error=tb.message_error_reporter(
-                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        "Upload",
                     ),
                 )
 
@@ -424,10 +527,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 full = tb.safe_join(tb.DOWNLOAD_DIR, rel_path)
                 if not rel_path or not full.exists():
                     raise FileNotFoundError(rel_path)
-                info = await asyncio.to_thread(tb.folder_info if full.is_dir() else tb.file_info, rel_path)
-                await tb.show_screen(query.message, file_views.delete_confirm_screen(
-                    rel_path, full.is_dir(), info, page, tb.encode_path
-                ))
+                info = await asyncio.to_thread(
+                    tb.folder_info if full.is_dir() else tb.file_info, rel_path
+                )
+                await tb.show_screen(
+                    query.message,
+                    file_views.delete_confirm_screen(
+                        rel_path, full.is_dir(), info, page, tb.encode_path
+                    ),
+                )
 
             elif action == "delete_yes":
                 if not rel_path:
@@ -447,14 +555,27 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{ICON_WARN} Permanently delete everything inside /{rel_path}?\n\n"
                     f"{info['file_count']} files in {info['folder_count']} folders · "
                     f"{tb.human_size(info['total_size'])}\n\nThis cannot be undone.",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🗑 Yes, delete everything", callback_data=f"fb:deleteall_yes:{page}:{encoded}")],
-                        [InlineKeyboardButton("✖ Cancel", callback_data=f"fb:more:{page}:{encoded}")],
-                    ]),
+                    InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "🗑 Yes, delete everything",
+                                    callback_data=f"fb:deleteall_yes:{page}:{encoded}",
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    "✖ Cancel", callback_data=f"fb:more:{page}:{encoded}"
+                                )
+                            ],
+                        ]
+                    ),
                 )
 
             elif action == "deleteall_yes":
-                files_n, folders_n, errors = await asyncio.to_thread(tb.delete_all_in_directory, rel_path)
+                files_n, folders_n, errors = await asyncio.to_thread(
+                    tb.delete_all_in_directory, rel_path
+                )
                 text = f"Deleted {files_n} file(s) and {folders_n} folder(s)."
                 if errors:
                     text += f" {len(errors)} item(s) could not be deleted."
@@ -463,49 +584,88 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "zipdir":
                 files = await asyncio.to_thread(tb.get_all_files_in_folder, rel_path)
-                paths = tb.filter_files_for_archiving([tb.safe_join(tb.DOWNLOAD_DIR, f) for f in files])
+                paths = tb.filter_files_for_archiving(
+                    [tb.safe_join(tb.DOWNLOAD_DIR, f) for f in files]
+                )
                 if not paths:
                     await tb.answer_once(query, "There are no files to zip here.", show_alert=True)
                     return
                 await tb.ask_zip_name(
-                    query.message, user_id, chat_id, paths,
+                    query.message,
+                    user_id,
+                    chat_id,
+                    paths,
                     default_name=tb.rel_name(rel_path) if rel_path else tb.default_archive_name(),
                     cancel_data=f"fb:more:{page}:{encoded}",
                 )
 
             elif action == "sel":
-                tb.batch_select_sessions[user_id] = {"rel_path": rel_path, "selected": set(), "page": 0}
+                tb.batch_select_sessions[user_id] = {
+                    "rel_path": rel_path,
+                    "selected": set(),
+                    "page": 0,
+                }
                 await tb.show_selection(query.message, user_id)
 
             elif action == "manga_pdf":
                 folder = tb.safe_join(tb.DOWNLOAD_DIR, rel_path)
                 if not tb.is_manga_gallery_folder(folder):
-                    await tb.answer_once(query, "No manga images found in this folder.", show_alert=True)
+                    await tb.answer_once(
+                        query, "No manga images found in this folder.", show_alert=True
+                    )
                     return
                 await tb.answer_once(query)
-                await tb.safe_edit_message(query.message, f"{ICON_IMAGE} Converting images to PDF...\n\n{folder.name}")
+                await tb.safe_edit_message(
+                    query.message, f"{ICON_IMAGE} Converting images to PDF...\n\n{folder.name}"
+                )
                 pdf_path = await tb.convert_manga_folder_to_pdf_job(folder, user_id)
                 pdf_rel = tb.file_rel_path(pdf_path)
                 await tb.safe_edit_message(
                     query.message,
                     f"{ICON_OK} PDF created\n\n{pdf_path.name}",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{ICON_UPLOAD} Upload the PDF", callback_data=f"fb:send_yes:0:{tb.encode_path(pdf_rel)}")],
-                        [InlineKeyboardButton(f"{ICON_FOLDER} Open its folder", callback_data=f"fb:list:0:{tb.encode_path(tb.rel_parent(pdf_rel))}")],
-                    ]),
+                    InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    f"{ICON_UPLOAD} Upload the PDF",
+                                    callback_data=f"fb:send_yes:0:{tb.encode_path(pdf_rel)}",
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    f"{ICON_FOLDER} Open its folder",
+                                    callback_data=f"fb:list:0:{tb.encode_path(tb.rel_parent(pdf_rel))}",
+                                )
+                            ],
+                        ]
+                    ),
                 )
 
             elif action == "conv_menu":
                 await tb.safe_edit_message(
                     query.message,
                     f"🎬 Convert {tb.rel_name(rel_path)} to:",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton(res, callback_data=f"fb:conv_start:{page}:{encoded}:{res}")
-                         for res in ("1080p", "720p")],
-                        [InlineKeyboardButton(res, callback_data=f"fb:conv_start:{page}:{encoded}:{res}")
-                         for res in ("480p", "360p")],
-                        [InlineKeyboardButton("✖ Cancel", callback_data=f"fb:file:{page}:{encoded}")],
-                    ]),
+                    InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    res, callback_data=f"fb:conv_start:{page}:{encoded}:{res}"
+                                )
+                                for res in ("1080p", "720p")
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    res, callback_data=f"fb:conv_start:{page}:{encoded}:{res}"
+                                )
+                                for res in ("480p", "360p")
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    "✖ Cancel", callback_data=f"fb:file:{page}:{encoded}"
+                                )
+                            ],
+                        ]
+                    ),
                 )
 
             elif action == "thumb_send":
@@ -524,19 +684,27 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "compress":
                 full = tb.safe_join(tb.DOWNLOAD_DIR, rel_path)
                 if not full.is_file() or not tb.is_video_file(str(full)):
-                    await tb.answer_once(query, "This is not a video file (any more).", show_alert=True)
+                    await tb.answer_once(
+                        query, "This is not a video file (any more).", show_alert=True
+                    )
                     return
                 await tb.answer_once(query, "Compressing…")
                 await tb.start_compress_job(
-                    context.application, chat_id, user_id, rel_path,
-                    message=query.message, back=f"fb:file:{page}:{encoded}",
+                    context.application,
+                    chat_id,
+                    user_id,
+                    rel_path,
+                    message=query.message,
+                    back=f"fb:file:{page}:{encoded}",
                 )
 
             elif action == "organize":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
                 encoded = parts[3] if len(parts) > 3 else ""
                 rel_path = tb.decode_path(encoded) if encoded else ""
-                plan = await asyncio.to_thread(tb.build_organize_plan, rel_path, tb.active_job_names())
+                plan = await asyncio.to_thread(
+                    tb.build_organize_plan, rel_path, tb.active_job_names()
+                )
                 text, markup = tb.build_organize_preview(rel_path, page, plan)
                 await tb.safe_edit_message(query.message, text, markup)
 
@@ -546,7 +714,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rel_path = tb.decode_path(encoded) if encoded else ""
                 await tb.safe_edit_message(query.message, f"{ICON_BROOM} Organizing videos...")
                 # Re-plan so files that changed since the preview are handled correctly.
-                plan = await asyncio.to_thread(tb.build_organize_plan, rel_path, tb.active_job_names())
+                plan = await asyncio.to_thread(
+                    tb.build_organize_plan, rel_path, tb.active_job_names()
+                )
                 result = await asyncio.to_thread(
                     tb.apply_organize, plan, delete_leftovers=(mode == "purge")
                 )
@@ -567,9 +737,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await tb.safe_edit_message(
                     query.message,
                     "\n".join(lines),
-                    InlineKeyboardMarkup([[InlineKeyboardButton(
-                        f"{ICON_FOLDER} Open folder", callback_data=f"fb:list:{page}:{encoded}"
-                    )]]),
+                    InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    f"{ICON_FOLDER} Open folder",
+                                    callback_data=f"fb:list:{page}:{encoded}",
+                                )
+                            ]
+                        ]
+                    ),
                 )
 
             elif action == "conv_start":
@@ -581,21 +758,39 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rel_path = tb.decode_path(encoded) if encoded else ""
                 input_path = tb.safe_join(tb.DOWNLOAD_DIR, rel_path)
                 if not input_path.exists() or not tb.is_video_file(str(input_path)):
-                    await tb.answer_once(query, "This is not a video file (any more).", show_alert=True)
+                    await tb.answer_once(
+                        query, "This is not a video file (any more).", show_alert=True
+                    )
                     return
                 await tb.answer_once(query)
 
-                output_path = input_path.parent / f"{input_path.stem}_{target_res}{input_path.suffix}"
-                back_to_file = InlineKeyboardButton("🔙 Back to file", callback_data=f"fb:file:{page}:{encoded}")
+                output_path = (
+                    input_path.parent / f"{input_path.stem}_{target_res}{input_path.suffix}"
+                )
+                back_to_file = InlineKeyboardButton(
+                    "🔙 Back to file", callback_data=f"fb:file:{page}:{encoded}"
+                )
                 if output_path.exists() and not force:
                     await tb.safe_edit_message(
                         query.message,
                         f"⏩ A {target_res} version already exists:\n{output_path.name}",
-                        InlineKeyboardMarkup([
-                            [InlineKeyboardButton("📤 Upload it", callback_data=f"fb:conv_upload:{page}:{encoded}:{tb.encode_path(tb.file_rel_path(output_path))}")],
-                            [InlineKeyboardButton("🔁 Convert again (replace it)", callback_data=f"fb:conv_start:{page}:{encoded}:{target_res}!")],
-                            [back_to_file],
-                        ]),
+                        InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "📤 Upload it",
+                                        callback_data=f"fb:conv_upload:{page}:{encoded}:{tb.encode_path(tb.file_rel_path(output_path))}",
+                                    )
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        "🔁 Convert again (replace it)",
+                                        callback_data=f"fb:conv_start:{page}:{encoded}:{target_res}!",
+                                    )
+                                ],
+                                [back_to_file],
+                            ]
+                        ),
                     )
                     return
                 if force:
@@ -616,10 +811,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     await msg.edit_text(
                         f"✅ Conversion finished!\nOutput: {output_path.name}\nSize: {tb.human_size(output_path.stat().st_size)}",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("📤 Upload converted file", callback_data=f"fb:conv_upload:{page}:{encoded}:{tb.encode_path(tb.file_rel_path(output_path))}")],
-                            [back_to_file],
-                        ]),
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "📤 Upload converted file",
+                                        callback_data=f"fb:conv_upload:{page}:{encoded}:{tb.encode_path(tb.file_rel_path(output_path))}",
+                                    )
+                                ],
+                                [back_to_file],
+                            ]
+                        ),
                     )
 
                 tb.run_in_background(
@@ -632,10 +834,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "conv_upload":
                 page = int(parts[2]) if len(parts) > 2 and parts[2] else 0
-                original_encoded, _, converted_encoded = (parts[3] if len(parts) > 3 else "").partition(":")
+                original_encoded, _, converted_encoded = (
+                    parts[3] if len(parts) > 3 else ""
+                ).partition(":")
                 converted_rel = tb.decode_path(converted_encoded) if converted_encoded else ""
                 await tb.answer_upload_tap(query)
-                await tb.safe_edit_message(query.message, f"{ICON_UPLOAD} Uploading converted file...")
+                await tb.safe_edit_message(
+                    query.message, f"{ICON_UPLOAD} Uploading converted file..."
+                )
                 tb.run_in_background(
                     tb.send_single_file_via_pyrogram(
                         context.application,
@@ -646,12 +852,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ),
                     name="upload",
                     on_error=tb.message_error_reporter(
-                        context.application, query.message.chat_id, query.message.message_id, "Upload"
+                        context.application,
+                        query.message.chat_id,
+                        query.message.message_id,
+                        "Upload",
                     ),
                 )
 
             # New: Send thumbnail (multiple frames)
-
 
         # ===== Archive =====
         elif data == "zipname:default":
@@ -661,7 +869,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await tb.answer_once(query)
             tb.run_in_background(
-                tb.run_named_zip(context.application, user_id, session["default_name"], query.message),
+                tb.run_named_zip(
+                    context.application, user_id, session["default_name"], query.message
+                ),
                 name="zip",
                 on_error=tb.message_error_reporter(
                     context.application, chat_id, query.message.message_id, "Archive"
@@ -669,13 +879,19 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif data in ("zip_menu:zip_all",):
-            all_files = await asyncio.to_thread(lambda: tb.filter_files_for_archiving(tb.collect_download_files()))
+            all_files = await asyncio.to_thread(
+                lambda: tb.filter_files_for_archiving(tb.collect_download_files())
+            )
             if not all_files:
                 await tb.answer_once(query, "There are no files to zip.", show_alert=True)
                 return
             await tb.ask_zip_name(
-                query.message, user_id, chat_id, all_files,
-                default_name=tb.default_archive_name(), cancel_data="nav:archive",
+                query.message,
+                user_id,
+                chat_id,
+                all_files,
+                default_name=tb.default_archive_name(),
+                cancel_data="nav:archive",
             )
 
         elif data.startswith(("zip_menu:", "zip_select:")):
@@ -692,33 +908,48 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             back = "nav:archive_settings"
 
             if setting_key == "part_size":
-                await tb.show_screen(query.message, settings_views.archive_choice_screen(
-                    "Split archives into parts of",
-                    [
-                        ("256 MB", "zip_set_value:zip_part_size:268435456"),
-                        ("512 MB", "zip_set_value:zip_part_size:536870912"),
-                        ("1 GB", "zip_set_value:zip_part_size:1073741824"),
-                        ("2 GB (largest Telegram upload)", "zip_set_value:zip_part_size:2147483648"),
-                    ],
-                    back,
-                ))
+                await tb.show_screen(
+                    query.message,
+                    settings_views.archive_choice_screen(
+                        "Split archives into parts of",
+                        [
+                            ("256 MB", "zip_set_value:zip_part_size:268435456"),
+                            ("512 MB", "zip_set_value:zip_part_size:536870912"),
+                            ("1 GB", "zip_set_value:zip_part_size:1073741824"),
+                            (
+                                "2 GB (largest Telegram upload)",
+                                "zip_set_value:zip_part_size:2147483648",
+                            ),
+                        ],
+                        back,
+                    ),
+                )
 
             elif setting_key == "method":
-                await tb.show_screen(query.message, settings_views.archive_choice_screen(
-                    "Archive format",
-                    [
-                        ("ZIP — opens everywhere", "zip_set_value:zip_method:zip"),
-                        ("7Z — smaller, needs 7-Zip", "zip_set_value:zip_method:7z"),
-                    ],
-                    back,
-                ))
+                await tb.show_screen(
+                    query.message,
+                    settings_views.archive_choice_screen(
+                        "Archive format",
+                        [
+                            ("ZIP — opens everywhere", "zip_set_value:zip_method:zip"),
+                            ("7Z — smaller, needs 7-Zip", "zip_set_value:zip_method:7z"),
+                        ],
+                        back,
+                    ),
+                )
 
             elif setting_key == "compression":
-                await tb.show_screen(query.message, settings_views.archive_choice_screen(
-                    "Compression level (1 = fastest, 9 = smallest)",
-                    [(str(level), f"zip_set_value:compression_level:{level}") for level in range(1, 10)],
-                    back,
-                ))
+                await tb.show_screen(
+                    query.message,
+                    settings_views.archive_choice_screen(
+                        "Compression level (1 = fastest, 9 = smallest)",
+                        [
+                            (str(level), f"zip_set_value:compression_level:{level}")
+                            for level in range(1, 10)
+                        ],
+                        back,
+                    ),
+                )
 
             elif setting_key == "password":
                 session = tb.zip_select_sessions.get(user_id, {"selected": set(), "page": 0})
@@ -730,7 +961,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Send none to remove the password, or /cancel to keep the current one.",
                 )
 
-            elif setting_key in ("auto_del_files", "auto_del_zips", "auto_del_upload", "forwarded_posts"):
+            elif setting_key in (
+                "auto_del_files",
+                "auto_del_zips",
+                "auto_del_upload",
+                "forwarded_posts",
+            ):
                 setting_name = {
                     "auto_del_files": "auto_delete_files_after_zip",
                     "auto_del_zips": "auto_delete_zips_after_send",
@@ -738,8 +974,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "forwarded_posts": "auto_download_forwarded_posts",
                 }[setting_key]
                 settings = tb.get_user_settings(user_id)
-                await tb.update_setting(user_id, setting_name, not settings.get(setting_name, False))
-                await tb.show_screen(query.message, tb.build_archive_settings_screen(user_id, context))
+                await tb.update_setting(
+                    user_id, setting_name, not settings.get(setting_name, False)
+                )
+                await tb.show_screen(
+                    query.message, tb.build_archive_settings_screen(user_id, context)
+                )
 
             else:
                 # e.g. batch_mode from the old screen; it lives in Settings now.
@@ -755,12 +995,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     value = int(value)
                 except ValueError:
                     # FIX #7: Use translated string instead of hardcoded
-                    await tb.answer_once(query, tb.get_lang(user_id, 'invalid_value'), show_alert=True)
+                    await tb.answer_once(
+                        query, tb.get_lang(user_id, "invalid_value"), show_alert=True
+                    )
                     return
             elif setting_name == "zip_method":
                 value = value.lower()
                 if value not in ("zip", "7z"):
-                    await tb.answer_once(query, tb.get_lang(user_id, 'invalid_archive_method'), show_alert=True)
+                    await tb.answer_once(
+                        query, tb.get_lang(user_id, "invalid_archive_method"), show_alert=True
+                    )
                     return
                 fmt_err = tb.check_archive_format_support(value)
                 if fmt_err:
@@ -773,19 +1017,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ):
                 value = value.lower() == "true"
 
-            if setting_name == "zip_part_size":
-                if not tb.validate_part_size(value // (1024 * 1024)):
-                    await tb.answer_once(query, tb.get_lang(user_id, 'part_size_error'), show_alert=True)
-                    return
-            elif setting_name == "compression_level":
-                if not tb.validate_compression_level(value):
-                    # FIX #7: Use translated string instead of hardcoded
-                    await tb.answer_once(query, tb.get_lang(user_id, 'compression_error'), show_alert=True)
-                    return
+            if setting_name == "zip_part_size" and not tb.validate_part_size(
+                value // (1024 * 1024)
+            ):
+                await tb.answer_once(
+                    query, tb.get_lang(user_id, "part_size_error"), show_alert=True
+                )
+                return
+            elif setting_name == "compression_level" and not tb.validate_compression_level(value):
+                # FIX #7: Use translated string instead of hardcoded
+                await tb.answer_once(
+                    query, tb.get_lang(user_id, "compression_error"), show_alert=True
+                )
+                return
 
             ok = await tb.update_setting(user_id, setting_name, value)
             if not ok:
-                await tb.answer_once(query, tb.get_lang(user_id, 'invalid_value'), show_alert=True)
+                await tb.answer_once(query, tb.get_lang(user_id, "invalid_value"), show_alert=True)
                 return
 
             await tb.show_screen(query.message, tb.build_archive_settings_screen(user_id, context))
@@ -816,7 +1064,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await tb.safe_edit_message(
                 query.message,
                 f"{ICON_WARN} {text}",
-                InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")],
-                ]),
+                InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")],
+                    ]
+                ),
             )

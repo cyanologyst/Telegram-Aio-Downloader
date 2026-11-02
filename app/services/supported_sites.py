@@ -31,9 +31,15 @@ def _unique_sorted(names) -> list[str]:
 def site_lines() -> tuple[str, ...]:
     """Every list line in order: a "§ Section" header, then its sites."""
     sections = [
-        ("Torrents and files", ["Magnet links", ".torrent files", "Direct file links (.zip, .mkv, …)"]),
+        (
+            "Torrents and files",
+            ["Magnet links", ".torrent files", "Direct file links (.zip, .mkv, …)"],
+        ),
         ("Videos (yt-dlp)", _unique_sorted(GENERAL_VIDEO_SITES.values())),
-        ("Adult videos", _unique_sorted([*ADULT_VIDEO_SITES.values(), *HENTAI_VIDEO_SITES.values()])),
+        (
+            "Adult videos",
+            _unique_sorted([*ADULT_VIDEO_SITES.values(), *HENTAI_VIDEO_SITES.values()]),
+        ),
         ("Music", ["Spotify (tracks, albums, playlists, artists, shows)"]),
         ("Manga", ["MangaDex", "nhentai", "E-Hentai", "Manganato", "Other manga/gallery pages"]),
         ("Galleries (gallery-dl)", _unique_sorted(_gallery_sites())),
@@ -50,7 +56,9 @@ def page_count(total: int, per_page: int = PER_PAGE) -> int:
     return max(1, -(-total // per_page))
 
 
-def page_of(lines: tuple[str, ...] | list[str], page: int, per_page: int = PER_PAGE) -> tuple[list[str], int, int]:
+def page_of(
+    lines: tuple[str, ...] | list[str], page: int, per_page: int = PER_PAGE
+) -> tuple[list[str], int, int]:
     """(lines on ``page``, the page actually shown, number of pages); ``page`` is clamped."""
     pages = page_count(len(lines), per_page)
     page = max(0, min(page, pages - 1))

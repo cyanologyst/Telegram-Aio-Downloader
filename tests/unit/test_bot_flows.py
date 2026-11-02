@@ -655,22 +655,32 @@ async def test_a_flood_blocked_chat_is_not_called_again_until_it_lifts(monkeypat
     request = tb.RetryingRequest()
     base = "https://api.telegram.org/botT/"
 
-    code, _ = await request.do_request(base + "sendMessage", "POST", _request_data(chat_id=7, text="a"))
+    code, _ = await request.do_request(
+        base + "sendMessage", "POST", _request_data(chat_id=7, text="a")
+    )
     assert code == 429
     assert 52000 < tb.flood_guard.blocked_for(7) <= 52016
 
     with pytest.raises(RetryAfter):
-        await request.do_request(base + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="b"))
+        await request.do_request(
+            base + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="b")
+        )
     assert len(calls) == 1  # refused locally
 
     # Other chats, chat actions and calls without a chat still go out.
     await request.do_request(base + "sendMessage", "POST", _request_data(chat_id=8, text="c"))
-    await request.do_request(base + "sendChatAction", "POST", _request_data(chat_id=7, action="typing"))
-    await request.do_request(base + "answerCallbackQuery", "POST", _request_data(callback_query_id="q"))
+    await request.do_request(
+        base + "sendChatAction", "POST", _request_data(chat_id=7, action="typing")
+    )
+    await request.do_request(
+        base + "answerCallbackQuery", "POST", _request_data(callback_query_id="q")
+    )
     assert len(calls) == 4
 
     tb.flood_guard._blocked_until[7] = 0  # lifted
-    await request.do_request(base + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="d"))
+    await request.do_request(
+        base + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="d")
+    )
     assert len(calls) == 5
 
 
@@ -695,7 +705,11 @@ async def test_upload_tap_in_a_flood_blocked_chat_explains_and_still_uploads(mon
 
     (tb.DOWNLOAD_DIR / "clip.mp4").write_bytes(b"x")
     tb.download_jobs[3] = {
-        "id": 3, "name": "clip.mp4", "status": "completed", "chat_id": 1, "files": ["clip.mp4"],
+        "id": 3,
+        "name": "clip.mp4",
+        "status": "completed",
+        "chat_id": 1,
+        "files": ["clip.mp4"],
         "filepath": str(tb.DOWNLOAD_DIR / "clip.mp4"),
     }
     monkeypatch.setattr(tb, "job_files", lambda job: ["clip.mp4"])

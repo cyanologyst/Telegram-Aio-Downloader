@@ -22,6 +22,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 from app.bot import flood_guard
+from app.bot import telegram_bot as tb
 from app.bot.search import SearchUI
 from app.bot.views import home as home_views
 from app.downloaders.torrents.prowlarr.client import ProwlarrClient
@@ -29,7 +30,6 @@ from app.downloaders.torrents.rarbg.crawler import RARBGCrawler
 from app.downloaders.torrents.tpb.crawler import TPBCrawler
 from app.services.job_store import JobStore
 from app.services.torrent_search import ProwlarrProvider, RARBGProvider, TPBProvider
-from app.bot import telegram_bot as tb
 
 
 async def post_init(app: Application):
@@ -37,13 +37,13 @@ async def post_init(app: Application):
 
     if tb.search_ui is not None:
         tb.search_ui.bot_username = app.bot.username  # result links are t.me/<bot>?start=…
-    
+
     # Initialize thread pool executor for zip operations
     # Using ThreadPoolExecutor instead of ProcessPoolExecutor to properly share
     # the progress object across threads. With GIL, this is safe for I/O-bound work.
     # Limit to 2 workers to prevent bot overload from concurrent zip operations
     tb.zip_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="zip_worker")
-    
+
     # FIX #10: Verify pyrogram is logged in as user account (not bot)
     try:
         client = await tb.get_pyrogram_client()
@@ -64,7 +64,7 @@ async def post_init(app: Application):
         )
     except Exception as e:
         tb.logger.warning(f"Could not verify pyrogram user account: {e}")
-    
+
     # FIX #8: Start auto-cleanup task for old files
     async def cleanup_task():
         while True:
@@ -73,7 +73,7 @@ async def post_init(app: Application):
                 await tb.auto_cleanup_old_files()
             except Exception as e:
                 tb.logger.error(f"Auto-cleanup error: {e}")
-    
+
     asyncio.create_task(cleanup_task())
     tb.logger.info("✅ Auto-cleanup task started")
 
@@ -86,7 +86,8 @@ async def post_init(app: Application):
         if flood_guard.blocked_for(blocked_chat):
             tb.logger.warning(
                 "Telegram flood control in chat %s continues until %s",
-                blocked_chat, flood_guard.lift_text(blocked_chat),
+                blocked_chat,
+                flood_guard.lift_text(blocked_chat),
             )
 
     try:
@@ -104,7 +105,6 @@ async def post_init(app: Application):
         )
     except Exception as exc:
         tb.logger.warning("Unable to register bot commands: %s", exc)
-
 
     if tb.WEB_APP_ENABLE and tb.WEB_APP_URL:
         try:
@@ -130,12 +130,12 @@ async def post_init(app: Application):
 
 async def post_shutdown(app: Application):
     """Cleanup on shutdown - stop pyrogram client and shutdown executor."""
-    
+
     # Shutdown zip executor gracefully
     if tb.zip_executor:
         tb.zip_executor.shutdown(wait=True)
         tb.zip_executor = None
-    
+
     tb.stop_dashboard_server(getattr(app, "dashboard_server", None))
     if tb.job_store is not None:
         try:
@@ -162,7 +162,11 @@ class RetryingRequest(HTTPXRequest):
         api_method = url.rstrip("/").rsplit("/", 1)[-1]
         if not flood_guard.admit(chat_id, api_method):
             raise RetryAfter(int(flood_guard.blocked_for(chat_id)) + 1)
-        probing = chat_id is not None and flood_guard.is_send(api_method) and flood_guard.blocked_for(chat_id)
+        probing = (
+            chat_id is not None
+            and flood_guard.is_send(api_method)
+            and flood_guard.blocked_for(chat_id)
+        )
         try:
             code, payload = await super().do_request(url, method, request_data, *args, **kwargs)
         except NetworkError as exc:
@@ -177,15 +181,20 @@ class RetryingRequest(HTTPXRequest):
                 if not flood_guard.blocked_for(chat_id):
                     tb.logger.warning(
                         "Telegram flood control in chat %s: sends and edits paused for %.0fs",
-                        chat_id, retry_after,
+                        chat_id,
+                        retry_after,
                     )
                 flood_guard.note(chat_id, retry_after)
-        if probing and (code == 429 or 200 <= code < 300):
-            if flood_guard.send_result(chat_id, code != 429):
-                tb.logger.warning(
-                    "Telegram takes new messages in chat %s again; edits stay paused until %s",
-                    chat_id, flood_guard.lift_text(chat_id),
-                )
+        if (
+            probing
+            and (code == 429 or 200 <= code < 300)
+            and flood_guard.send_result(chat_id, code != 429)
+        ):
+            tb.logger.warning(
+                "Telegram takes new messages in chat %s again; edits stay paused until %s",
+                chat_id,
+                flood_guard.lift_text(chat_id),
+            )
         return code, payload
 
 
@@ -218,13 +227,15 @@ def acquire_instance_lock() -> None:
 
     lock_path = tb.BASE_DIR / "data" / "bot.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = open(lock_path, "a+")
+    lock_file = open(lock_path, "a+")  # noqa: SIM115 - kept open while the process owns the lock.
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         lock_file.seek(0)
         other = lock_file.read().strip() or "?"
-        raise SystemExit(f"Another bot instance (PID {other}) is already running; exiting.")
+        raise SystemExit(
+            f"Another bot instance (PID {other}) is already running; exiting."
+        ) from None
     lock_file.seek(0)
     lock_file.truncate()
     lock_file.write(str(os.getpid()))
@@ -395,36 +406,37 @@ def main():
                 web_app_url=tb.WEB_APP_URL,
                 allowed_user_ids=frozenset(tb.ALLOWED_USER_IDS),
             )
-            
+
             def run_flask():
                 # Run Flask in a separate thread with HTTPS
                 import os as os_ssl
-                cert_path = os_ssl.path.join(tb.BASE_DIR, 'cert.pem')
-                key_path = os_ssl.path.join(tb.BASE_DIR, 'key.pem')
-                
+
+                cert_path = os_ssl.path.join(tb.BASE_DIR, "cert.pem")
+                key_path = os_ssl.path.join(tb.BASE_DIR, "key.pem")
+
                 # Check if certificates exist
                 if os_ssl.path.exists(cert_path) and os_ssl.path.exists(key_path):
                     ssl_context = (cert_path, key_path)
                 else:
                     ssl_context = None
                     tb.logger.warning("SSL certificates not found. Flask running without HTTPS")
-                
+
                 flask_app.run(
                     host=tb.WEB_APP_HOST,
                     port=tb.WEB_APP_PORT,
                     debug=False,
                     use_reloader=False,
                     threaded=True,
-                    ssl_context=ssl_context
+                    ssl_context=ssl_context,
                 )
-            
+
             flask_thread = threading.Thread(target=run_flask, daemon=True)
             flask_thread.start()
-            
+
             tb.logger.info(
                 "Flask Web App started at %s (Mini-App URL: %s)",
                 f"{tb.WEB_APP_HOST}:{tb.WEB_APP_PORT}",
-                tb.WEB_APP_URL
+                tb.WEB_APP_URL,
             )
         except Exception as exc:
             tb.logger.warning("Unable to start Flask Web App: %s", exc)

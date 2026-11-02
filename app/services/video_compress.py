@@ -64,8 +64,18 @@ def probe_audio_codecs(path: Path, ffprobe: str = "ffprobe") -> list[str] | None
     """Codec names of the audio streams, or None if ffprobe failed."""
     try:
         result = subprocess.run(
-            [ffprobe, "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=codec_name", "-of", "json", str(path)],
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "json",
+                str(path),
+            ],
             capture_output=True,
             text=True,
             timeout=60,
@@ -98,12 +108,29 @@ def build_compress_command(
     copy_audio: bool,
 ) -> list[str]:
     cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-nostats",
-        "-progress", "pipe:1", "-y",
-        "-i", str(source),
-        "-map", "0:v:0", "-map", "0:a?",
-        "-c:v", encoder, "-crf", str(crf), "-preset", preset,
-        "-pix_fmt", "yuv420p",
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-y",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        encoder,
+        "-crf",
+        str(crf),
+        "-preset",
+        preset,
+        "-pix_fmt",
+        "yuv420p",
     ]
     if encoder == "libx265":
         # hvc1 is the tag Apple players (and Telegram's iOS app) expect.

@@ -11,9 +11,9 @@ from telegram import InputMediaVideo
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_FAIL
 from app.services import animation, gif_previews, upload_filter
-from app.bot import telegram_bot as tb
 
 
 def gif_candidates(job: dict) -> list[Path]:
@@ -79,14 +79,15 @@ async def send_job_gifs(app: Application, job: dict) -> None:
             return
         for path, info in gifs:
             try:
-                with open(path, "rb") as fh:
+                with open(path, "rb") as fh:  # noqa: ASYNC230
                     await app.bot.send_animation(
                         chat_id=job["chat_id"],
                         animation=fh,
                         width=getattr(info, "width", None) or None,
                         height=getattr(info, "height", None) or None,
                         duration=int(getattr(info, "duration", 0) or 0) or None,
-                        caption=tb.shorten(tb.clean_download_name(job.get("name") or ""), 200) or None,
+                        caption=tb.shorten(tb.clean_download_name(job.get("name") or ""), 200)
+                        or None,
                         read_timeout=300,
                         write_timeout=300,
                     )
@@ -116,7 +117,11 @@ def job_preview_video(job: dict) -> Path | None:
 def make_gif_previews(source: Path, workdir: Path) -> list[tuple[Path, float, object]]:
     """Cut the preview clips of ``source`` into ``workdir``: [(mp4, start seconds, info)]."""
     if not shutil.which(tb.FFMPEG_BIN) or not shutil.which(tb.FFPROBE_BIN):
-        tb.logger.error("GIF previews need ffmpeg and ffprobe (FFMPEG_BIN=%s, FFPROBE_BIN=%s)", tb.FFMPEG_BIN, tb.FFPROBE_BIN)
+        tb.logger.error(
+            "GIF previews need ffmpeg and ffprobe (FFMPEG_BIN=%s, FFPROBE_BIN=%s)",
+            tb.FFMPEG_BIN,
+            tb.FFPROBE_BIN,
+        )
         raise RuntimeError("ffmpeg/ffprobe are not installed on the server.")
     info = animation.probe(source, tb.FFPROBE_BIN)
     plan = gif_previews.preview_plan(info.duration if info else None)
@@ -147,10 +152,13 @@ def preview_video_kwargs(info) -> dict:
 
 async def send_preview_video(app: Application, chat_id: int, path: Path, info) -> None:
     """Send one preview clip, never with a caption."""
-    with open(path, "rb") as fh:
+    with open(path, "rb") as fh:  # noqa: ASYNC230
         await app.bot.send_video(
-            chat_id=chat_id, video=fh, **tb.preview_video_kwargs(info),
-            read_timeout=300, write_timeout=300,
+            chat_id=chat_id,
+            video=fh,
+            **tb.preview_video_kwargs(info),
+            read_timeout=300,
+            write_timeout=300,
         )
 
 
@@ -163,19 +171,26 @@ async def _send_preview_album(app: Application, chat_id: int, clips: list, name:
             await tb.send_preview_video(app, chat_id, path, info)
         else:
             media = []
-            for i, (path, _, info) in enumerate(clips):
-                with open(path, "rb") as fh:  # InputMediaVideo reads the bytes right away
-                    media.append(InputMediaVideo(
-                        media=fh,
-                        **tb.preview_video_kwargs(info),
-                    ))
+            for path, _, info in clips:
+                with open(  # noqa: ASYNC230
+                    path, "rb"
+                ) as fh:  # InputMediaVideo reads bytes right away
+                    media.append(
+                        InputMediaVideo(
+                            media=fh,
+                            **tb.preview_video_kwargs(info),
+                        )
+                    )
             await app.bot.send_media_group(
-                chat_id=chat_id, media=media, read_timeout=300, write_timeout=300,
+                chat_id=chat_id,
+                media=media,
+                read_timeout=300,
+                write_timeout=300,
             )
         return len(clips)
     except BadRequest as exc:
         tb.logger.warning("GIF preview album of %s refused, sending one by one: %s", name, exc)
-        for i, (path, start, info) in enumerate(clips, start=1):
+        for i, (path, _start, info) in enumerate(clips, start=1):
             try:
                 await tb.send_preview_video(app, chat_id, path, info)
                 sent += 1
@@ -198,7 +213,9 @@ def merge_gif_previews(clips: list, source: Path, workdir: Path) -> tuple[Path, 
     try:
         gif_previews.merge_clips(ordered, target, ffmpeg=tb.FFMPEG_BIN)
     except Exception as exc:
-        tb.logger.warning("Merging the GIF previews of %s failed, sending an album: %s", source.name, exc)
+        tb.logger.warning(
+            "Merging the GIF previews of %s failed, sending an album: %s", source.name, exc
+        )
         return None
     if target.stat().st_size > tb.BOT_MAX_DOCUMENT_BYTES:
         tb.logger.warning("Merged GIF preview of %s is too big, sending an album", source.name)
@@ -220,11 +237,13 @@ async def _send_merged_preview(
                     video=str(path),
                     file_name=path.name,
                     supports_streaming=True,
-                    **tb.video_send_kwargs({
-                        "width": getattr(info, "width", None),
-                        "height": getattr(info, "height", None),
-                        "duration": getattr(info, "duration", None),
-                    }),
+                    **tb.video_send_kwargs(
+                        {
+                            "width": getattr(info, "width", None),
+                            "height": getattr(info, "height", None),
+                            "duration": getattr(info, "duration", None),
+                        }
+                    ),
                 )
             )
         else:
@@ -239,7 +258,9 @@ async def _send_merged_preview(
         tb.logger.warning("Merged GIF preview %s did not go through: %s", path.name, exc)
         return None
     except Exception as exc:
-        tb.logger.warning("Merged GIF preview %s could not be sent to %s: %s", path.name, chat_id, exc)
+        tb.logger.warning(
+            "Merged GIF preview %s could not be sent to %s: %s", path.name, chat_id, exc
+        )
         return False
 
 
@@ -295,17 +316,25 @@ async def send_gif_previews(
         except Exception as exc:
             tb.logger.warning("GIF previews of %s failed: %s", source.name, exc)
             if status is not None:
-                await tb.safe_edit_message(status, f"{ICON_FAIL} No GIF previews: {tb.shorten(str(exc), 200)}")
+                await tb.safe_edit_message(
+                    status, f"{ICON_FAIL} No GIF previews: {tb.shorten(str(exc), 200)}"
+                )
             return 0
         clips = sorted(clips, key=lambda clip: clip[1])[: gif_previews.PREVIEW_COUNT]
-        merged = await asyncio.to_thread(tb.merge_gif_previews, clips, source, Path(tmp)) if clips else None
+        merged = (
+            await asyncio.to_thread(tb.merge_gif_previews, clips, source, Path(tmp))
+            if clips
+            else None
+        )
         if merged:
             path, info = merged
             destinations = [await tb._preview_sender(target, chat_id)]
             if fallback_chat_id is not None and destinations[0] != (fallback_chat_id, False):
                 destinations.append((fallback_chat_id, False))
             for destination, via_user in destinations:
-                result = await tb._send_merged_preview(app, destination, path, info, via_user=via_user)
+                result = await tb._send_merged_preview(
+                    app, destination, path, info, via_user=via_user
+                )
                 if result is None:
                     break  # may have landed; don't send it again anywhere
                 if result:
@@ -328,7 +357,9 @@ async def send_gif_previews(
         elif sent:
             await status.delete()
         else:
-            await tb.safe_edit_message(status, f"{ICON_FAIL} Couldn't make GIF previews of {tb.shorten(source.name, 80)}.")
+            await tb.safe_edit_message(
+                status, f"{ICON_FAIL} Couldn't make GIF previews of {tb.shorten(source.name, 80)}."
+            )
     except Exception as exc:
         tb.logger.debug("GIF preview status not updated: %s", exc)
     return sent
@@ -388,8 +419,12 @@ async def send_upload_previews(
     try:
         async with tb._preview_lock():
             await tb.send_gif_previews(
-                app, preview_chat, tb.DOWNLOAD_DIR / rel_path,
-                status_chat_id=chat_id, fallback_chat_id=chat_id, target=target,
+                app,
+                preview_chat,
+                tb.DOWNLOAD_DIR / rel_path,
+                status_chat_id=chat_id,
+                fallback_chat_id=chat_id,
+                target=target,
             )
     except Exception as exc:
         tb.logger.warning("GIF previews after uploading %s failed: %s", rel_path, exc)

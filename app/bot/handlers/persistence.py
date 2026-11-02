@@ -6,8 +6,8 @@ import asyncio
 
 from telegram.ext import Application
 
-from app.infrastructure.aria2_rpc import Aria2RpcError
 from app.bot import telegram_bot as tb
+from app.infrastructure.aria2_rpc import Aria2RpcError
 
 
 def save_jobs_now() -> None:
@@ -22,7 +22,9 @@ async def job_persistence_loop():
         try:
             snapshot = [dict(job) for job in tb.download_jobs.values()]
             # Skip the write (and its fsync) when nothing changed since the last save.
-            fingerprint = tb._hash_content(repr([sorted(map(str, job.items())) for job in snapshot]))
+            fingerprint = tb._hash_content(
+                repr([sorted(map(str, job.items())) for job in snapshot])
+            )
             if fingerprint == last_fingerprint:
                 continue
             await asyncio.to_thread(tb.job_store.sync, snapshot)

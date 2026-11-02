@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import re
 import subprocess
@@ -13,9 +14,9 @@ import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, ContextTypes
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_FAIL, ICON_MAGNET
 from app.infrastructure.aria2_rpc import Aria2ConnectionError, Aria2RpcError
-from app.bot import telegram_bot as tb
 
 
 def _parse_int_field(value, default: int = 0) -> int:
@@ -109,7 +110,9 @@ def _apply_aria2_status(job: dict, status: dict):
         job["files"] = selected
 
     if rpc_status == "active":
-        job["status"] = "metadata" if not total_length and job.get("source_type") == "magnet" else "downloading"
+        job["status"] = (
+            "metadata" if not total_length and job.get("source_type") == "magnet" else "downloading"
+        )
     elif rpc_status == "waiting":
         job["status"] = "queued"
     elif rpc_status == "paused":
@@ -220,10 +223,8 @@ async def maybe_resolve_magnet_via_torrent_file(job: dict, status: dict) -> bool
         return False
 
     old_gid = job["gid"]
-    try:
+    with contextlib.suppress(Aria2RpcError):
         await tb.aria2_client.remove(old_gid, force=True)
-    except Aria2RpcError:
-        pass
     _, selected_files = tb._split_torrent_source(job.get("source") or "")
     spec = f"{torrent_path} --select-file={selected_files}" if selected_files else str(torrent_path)
     # aria2 keeps the info hash registered until the removal settles.
@@ -279,9 +280,9 @@ async def _monitor_aria2_job(app: Application, job: dict):
         try:
             status = await tb.aria2_client.tell_status(job["gid"])
             tb._apply_aria2_status(job, status)
-            if tb.switch_to_followed_gid(job, status) or await tb.maybe_resolve_magnet_via_torrent_file(
+            if tb.switch_to_followed_gid(
                 job, status
-            ):
+            ) or await tb.maybe_resolve_magnet_via_torrent_file(job, status):
                 await tb.maybe_auto_update_status_message(app, job, force=True)
                 await asyncio.sleep(1)
                 continue
@@ -395,7 +396,11 @@ async def start_aria2_download(app: Application, chat_id: int, magnet: str, user
     is_torrent_file = tb._is_local_torrent_file(source)
     lowered_source = source.lower()
     is_http_uri = lowered_source.startswith(("http://", "https://"))
-    source_type = "torrent" if is_torrent_file else "magnet" if lowered_source.startswith("magnet:") else "http" if is_http_uri else "uri"
+    source_type = (
+        "torrent"
+        if is_torrent_file
+        else "magnet" if lowered_source.startswith("magnet:") else "http" if is_http_uri else "uri"
+    )
     if source_type == "magnet":
         name = tb.extract_bt_name(source)
     elif source_type == "http":
@@ -478,7 +483,7 @@ async def cancel_job(job_id: int):
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
                 await process.wait()
         except ProcessLookupError:
@@ -560,7 +565,9 @@ async def resume_job(job_id: int):
 
 def clear_finished_jobs():
     # Mutate in place: the Mini App and dashboard hold references to this dict.
-    finished = [jid for jid, job in tb.download_jobs.items() if job["status"] not in tb.JOB_ACTIVE_STATES]
+    finished = [
+        jid for jid, job in tb.download_jobs.items() if job["status"] not in tb.JOB_ACTIVE_STATES
+    ]
     for jid in finished:
         del tb.download_jobs[jid]
     return len(finished)
@@ -660,15 +667,17 @@ def build_torrent_select_keyboard(user_id: int, page: int):
     start = page * tb.TORRENT_FILES_PER_PAGE
 
     rows = []
-    for f in files[start:start + tb.TORRENT_FILES_PER_PAGE]:
+    for f in files[start : start + tb.TORRENT_FILES_PER_PAGE]:
         checked = "✅" if f["index"] in selected else "⬜"
         size = f" · {f['size']}" if f.get("size") else ""
-        rows.append([
-            InlineKeyboardButton(
-                f"{checked} {tb.shorten(Path(f['path']).name, 34)}{size}",
-                callback_data=f"tsel:{f['index']}",
-            )
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{checked} {tb.shorten(Path(f['path']).name, 34)}{size}",
+                    callback_data=f"tsel:{f['index']}",
+                )
+            ]
+        )
 
     if pages > 1:
         nav = []
@@ -679,12 +688,20 @@ def build_torrent_select_keyboard(user_id: int, page: int):
             nav.append(InlineKeyboardButton("▶", callback_data=f"tpage:{page + 1}"))
         rows.append(nav)
 
-    rows.append([
-        InlineKeyboardButton("☑️ Select all", callback_data="tselall"),
-        InlineKeyboardButton("⬜ Clear", callback_data="tselnone"),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton("☑️ Select all", callback_data="tselall"),
+            InlineKeyboardButton("⬜ Clear", callback_data="tselnone"),
+        ]
+    )
     if selected:
-        rows.append([InlineKeyboardButton(f"✅ Download {len(selected)} selected", callback_data="tconfirm")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"✅ Download {len(selected)} selected", callback_data="tconfirm"
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton("📦 Download everything", callback_data="tall")])
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tcancel")])
     return InlineKeyboardMarkup(rows)

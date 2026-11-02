@@ -87,7 +87,9 @@ def test_block_and_held_results_survive_a_restart(tmp_path):
     flood_guard.configure(state)  # the next run
 
     assert 3590 < flood_guard.blocked_for(7) <= 3600
-    assert flood_guard.held(7) == [{"text": "Upload complete", "message_id": 5, "buttons": "upload_done"}]
+    assert flood_guard.held(7) == [
+        {"text": "Upload complete", "message_id": 5, "buttons": "upload_done"}
+    ]
 
 
 def test_expired_blocks_are_not_restored(tmp_path):
@@ -228,8 +230,15 @@ async def test_finished_job_in_a_blocked_chat_still_auto_uploads(monkeypatch):
     """The final card could not be sent, and finish_job_card returned before
     starting the auto-upload, so finished downloads were never uploaded."""
     (tb.DOWNLOAD_DIR / "clip.mp4").write_bytes(b"x")
-    job = {"id": 9, "name": "clip.mp4", "status": "completed", "chat_id": 1, "user_id": 1,
-           "provider": "aria2", "files": ["clip.mp4"]}
+    job = {
+        "id": 9,
+        "name": "clip.mp4",
+        "status": "completed",
+        "chat_id": 1,
+        "user_id": 1,
+        "provider": "aria2",
+        "files": ["clip.mp4"],
+    }
     tb.download_jobs[9] = job
     monkeypatch.setattr(tb, "get_user_settings", lambda uid: {"auto_upload_after_download": True})
     monkeypatch.setattr(tb, "job_outputs", lambda j: ["clip.mp4"])
@@ -267,7 +276,9 @@ async def test_finished_job_in_a_blocked_chat_still_auto_uploads(monkeypatch):
 # ---------------------------------------------------------------- previews
 
 
-async def test_preview_still_reaches_saved_messages_when_the_bot_chat_is_blocked(monkeypatch, tmp_path):
+async def test_preview_still_reaches_saved_messages_when_the_bot_chat_is_blocked(
+    monkeypatch, tmp_path
+):
     """The "Making GIF previews" note was sent first; its 429 aborted the preview,
     and with auto-delete on the video was then deleted without one."""
     source = tmp_path / "v.mp4"
@@ -275,7 +286,9 @@ async def test_preview_still_reaches_saved_messages_when_the_bot_chat_is_blocked
     merged = tmp_path / "Preview - v.mp4"
     merged.write_bytes(b"x")
     monkeypatch.setattr(tb, "make_gif_previews", lambda src, tmp: [(merged, 1.0)])
-    monkeypatch.setattr(tb, "merge_gif_previews", lambda clips, src, tmp: (merged, SimpleNamespace()))
+    monkeypatch.setattr(
+        tb, "merge_gif_previews", lambda clips, src, tmp: (merged, SimpleNamespace())
+    )
     videos = []
 
     class Client:
@@ -375,7 +388,9 @@ async def test_concurrent_callers_share_one_user_client_and_a_failed_start_is_re
 # ---------------------------------------------------------------- replies
 
 
-async def test_typed_message_in_a_blocked_chat_is_handled_quietly_and_explained_once(monkeypatch, caplog):
+async def test_typed_message_in_a_blocked_chat_is_handled_quietly_and_explained_once(
+    monkeypatch, caplog
+):
     """on_text caught the refused reply, then replied again from its except block;
     that raised too, and every message logged two tracebacks and got no answer.
     The user had no way to learn why the bot had gone silent."""
@@ -505,14 +520,18 @@ async def test_commands_in_a_blocked_chat_still_reach_telegram_and_get_answered(
     flood_guard.note(7, 46481)
 
     for text in ("📁 Files", "🔍 Search", "📊 Status"):
-        code, _ = await request.do_request(_API + "sendMessage", "POST", _request_data(chat_id=7, text=text))
+        code, _ = await request.do_request(
+            _API + "sendMessage", "POST", _request_data(chat_id=7, text=text)
+        )
         assert code == 200
     assert calls == ["sendMessage"] * 3
     assert flood_guard.sends_open(7)
 
     # Edits stay refused locally for the rest of the block.
     with pytest.raises(RetryAfter):
-        await request.do_request(_API + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="x"))
+        await request.do_request(
+            _API + "editMessageText", "POST", _request_data(chat_id=7, message_id=1, text="x")
+        )
     assert calls == ["sendMessage"] * 3
     assert flood_guard.blocked_for(7) > 46000
 
@@ -525,7 +544,9 @@ async def test_a_refused_send_is_probed_again_at_most_once_a_minute(monkeypatch)
     request = tb.RetryingRequest()
     flood_guard.note(7, 46481)
 
-    code, _ = await request.do_request(_API + "sendMessage", "POST", _request_data(chat_id=7, text="a"))
+    code, _ = await request.do_request(
+        _API + "sendMessage", "POST", _request_data(chat_id=7, text="a")
+    )
     assert code == 429 and not flood_guard.sends_open(7)
     now[0] += 10
     with pytest.raises(RetryAfter):  # within the minute: refused locally
@@ -534,7 +555,9 @@ async def test_a_refused_send_is_probed_again_at_most_once_a_minute(monkeypatch)
 
     refusing[0] = False
     now[0] += flood_guard.SEND_PROBE_INTERVAL
-    code, _ = await request.do_request(_API + "sendMessage", "POST", _request_data(chat_id=7, text="c"))
+    code, _ = await request.do_request(
+        _API + "sendMessage", "POST", _request_data(chat_id=7, text="c")
+    )
     assert code == 200 and flood_guard.sends_open(7) and len(calls) == 2
 
     # A later refusal closes sends again.
@@ -572,7 +595,9 @@ async def test_held_results_wait_while_sends_are_still_refused(monkeypatch):
     await asyncio.wait_for(_drain_background(), 5)
 
     assert waited[0] == tb.HELD_RECHECK  # rechecked, not slept for the whole block
-    assert [c.kwargs["text"] for c in context.bot.called("edit_message_text")] == ["Upload complete"]
+    assert [c.kwargs["text"] for c in context.bot.called("edit_message_text")] == [
+        "Upload complete"
+    ]
 
 
 async def test_upload_result_is_sent_new_when_its_progress_message_cannot_be_edited(monkeypatch):

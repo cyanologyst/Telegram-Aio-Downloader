@@ -13,13 +13,13 @@ from telegram.constants import ParseMode
 from telegram.ext import Application
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_AUDIO, ICON_DOWNLOAD, ICON_IMAGE
 from app.bot.views import jobs as job_views
 from app.services import animation
 from app.services.cobalt import CobaltError
 from app.services.hentai_playlist import HentaiPlaylist
 from app.services.pornhub_model import PornHubModelPlaylist
-from app.bot import telegram_bot as tb
 
 
 def cookies_file() -> str | None:
@@ -72,11 +72,13 @@ def probe_video(url: str) -> dict:
     opts["skip_download"] = True
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(resolved.url, download=False) or {}
-    heights = sorted({
-        int(fmt["height"])
-        for fmt in info.get("formats") or []
-        if fmt.get("height") and fmt.get("vcodec") not in (None, "none")
-    })
+    heights = sorted(
+        {
+            int(fmt["height"])
+            for fmt in info.get("formats") or []
+            if fmt.get("height") and fmt.get("vcodec") not in (None, "none")
+        }
+    )
     if not heights and info.get("height"):
         heights = [int(info["height"])]
     return {"title": info.get("title") or "", "duration": info.get("duration"), "heights": heights}
@@ -126,6 +128,7 @@ async def download_with_cobalt(
         paths: list[Path] = []
         finished_bytes = 0
         for item in items:
+
             def progress(done: int, total: int, base: int = finished_bytes):
                 job["completed_length"] = base + done
                 job["total_length"] = base + total if total else 0
@@ -171,7 +174,9 @@ def explain_spotdl_error(error) -> tuple[str, bool]:
     """(readable reason, whether YouTube cookies would help) for a spotDL failure."""
     text = " ".join(str(error).split())
     lowered = text.lower()
-    if any(s in lowered for s in ("audioprovidererror", "yt-dlp download error", "no usable results")):
+    if any(
+        s in lowered for s in ("audioprovidererror", "yt-dlp download error", "no usable results")
+    ):
         return (
             "spotDL found the song on Spotify, but it gets the audio from YouTube and YouTube "
             "refused this server. " + tb._COOKIE_HINT,
@@ -335,7 +340,9 @@ async def convert_manga_folder_to_pdf_job(folder: Path, user_id: int) -> Path:
     return pdf_path
 
 
-async def wait_for_download_slot(app: Application, job: dict, cancelled=None, check_disk: bool = True) -> bool:
+async def wait_for_download_slot(
+    app: Application, job: dict, cancelled=None, check_disk: bool = True
+) -> bool:
     """Hold a job until it may download (Settings › Downloads at once).
 
     While it waits its card says "Queued (position n)". False if the job was
@@ -354,8 +361,11 @@ async def wait_for_download_slot(app: Application, job: dict, cancelled=None, ch
         await tb.maybe_auto_update_status_message(app, job, force=force)
 
     acquired = await tb.download_slots.acquire(
-        user_id, job["id"], lambda: tb.limit_of(tb.get_user_settings(user_id)),
-        on_wait=queued, cancelled=cancelled or (lambda: job.get("status") == "cancelled"),
+        user_id,
+        job["id"],
+        lambda: tb.limit_of(tb.get_user_settings(user_id)),
+        on_wait=queued,
+        cancelled=cancelled or (lambda: job.get("status") == "cancelled"),
     )
     job.pop("queue_position", None)
     if acquired and job.get("status") == "queued":

@@ -89,9 +89,11 @@ class DownloadSlots:
                         waiting.remove(job_id)
                     return False
                 if on_wait is not None:
-                    result = on_wait(self.position(user_id, job_id))
-                    if asyncio.iscoroutine(result):
-                        await result
+                    position = self.position(user_id, job_id)
+                    if position is not None:
+                        result = on_wait(position)
+                        if asyncio.iscoroutine(result):
+                            await result
                 await asyncio.sleep(self.poll_seconds)
         except BaseException:
             if job_id in waiting:

@@ -10,6 +10,7 @@ playable m3u8 and lets the existing yt-dlp workflow download it.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import re
@@ -97,7 +98,7 @@ def decode_datalink(token: str, host: str = "javcc.me") -> str | None:
     # The key lives in obfuscated JS and may rotate; recover it from the known prefix.
     known = f"https://{host}/xx/".encode("ascii")
     for key_length in range(4, len(known) + 1):
-        key = bytes(byte ^ plain for byte, plain in zip(raw[:key_length], known))
+        key = bytes(byte ^ plain for byte, plain in zip(raw[:key_length], known, strict=False))
         decoded = _xor(raw, key)
         if decoded.startswith(known) and _looks_like_url(decoded):
             return decoded.decode("ascii")
@@ -165,7 +166,9 @@ def decrypt_cryptojs(ciphertext: bytes, passphrase: str, salt: bytes) -> str:
         raise ValueError("Wrong passphrase.") from exc
 
 
-def _evp_bytes_to_key(password: bytes, salt: bytes, key_len: int, iv_len: int) -> tuple[bytes, bytes]:
+def _evp_bytes_to_key(
+    password: bytes, salt: bytes, key_len: int, iv_len: int
+) -> tuple[bytes, bytes]:
     derived = b""
     block = b""
     while len(derived) < key_len + iv_len:
@@ -177,10 +180,8 @@ def _evp_bytes_to_key(password: bytes, salt: bytes, key_len: int, iv_len: int) -
 def _media_url_from_plaintext(plaintext: str) -> str | None:
     text = plaintext.strip()
     if text.startswith('"'):
-        try:
+        with contextlib.suppress(ValueError):
             text = str(json.loads(text))
-        except ValueError:
-            pass
     text = text.replace("\\/", "/")
     if re.match(r"https?://\S+$", text):
         return text

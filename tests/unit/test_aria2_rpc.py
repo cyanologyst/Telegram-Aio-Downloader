@@ -73,7 +73,10 @@ async def test_aria2_daemon_launches_on_fixed_ports_with_trackers(tmp_path, monk
     assert "--dht-listen-port=6881" in launched
     assert "--enable-dht6=true" in launched
     assert "--dht-listen-addr6=::" in launched
-    assert DEFAULT_BT_TRACKERS[:2] == ("udp://open.stealth.si:80/announce", "udp://tracker.dler.org:80/announce")
+    assert DEFAULT_BT_TRACKERS[:2] == (
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.dler.org:80/announce",
+    )
     assert f"--bt-tracker={','.join(aria2_rpc.DEFAULT_BT_TRACKERS)}" in launched
 
 

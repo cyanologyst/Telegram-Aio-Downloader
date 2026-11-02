@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 
@@ -10,12 +11,12 @@ import yt_dlp
 from pyrogram import StopTransmission
 from telegram.ext import Application
 
+from app.bot import telegram_bot as tb
 from app.downloaders.base import DownloadRequest
 from app.downloaders.spotify import SpotifyDownloader
 from app.services import upload_filter
 from app.services.batch_download import BatchDownloadMode, BatchProgress
 from app.services.cobalt import CobaltError
-from app.bot import telegram_bot as tb
 
 
 async def start_manga_download(app: Application, chat_id: int, url: str, user_id: int = None):
@@ -79,7 +80,9 @@ async def start_manga_download(app: Application, chat_id: int, url: str, user_id
             await tb.maybe_auto_update_status_message(app, job, force=True)
             await tb.finish_job_card(app, job)
 
-    job["task"] = tb.run_in_background(tb.run_with_download_slot(app, job, run_job), name=f"manga-{job_id}")
+    job["task"] = tb.run_in_background(
+        tb.run_with_download_slot(app, job, run_job), name=f"manga-{job_id}"
+    )
     return job
 
 
@@ -122,10 +125,8 @@ async def start_gallery_download(
     def on_file(path: Path):
         job["status"] = "downloading"
         job["outputs"].append(str(path))
-        try:
+        with contextlib.suppress(OSError):
             job["completed_length"] += path.stat().st_size
-        except OSError:
-            pass
         job["last_line"] = f"{len(job['outputs'])} file(s) so far · {path.name}"
 
     async def run_job():
@@ -155,7 +156,10 @@ async def start_gallery_download(
             if tb.cobalt_client.enabled and not job["outputs"]:
                 try:
                     title, path = await tb.download_with_cobalt(
-                        job, url, tb.GALLERY_DIR / (job.get("category") or "cobalt"), reason,
+                        job,
+                        url,
+                        tb.GALLERY_DIR / (job.get("category") or "cobalt"),
+                        reason,
                         lambda: job.get("status") == "cancelled",
                     )
                 except CobaltError:
@@ -166,8 +170,11 @@ async def start_gallery_download(
                     if path:
                         job["outputs"] = [path]
                     job.update(
-                        name=title, status="completed", progress=100.0,
-                        finished_at=tb.now_ts(), last_line="",
+                        name=title,
+                        status="completed",
+                        progress=100.0,
+                        finished_at=tb.now_ts(),
+                        last_line="",
                     )
                     await tb.finish_job_card(app, job)
                     return
@@ -180,7 +187,9 @@ async def start_gallery_download(
             job["process"] = None
             refresher.cancel()
 
-    job["task"] = tb.run_in_background(tb.run_with_download_slot(app, job, run_job), name=f"gallery-{job_id}")
+    job["task"] = tb.run_in_background(
+        tb.run_with_download_slot(app, job, run_job), name=f"gallery-{job_id}"
+    )
     return job
 
 
@@ -264,7 +273,9 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
             if not result.artifacts:
                 job["note"] = "already downloaded"
             job["outputs"] = [
-                str(artifact.path) for artifact in result.artifacts if artifact.media_type == "audio"
+                str(artifact.path)
+                for artifact in result.artifacts
+                if artifact.media_type == "audio"
             ]
             job["finished_at"] = tb.now_ts()
             job["last_line"] = "Completed"
@@ -284,7 +295,9 @@ async def start_spotify_download(app: Application, chat_id: int, url: str, user_
         finally:
             job["process"] = None
 
-    job["task"] = tb.run_in_background(tb.run_with_download_slot(app, job, run_job), name=f"spotify-{job_id}")
+    job["task"] = tb.run_in_background(
+        tb.run_with_download_slot(app, job, run_job), name=f"spotify-{job_id}"
+    )
     return job
 
 
@@ -378,11 +391,7 @@ async def start_ytdlp_download(
             status = d.get("status")
 
             if status == "downloading":
-                total = (
-                    d.get("total_bytes")
-                    or d.get("total_bytes_estimate")
-                    or 0
-                )
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
 
                 downloaded = d.get("downloaded_bytes", 0)
                 speed = d.get("speed") or 0
@@ -425,41 +434,45 @@ async def start_ytdlp_download(
             )
         resolved_video = tb.resolve_adult_video_url(url)
         download_url = resolved_video.url
-        existing_files = {
-            path.resolve()
-            for path in output_dir.iterdir()
-            if path.is_file()
-        }
+        existing_files = {path.resolve() for path in output_dir.iterdir() if path.is_file()}
         output_template = str(output_dir / "%(title).200B [%(id)s].%(ext)s")
         if resolved_video.referer:
             output_template = tb.resolved_video_output_template(output_dir, url)
 
         ydl_opts = tb.ytdlp_common_options(url, resolved_video)
-        ydl_opts.update({
-            "outtmpl": output_template,
-            "progress_hooks": [progress_hook],
-            "concurrent_fragment_downloads": 4,
-            "fragment_retries": 10,
-            "file_access_retries": 3,
-            "continuedl": True,
-            "part": True,
-            "windowsfilenames": False,
-        })
+        ydl_opts.update(
+            {
+                "outtmpl": output_template,
+                "progress_hooks": [progress_hook],
+                "concurrent_fragment_downloads": 4,
+                "fragment_retries": 10,
+                "file_access_retries": 3,
+                "continuedl": True,
+                "part": True,
+                "windowsfilenames": False,
+            }
+        )
 
         if audio_only:
-            ydl_opts.update({
-                "format": "bestaudio/best",
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
-            })
+            ydl_opts.update(
+                {
+                    "format": "bestaudio/best",
+                    "postprocessors": [
+                        {
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": "192",
+                        }
+                    ],
+                }
+            )
         else:
-            ydl_opts.update({
-                "format": tb.video_format_selector(max_height),
-                "merge_output_format": "mp4",
-            })
+            ydl_opts.update(
+                {
+                    "format": tb.video_format_selector(max_height),
+                    "merge_output_format": "mp4",
+                }
+            )
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(download_url, download=True)
@@ -553,7 +566,13 @@ async def start_ytdlp_download(
             try:
                 title, filepath = await loop.run_in_executor(None, run_download)
             except Exception as ytdlp_error:
-                if is_cancelled() or job.get("disk_refused") or not tb.cobalt_client.enabled or is_hentai or is_adult:
+                if (
+                    is_cancelled()
+                    or job.get("disk_refused")
+                    or not tb.cobalt_client.enabled
+                    or is_hentai
+                    or is_adult
+                ):
                     raise
                 title, filepath = await tb.download_with_cobalt(
                     job, url, output_dir, tb.explain_ytdlp_error(ytdlp_error)[0], is_cancelled
@@ -565,11 +584,11 @@ async def start_ytdlp_download(
             job["status"] = "completed"
             job["name"] = title
             job["progress"] = 100.0
-            if filepath and os.path.exists(filepath):
-                size = os.path.getsize(filepath)
+            if filepath and os.path.exists(filepath):  # noqa: ASYNC240
+                size = os.path.getsize(filepath)  # noqa: ASYNC240
                 job["completed_length"] = size
                 job["total_length"] = size
-                job["filepath"] = str(Path(filepath).resolve())
+                job["filepath"] = str(Path(filepath).resolve())  # noqa: ASYNC240
             job["download_speed"] = 0
             job["finished_at"] = tb.now_ts()
             if notify:
@@ -605,10 +624,8 @@ async def start_ytdlp_download(
                 await tb.finish_job_card(app, job)
         finally:
             refresh_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await refresh_task
-            except asyncio.CancelledError:
-                pass
 
     if run_in_background:
         asyncio.create_task(finish_download())
@@ -626,11 +643,13 @@ async def upload_and_delete_batch_artifact(
     total_items: int,
 ) -> bool:
     """Upload one completed batch artifact and remove it only after success."""
-    full = Path(filepath).resolve()
+    full = Path(filepath).resolve()  # noqa: ASYNC240
     try:
         rel_path = tb.file_rel_path(full)
     except ValueError as exc:
-        raise RuntimeError(f"Downloaded file is outside the managed Download folder: {full}") from exc
+        raise RuntimeError(
+            f"Downloaded file is outside the managed Download folder: {full}"
+        ) from exc
     if not full.is_file():
         raise FileNotFoundError(str(full))
     refusal = await tb.upload_refusal(full)
@@ -650,7 +669,7 @@ async def upload_and_delete_batch_artifact(
             for chunk_path, chunk_index, chunk_total in chunks:
                 if job.get("status") == "cancelled":
                     return False
-                chunk = Path(chunk_path).resolve()
+                chunk = Path(chunk_path).resolve()  # noqa: ASYNC240
                 chunk_rel_path = tb.file_rel_path(chunk)
 
                 async def progress(current, total, *, part=chunk_index, parts=chunk_total):
@@ -671,8 +690,11 @@ async def upload_and_delete_batch_artifact(
                 await tb.maybe_auto_update_status_message(app, job, force=True)
                 try:
                     await tb.pyrogram_send_file(
-                        chunk_rel_path, progress_callback=progress, chat_id=target,
-                        force_document=as_document, max_size=cap,
+                        chunk_rel_path,
+                        progress_callback=progress,
+                        chat_id=target,
+                        force_document=as_document,
+                        max_size=cap,
                     )
                 except StopTransmission:
                     return False
@@ -727,8 +749,8 @@ async def run_video_batch(
             if not filepath:
                 raise RuntimeError(f"{item_label} {index} completed without an output file path.")
             if not upload_filter.matches(preset, filepath):
-                full = Path(filepath).resolve()
-                full.unlink(missing_ok=True)
+                full = Path(filepath).resolve()  # noqa: ASYNC240
+                full.unlink(missing_ok=True)  # noqa: ASYNC240
                 await asyncio.to_thread(tb.prune_empty_folders, full)
                 job["filtered_items"] = int(job.get("filtered_items", 0) or 0) + 1
                 job["last_line"] = (
@@ -737,7 +759,9 @@ async def run_video_batch(
                 )
                 tb.logger.info(
                     "Auto-upload filter %s deleted %s from job #%s",
-                    upload_filter.normalize(preset), full.name, job.get("id"),
+                    upload_filter.normalize(preset),
+                    full.name,
+                    job.get("id"),
                 )
                 return
             deleted = await tb.upload_and_delete_batch_artifact(
@@ -755,9 +779,7 @@ async def run_video_batch(
     async def on_progress(progress: BatchProgress) -> None:
         job["current_item"] = progress.current
         job["completed_items"] = progress.completed
-        job["progress"] = (
-            (progress.completed / progress.total * 100) if progress.total else 100.0
-        )
+        job["progress"] = (progress.completed / progress.total * 100) if progress.total else 100.0
         if progress.phase == "processing":
             job["status"] = "downloading"
             job["last_line"] = (

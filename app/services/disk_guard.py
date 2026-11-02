@@ -28,7 +28,14 @@ DEFAULT_BUFFER_BYTES = 3 * GB
 RECENT_SECONDS = 15 * 60
 
 INCOMPLETE_SUFFIXES = (
-    ".aria2", ".part", ".ytdl", ".tmp", ".temp", ".download", ".crdownload", ".incomplete",
+    ".aria2",
+    ".part",
+    ".ytdl",
+    ".tmp",
+    ".temp",
+    ".download",
+    ".crdownload",
+    ".incomplete",
 )
 FRAGMENT_RE = re.compile(r"\.part-Frag\d+", re.IGNORECASE)
 
@@ -93,10 +100,7 @@ def is_incomplete(path: Path, root: Path) -> bool:
 
 
 def is_protected(path: Path, protected: Iterable[Path]) -> bool:
-    for item in protected:
-        if path == item or item in path.parents:
-            return True
-    return False
+    return any(path == item or item in path.parents for item in protected)
 
 
 def purge_candidates(

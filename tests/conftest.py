@@ -19,6 +19,7 @@ def _upload_guard_off(monkeypatch):
     """
     tb = sys.modules.get("app.bot.telegram_bot")
     if tb is not None:
+
         async def allow(path):
             return None
 

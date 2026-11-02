@@ -13,13 +13,15 @@ from urllib.parse import unquote_plus
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationHandlerStop, ContextTypes
 
-from app.bot.icons import ICON_FAIL
 from app.bot import telegram_bot as tb
+from app.bot.icons import ICON_FAIL
 
 
 def store_link_request(kind: str, chat_id: int, **payload) -> str:
     now = time.time()
-    for rid in [r for r, req in tb.link_requests.items() if now - req["created"] > tb.LINK_REQUEST_TTL]:
+    for rid in [
+        r for r, req in tb.link_requests.items() if now - req["created"] > tb.LINK_REQUEST_TTL
+    ]:
         tb.link_requests.pop(rid, None)
     rid = uuid.uuid4().hex[:10]
     tb.link_requests[rid] = {"kind": kind, "chat_id": chat_id, "created": now, **payload}
@@ -28,8 +30,10 @@ def store_link_request(kind: str, chat_id: int, **payload) -> str:
 
 def link_request_markup(rid: str, actions: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     """Buttons for a link prompt: the given (label, action) pairs plus Cancel."""
-    buttons = [InlineKeyboardButton(label, callback_data=f"lp:{rid}:{action}") for label, action in actions]
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    buttons = [
+        InlineKeyboardButton(label, callback_data=f"lp:{rid}:{action}") for label, action in actions
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton("✖ Cancel", callback_data=f"lp:{rid}:cancel")])
     return InlineKeyboardMarkup(rows)
 
@@ -71,9 +75,8 @@ async def auto_cleanup_old_files():
             try:
                 age = now - path.stat().st_mtime
 
-                if age > max_age:
-                    if "_part_" in file_name or ".thumb_" in file_name:
-                        path.unlink(missing_ok=True)
+                if age > max_age and ("_part_" in file_name or ".thumb_" in file_name):
+                    path.unlink(missing_ok=True)
 
             except Exception:
                 continue
@@ -130,8 +133,11 @@ def encode_path(rel_path: str) -> str:
 
     # Clean up expired tokens to prevent memory leaks
     current_time = time.time()
-    expired_tokens = [token for token, (path, ts) in tb.path_tokens.items() 
-                      if current_time - ts >= tb.PATH_TOKEN_TIMEOUT]
+    expired_tokens = [
+        token
+        for token, (path, ts) in tb.path_tokens.items()
+        if current_time - ts >= tb.PATH_TOKEN_TIMEOUT
+    ]
     for token in expired_tokens:
         stored_path, _ = tb.path_tokens.pop(token, (None, None))
         if stored_path in tb.reverse_path_tokens:
@@ -156,7 +162,7 @@ def decode_path(token: str) -> str:
         raise ValueError("Path token expired. Please open Files again.")
 
     rel_path, timestamp = tb.path_tokens[token]
-    
+
     # Check if token has expired
     if time.time() - timestamp >= tb.PATH_TOKEN_TIMEOUT:
         # Clean up expired token
@@ -298,7 +304,9 @@ def message_error_reporter(app: Application, chat_id: int, message_id: int, what
         # Without a progress message (flood control kept it from being sent)
         # it is posted new; while the chat is blocked it is held until it lifts.
         await tb.show_or_hold(
-            app, chat_id, message_id,
+            app,
+            chat_id,
+            message_id,
             f"{ICON_FAIL} {what} failed.\n\nReason:\n{tb.shorten(str(exc), 600)}",
             "files",
         )

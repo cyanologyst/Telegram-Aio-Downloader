@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,9 @@ def configure(path: Path | str | None) -> None:
             if float(until) > now:
                 _announced[int(chat)] = float(until)
     except (OSError, ValueError, TypeError, AttributeError) as exc:
-        logger.warning("Saved flood-control state %s unreadable (%s); starting fresh", _state_path, exc)
+        logger.warning(
+            "Saved flood-control state %s unreadable (%s); starting fresh", _state_path, exc
+        )
 
 
 def _save() -> None:
@@ -122,6 +124,8 @@ def is_send(method: str) -> bool:
 
 def can_send(chat_id: int | None) -> bool:
     """Whether a new message to ``chat_id`` would be passed to Telegram now."""
+    if chat_id is None:
+        return True
     if not blocked_for(chat_id) or chat_id in _sends_open:
         return True
     return time.time() - _last_probe.get(chat_id, 0) >= SEND_PROBE_INTERVAL
@@ -129,6 +133,8 @@ def can_send(chat_id: int | None) -> bool:
 
 def admit(chat_id: int | None, method: str) -> bool:
     """Whether a ``method`` call to ``chat_id`` may go to Telegram (counts send probes)."""
+    if chat_id is None:
+        return True
     if not blocked_for(chat_id):
         return True
     if not is_send(method) or not can_send(chat_id):
@@ -156,7 +162,7 @@ def sends_open(chat_id: int) -> bool:
 def lift_text(chat_id: int) -> str:
     """When the block lifts, e.g. "09:35 UTC (in 14h 23m)"."""
     remaining = blocked_for(chat_id)
-    at = datetime.fromtimestamp(time.time() + remaining, tz=timezone.utc)
+    at = datetime.fromtimestamp(time.time() + remaining, tz=UTC)
     hours, rest = divmod(int(remaining), 3600)
     span = f"{hours}h {rest // 60}m" if hours else f"{max(1, rest // 60)}m"
     return f"{at:%H:%M} UTC (in {span})"
@@ -217,10 +223,12 @@ def guarded_chat(url: str, parameters: dict | None) -> int | None:
     if not method.startswith((*_SEND_PREFIXES, "edit")) or method in _UNGUARDED_METHODS:
         return None
     raw = (parameters or {}).get("chat_id")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None  # @channel usernames: not tracked
+    if isinstance(raw, (int, str)):
+        try:
+            return int(raw)
+        except ValueError:
+            pass  # @channel usernames: not tracked
+    return None
 
 
 def retry_after_from(payload: bytes) -> float | None:

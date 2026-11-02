@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import os
 import shutil
@@ -16,9 +17,9 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_FAIL, ICON_WARN
 from app.services import upload_guard, video_split
-from app.bot import telegram_bot as tb
 
 
 def is_video_file(file_path: str) -> bool:
@@ -55,19 +56,14 @@ def build_upload_caption(rel_path: str) -> str:
     full = tb.safe_join(tb.DOWNLOAD_DIR, rel_path)
     if not full.exists():
         return f"Uploaded: {rel_path}"
-    
+
     st = full.stat()
     size = tb.human_size(st.st_size)
     mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
     name = full.name
     path = "/" + rel_path.lstrip("/")
-    
-    return (
-        f"📄 {name}\n\n"
-        f"📊 Size: {size}\n"
-        f"📅 Modified: {mtime}\n"
-        f"📍 Path: {path}"
-    )
+
+    return f"📄 {name}\n\n" f"📊 Size: {size}\n" f"📅 Modified: {mtime}\n" f"📍 Path: {path}"
 
 
 def build_progress_bar(current: int, total: int, width: int = 20) -> str:
@@ -91,17 +87,17 @@ def split_file_into_chunks(file_path: str, chunk_size: int = video_split.DEFAULT
     """
     full = tb.safe_join(tb.DOWNLOAD_DIR, file_path)
     file_size = full.stat().st_size
-    
+
     if file_size <= chunk_size:
         return [(str(full), 1, 1)]
-    
+
     chunk_dir = full.parent / f"{full.stem}_chunks"
     chunk_dir.mkdir(exist_ok=True)
-    
+
     chunks = []
     chunk_num = 1
     total_chunks = math.ceil(file_size / chunk_size)
-    
+
     copy_buffer_size = 8 * 1024 * 1024
     with open(full, "rb") as src:
         while chunk_num <= total_chunks:
@@ -117,7 +113,7 @@ def split_file_into_chunks(file_path: str, chunk_size: int = video_split.DEFAULT
 
             chunks.append((str(chunk_path), chunk_num, total_chunks))
             chunk_num += 1
-    
+
     return chunks
 
 
@@ -141,10 +137,8 @@ def cleanup_file_chunks(chunks: list) -> None:
             tb.logger.warning("Could not remove temporary upload chunk: %s", chunk)
 
     for chunk_dir in chunk_dirs:
-        try:
+        with contextlib.suppress(OSError):
             chunk_dir.rmdir()
-        except OSError:
-            pass
 
 
 def prepare_upload_parts(rel_path: str, cap: int) -> tuple[list, bool]:
@@ -160,7 +154,11 @@ def prepare_upload_parts(rel_path: str, cap: int) -> tuple[list, bool]:
         return [(str(full), 1, 1)], False
     if tb.get_send_method(str(full)) == "video":
         parts = video_split.split_video(
-            full, full.parent / f"{full.stem}_chunks", cap, ffmpeg=tb.FFMPEG_BIN, ffprobe=tb.FFPROBE_BIN
+            full,
+            full.parent / f"{full.stem}_chunks",
+            cap,
+            ffmpeg=tb.FFMPEG_BIN,
+            ffprobe=tb.FFPROBE_BIN,
         )
         if parts:
             return [(str(p), i, len(parts)) for i, p in enumerate(parts, start=1)], False
@@ -218,10 +216,14 @@ def get_video_metadata(file_path: str):
         result = subprocess.run(
             [
                 "ffprobe",
-                "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height:format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=0",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height:format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=0",
                 file_path,
             ],
             capture_output=True,
@@ -258,7 +260,9 @@ async def upload_refusal(path: str | Path) -> str | None:
     """Why this file (relative to Download/, or absolute) must not be uploaded yet, or None."""
     full = Path(path) if Path(path).is_absolute() else tb.safe_join(tb.DOWNLOAD_DIR, str(path))
     return await upload_guard.check_upload(
-        full, fetch_statuses=tb.unfinished_aria2_downloads, probe_readable=tb._video_metadata_readable
+        full,
+        fetch_statuses=tb.unfinished_aria2_downloads,
+        probe_readable=tb._video_metadata_readable,
     )
 
 
@@ -295,23 +299,25 @@ def generate_thumbnail(file_path: str, output_size: tuple = (320, 180)) -> str:
         if tb.is_video_file(str(full)):
             # Use new thumbnail_generate module for video contact sheets
             thumb_path = full.parent / f".thumb_{full.stem}.jpg"
-            
+
             # Generate contact sheet using the new module
             tb.generate_contact_sheet(str(full), str(thumb_path))
-            
+
             if thumb_path.exists():
                 return str(thumb_path)
         elif tb.is_image_file(str(full)):
             # For images, create a simple thumbnail
             img = tb.Image.open(full)
-            resample_filter = getattr(getattr(tb.Image, "Resampling", tb.Image), "LANCZOS", tb.Image.LANCZOS)
+            resample_filter = getattr(
+                getattr(tb.Image, "Resampling", tb.Image), "LANCZOS", tb.Image.LANCZOS
+            )
             img.thumbnail(output_size, resample_filter)
             thumb_path = full.parent / f".thumb_{full.stem}.jpg"
             img.save(thumb_path, "JPEG", quality=80)
             return str(thumb_path)
     except Exception as e:
         tb.logger.debug(f"Error generating thumbnail for {file_path}: {e}")
-    
+
     return ""
 
 
@@ -337,7 +343,9 @@ def parse_ffmpeg_progress_seconds(line: str) -> float | None:
     return None
 
 
-async def convert_video_quality(input_path: str, output_path: str, target_res: str, progress_callback=None):
+async def convert_video_quality(
+    input_path: str, output_path: str, target_res: str, progress_callback=None
+):
     """
     Re-encode video to given resolution (e.g. '720p') with libx264, CRF 23.
 
@@ -360,17 +368,27 @@ async def convert_video_quality(input_path: str, output_path: str, target_res: s
     cmd = [
         tb.FFMPEG_BIN,
         "-hide_banner",
-        "-loglevel", "error",
+        "-loglevel",
+        "error",
         "-nostats",
-        "-progress", "pipe:1",
-        "-i", input_path,
-        "-vf", f"scale=-2:{target_h}",
-        "-c:v", "libx264",
-        "-crf", "23",
-        "-preset", "medium",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
+        "-progress",
+        "pipe:1",
+        "-i",
+        input_path,
+        "-vf",
+        f"scale=-2:{target_h}",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "23",
+        "-preset",
+        "medium",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
         "-y",
         output_path,
     ]
@@ -394,11 +412,11 @@ async def convert_video_quality(input_path: str, output_path: str, target_res: s
     except asyncio.CancelledError:
         process.kill()
         await process.wait()
-        Path(output_path).unlink(missing_ok=True)
+        Path(output_path).unlink(missing_ok=True)  # noqa: ASYNC240
         raise
     stderr = (await stderr_task).decode("utf-8", errors="ignore").strip()
     if process.returncode != 0:
-        Path(output_path).unlink(missing_ok=True)
+        Path(output_path).unlink(missing_ok=True)  # noqa: ASYNC240
         raise RuntimeError(f"ffmpeg conversion failed: {stderr[-300:] or process.returncode}")
 
 
@@ -408,7 +426,9 @@ async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel
     chat_id = update.effective_chat.id
 
     if not full.exists() or not tb.is_video_file(str(full)):
-        await context.bot.send_message(chat_id=chat_id, text=f"{ICON_WARN} {full.name} is not a video file.")
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"{ICON_WARN} {full.name} is not a video file."
+        )
         return
 
     tmp_dir = Path(tempfile.gettempdir()) / f"thumb_{uuid.uuid4().hex}"
@@ -419,7 +439,7 @@ async def send_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE, rel
         await asyncio.to_thread(tb.generate_contact_sheet, str(full), str(output_path))
         if not output_path.exists():
             raise RuntimeError("no image was produced")
-        with open(output_path, "rb") as img:
+        with open(output_path, "rb") as img:  # noqa: ASYNC230
             await context.bot.send_photo(
                 chat_id=chat_id, photo=img, caption=f"📸 Thumbnails: {full.name}"
             )

@@ -9,9 +9,9 @@ from telegram import InlineKeyboardMarkup
 
 from app.bot.views.common import Screen, back_row, button, e, on_off
 from app.services import upload_filter
-from app.services.download_slots import MAX_SLOTS, MIN_SLOTS, limit_of
 from app.services.batch_download import batch_download_mode_label
 from app.services.cookies import CookieSummary
+from app.services.download_slots import MAX_SLOTS, MIN_SLOTS, limit_of
 from app.services.user_settings import upload_target, upload_target_label
 
 # What a video link does: ask with a quality picker, or start right away.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import shutil
@@ -12,11 +13,11 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_BACK, ICON_BROOM, ICON_DELETE, ICON_OK, ICON_PIN, ICON_UPLOAD
 from app.bot.views import files as file_views
 from app.services import animation
 from app.services.organize import OrganizePlan
-from app.bot import telegram_bot as tb
 
 
 def is_internal(rel_path: str) -> bool:
@@ -45,14 +46,16 @@ def list_dir(rel_path: str):
                     count = sum(1 for e in os.scandir(entry) if not e.name.startswith("."))
                 except OSError:
                     count = 0
-            items.append({
-                "name": entry.name,
-                "rel_path": os.path.join(rel_path, entry.name) if rel_path else entry.name,
-                "is_dir": is_dir,
-                "size": st.st_size if entry.is_file() else 0,
-                "mtime": st.st_mtime,
-                "count": count,
-            })
+            items.append(
+                {
+                    "name": entry.name,
+                    "rel_path": os.path.join(rel_path, entry.name) if rel_path else entry.name,
+                    "is_dir": is_dir,
+                    "size": st.st_size if entry.is_file() else 0,
+                    "mtime": st.st_mtime,
+                    "count": count,
+                }
+            )
         except FileNotFoundError:
             continue
 
@@ -88,10 +91,8 @@ def folder_info(rel_path: str):
         file_count += len(files)
         for f in files:
             fp = Path(root) / f
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 total_size += fp.stat().st_size
-            except FileNotFoundError:
-                pass
 
     st = full.stat()
     return {
@@ -153,15 +154,23 @@ def build_organize_preview(rel_path: str, page: int, plan: OrganizePlan):
     if plan.skipped_busy:
         lines.append(f"Skipped {len(plan.skipped_busy)} folder(s) with downloads in progress.")
 
-    rows = [[InlineKeyboardButton(
-        f"{ICON_OK} Move {plan.video_count} video(s)",
-        callback_data=f"fb:organize_go:{page}:{encoded}:keep",
-    )]]
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{ICON_OK} Move {plan.video_count} video(s)",
+                callback_data=f"fb:organize_go:{page}:{encoded}:keep",
+            )
+        ]
+    ]
     if plan.leftover_files:
-        rows.append([InlineKeyboardButton(
-            f"{ICON_DELETE} Move + delete leftovers ({tb.human_size(plan.leftover_bytes)})",
-            callback_data=f"fb:organize_go:{page}:{encoded}:purge",
-        )])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{ICON_DELETE} Move + delete leftovers ({tb.human_size(plan.leftover_bytes)})",
+                    callback_data=f"fb:organize_go:{page}:{encoded}:purge",
+                )
+            ]
+        )
     rows.append([back])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -175,13 +184,15 @@ def _entry_for(rel_path: str) -> dict | None:
     is_dir = full.is_dir()
     count = 0
     if is_dir:
-        try:
+        with contextlib.suppress(OSError):
             count = sum(1 for e in os.scandir(full) if not e.name.startswith("."))
-        except OSError:
-            pass
     return {
-        "name": full.name, "rel_path": rel_path, "is_dir": is_dir,
-        "size": 0 if is_dir else st.st_size, "mtime": st.st_mtime, "count": count,
+        "name": full.name,
+        "rel_path": rel_path,
+        "is_dir": is_dir,
+        "size": 0 if is_dir else st.st_size,
+        "mtime": st.st_mtime,
+        "count": count,
     }
 
 
@@ -251,19 +262,29 @@ async def show_folder(message, rel_path: str, page: int = 0, *, edit: bool = Tru
     )
 
 
-async def show_file(message, rel_path: str, page: int = 0, *, edit: bool = True, user_id: int | None = None):
+async def show_file(
+    message, rel_path: str, page: int = 0, *, edit: bool = True, user_id: int | None = None
+):
     info = await asyncio.to_thread(tb.file_info, rel_path)
     if info["is_dir"]:
         await tb.show_folder(message, rel_path, 0, edit=edit)
         return
-    await tb.show_screen(message, file_views.file_screen(
-        rel_path, info["size"], info["mtime"], page, tb.encode_path,
-        is_video=tb.is_video_file(info["name"]),
-        can_send_here=info["size"] <= tb.BOT_MAX_DOCUMENT_BYTES,
-        has_saved_messages=tb.pyrogram_unavailable_reason() is None,
-        send_limit=tb.BOT_MAX_DOCUMENT_BYTES,
-        upload_label=tb.upload_target_label(tb.get_user_settings(user_id or 0)),
-    ), edit=edit)
+    await tb.show_screen(
+        message,
+        file_views.file_screen(
+            rel_path,
+            info["size"],
+            info["mtime"],
+            page,
+            tb.encode_path,
+            is_video=tb.is_video_file(info["name"]),
+            can_send_here=info["size"] <= tb.BOT_MAX_DOCUMENT_BYTES,
+            has_saved_messages=tb.pyrogram_unavailable_reason() is None,
+            send_limit=tb.BOT_MAX_DOCUMENT_BYTES,
+            upload_label=tb.upload_target_label(tb.get_user_settings(user_id or 0)),
+        ),
+        edit=edit,
+    )
 
 
 def find_files(query: str, limit: int = tb.FIND_LIMIT) -> list[dict]:
@@ -292,7 +313,7 @@ def rename_file(rel_path: str, new_name: str) -> str:
     if not full.is_file():
         raise FileNotFoundError(rel_path)
     name = " ".join(new_name.split())
-    if not name or name in (".", "..") or name.startswith(".") or re.search(r'[/\\\x00]', name):
+    if not name or name in (".", "..") or name.startswith(".") or re.search(r"[/\\\x00]", name):
         raise ValueError("Use a plain name: no slashes, and not starting with a dot.")
     if len(name.encode()) > 240:
         raise ValueError("That name is too long.")
@@ -314,13 +335,18 @@ async def send_file_here(app: Application, chat_id: int, rel_path: str) -> None:
     ext = full.suffix.lower()
     caption = tb.shorten(file_views.display_name(full.name), 200)
     kwargs = {"chat_id": chat_id, "caption": caption, "read_timeout": 300, "write_timeout": 300}
-    info = await asyncio.to_thread(animation.probe, full, tb.FFPROBE_BIN) if ext in animation.VIDEO_SUFFIXES else None
-    with open(full, "rb") as fh:
+    info = (
+        await asyncio.to_thread(animation.probe, full, tb.FFPROBE_BIN)
+        if ext in animation.VIDEO_SUFFIXES
+        else None
+    )
+    with open(full, "rb") as fh:  # noqa: ASYNC230
         if ext == ".gif" or (info and animation.is_gif_like(full, info)):
             await app.bot.send_animation(animation=fh, **kwargs)
         elif ext in file_views.VIDEO_EXTS and ext in (".mp4", ".mov", ".m4v"):
             await app.bot.send_video(
-                video=fh, supports_streaming=True,
+                video=fh,
+                supports_streaming=True,
                 width=getattr(info, "width", None) or None,
                 height=getattr(info, "height", None) or None,
                 duration=int(getattr(info, "duration", 0) or 0) or None,
@@ -353,9 +379,12 @@ async def show_selection(message, user_id: int):
     session = tb.batch_select_sessions[user_id]
     files = await asyncio.to_thread(tb.files_in_folder, session["rel_path"])
     session["selected"] &= {f["rel_path"] for f in files}  # forget deleted files
-    await tb.show_screen(message, file_views.select_screen(
-        session["rel_path"], files, session["selected"], session["page"], tb.encode_path
-    ))
+    await tb.show_screen(
+        message,
+        file_views.select_screen(
+            session["rel_path"], files, session["selected"], session["page"], tb.encode_path
+        ),
+    )
 
 
 async def handle_file_selection(update: Update, context, action: str, parts: list[str]):
@@ -364,7 +393,9 @@ async def handle_file_selection(update: Update, context, action: str, parts: lis
     user_id = query.from_user.id
     session = tb.batch_select_sessions.get(user_id)
     if session is None:
-        await tb.answer_once(query, "This selection has expired. Open Files again.", show_alert=True)
+        await tb.answer_once(
+            query, "This selection has expired. Open Files again.", show_alert=True
+        )
         return
     if action == "bupload_empty":
         await tb.answer_once(query, "Select at least one file first.", show_alert=True)
@@ -392,11 +423,17 @@ async def handle_file_selection(update: Update, context, action: str, parts: lis
         if action == "sup":
             tb.batch_select_sessions.pop(user_id, None)
             await tb.answer_upload_tap(query)
-            await tb.safe_edit_message(query.message, f"{ICON_UPLOAD} Preparing upload of {len(selected)} file(s)...")
+            await tb.safe_edit_message(
+                query.message, f"{ICON_UPLOAD} Preparing upload of {len(selected)} file(s)..."
+            )
             tb.run_in_background(
                 tb.send_folder_files_via_pyrogram(
-                    context.application, query.message.chat_id, query.message.message_id,
-                    session["rel_path"], file_list=selected, user_id=user_id,
+                    context.application,
+                    query.message.chat_id,
+                    query.message.message_id,
+                    session["rel_path"],
+                    file_list=selected,
+                    user_id=user_id,
                 ),
                 name="upload",
                 on_error=tb.message_error_reporter(
@@ -405,28 +442,43 @@ async def handle_file_selection(update: Update, context, action: str, parts: lis
             )
             return
         if action == "szip":
-            paths = tb.filter_files_for_archiving([tb.safe_join(tb.DOWNLOAD_DIR, rel) for rel in selected])
+            paths = tb.filter_files_for_archiving(
+                [tb.safe_join(tb.DOWNLOAD_DIR, rel) for rel in selected]
+            )
             if not paths:
-                await tb.answer_once(query, "None of the selected files can be zipped.", show_alert=True)
+                await tb.answer_once(
+                    query, "None of the selected files can be zipped.", show_alert=True
+                )
                 return
             await tb.ask_zip_name(
-                query.message, user_id, query.message.chat_id, paths,
-                default_name=tb.rel_name(session["rel_path"]) if session["rel_path"] else tb.default_archive_name(),
+                query.message,
+                user_id,
+                query.message.chat_id,
+                paths,
+                default_name=(
+                    tb.rel_name(session["rel_path"])
+                    if session["rel_path"]
+                    else tb.default_archive_name()
+                ),
                 cancel_data="fb:sp:-1",
             )
             return
         if action == "sdel":
             infos = [await asyncio.to_thread(tb.file_info, rel) for rel in selected]
-            await tb.show_screen(query.message, file_views.delete_selected_confirm_screen(
-                [info["name"] for info in infos], sum(info["size"] for info in infos)
-            ))
+            await tb.show_screen(
+                query.message,
+                file_views.delete_selected_confirm_screen(
+                    [info["name"] for info in infos], sum(info["size"] for info in infos)
+                ),
+            )
             return
         if action == "sdelyes":
             deleted, errors = await asyncio.to_thread(tb.delete_paths_batch, selected)
             session["selected"] = set()
             await tb.answer_once(
                 query,
-                f"Deleted {deleted} file(s)." + (f" {len(errors)} could not be deleted." if errors else ""),
+                f"Deleted {deleted} file(s)."
+                + (f" {len(errors)} could not be deleted." if errors else ""),
                 show_alert=bool(errors),
             )
     await tb.show_selection(query.message, user_id)
@@ -482,7 +534,4 @@ def delete_paths_batch(rel_paths: list) -> tuple:
 
 
 def is_duplicate_name(name: str):
-    for root, _, files in os.walk(tb.DOWNLOAD_DIR):
-        if name in files:
-            return True
-    return False
+    return any(name in files for _, _, files in os.walk(tb.DOWNLOAD_DIR))

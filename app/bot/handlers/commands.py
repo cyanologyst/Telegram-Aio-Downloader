@@ -9,9 +9,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from app.bot.icons import ICON_BACK, ICON_BROOM, ICON_OK, ICON_WARN
-from app.bot.views import files as file_views, home as home_views, settings as settings_views
 from app.bot import telegram_bot as tb
+from app.bot.icons import ICON_BACK, ICON_BROOM, ICON_OK, ICON_WARN
+from app.bot.views import files as file_views
+from app.bot.views import home as home_views
+from app.bot.views import settings as settings_views
 
 
 async def zip_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -25,11 +27,11 @@ async def zip_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all files in Download folder."""
     user_id = update.effective_user.id
-    
+
     if not tb.is_authorized_user(user_id):
         await update.message.reply_text("⛔ Unauthorized")
         return
-    
+
     try:
         files_only = tb.collect_download_files()
 
@@ -39,20 +41,20 @@ async def list_files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text_lines = [f"📁 Files ({len(files_only)} total):"]
         total_size = 0
-        
+
         for i, f in enumerate(files_only[:50], 1):  # Show first 50
             rel_path = f.relative_to(tb.DOWNLOAD_DIR)
             size = f.stat().st_size
             total_size += size
             text_lines.append(f"{i}. {rel_path.name} ({tb.zip_human_size(size)})")
-        
+
         if len(files_only) > 50:
             text_lines.append(f"\n... and {len(files_only) - 50} more files")
-        
+
         text_lines.append(f"\n📊 Total size: {tb.zip_human_size(total_size)}")
-        
+
         await update.message.reply_text("\n".join(text_lines))
-        
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -64,10 +66,14 @@ def build_clear_jobs_prompt() -> tuple[str, InlineKeyboardMarkup | None]:
     return (
         f"{ICON_WARN} Clear {finished} finished job(s) from the list?\n\n"
         "Only the job list is cleared. Downloaded files are not touched.",
-        InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"{ICON_BROOM} Yes, clear", callback_data="clear_confirm"),
-            InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data="clear_cancel"),
-        ]]),
+        InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(f"{ICON_BROOM} Yes, clear", callback_data="clear_confirm"),
+                    InlineKeyboardButton(f"{ICON_BACK} Cancel", callback_data="clear_cancel"),
+                ]
+            ]
+        ),
     )
 
 
@@ -107,9 +113,12 @@ async def cancel_input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Deep links from the search results arrive as "/start <payload>".
-    if context.args and tb.search_ui is not None:
-        if await tb.search_ui.handle_start(update, context, context.args[0]):
-            return
+    if (
+        context.args
+        and tb.search_ui is not None
+        and await tb.search_ui.handle_start(update, context, context.args[0])
+    ):
+        return
     await update.message.reply_text(
         home_views.welcome_text(),
         reply_markup=tb.build_reply_menu(update.effective_user.id),
@@ -152,7 +161,7 @@ async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not button:
         return
     keyboard = InlineKeyboardMarkup([[button]])
-    
+
     await update.message.reply_text(
         "Modern File Browser\n\n"
         "Features:\n"
@@ -163,13 +172,15 @@ async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Search and filter\n"
         "- Real-time statistics\n\n"
         "Click the button below to open the file browser.",
-        reply_markup=keyboard
+        reply_markup=keyboard,
     )
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/settings and /mangasettings: the settings hub."""
-    await tb.show_screen(update.message, tb.build_settings_screen(update.effective_user.id), edit=False)
+    await tb.show_screen(
+        update.message, tb.build_settings_screen(update.effective_user.id), edit=False
+    )
 
 
 async def forwarded_posts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,8 +193,7 @@ async def forwarded_posts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     args = context.args or []
     if not args:
         await update.message.reply_text(
-            f"{tb.format_forwarded_posts_setting(user_id)}\n\n"
-            "Usage: /forwardedposts on|off",
+            f"{tb.format_forwarded_posts_setting(user_id)}\n\n" "Usage: /forwardedposts on|off",
             reply_markup=tb.build_reply_menu(user_id),
         )
         return
@@ -202,7 +212,9 @@ async def forwarded_posts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def build_archive_menu_screen(user_id: int):
-    files = await asyncio.to_thread(lambda: tb.filter_files_for_archiving(tb.collect_download_files()))
+    files = await asyncio.to_thread(
+        lambda: tb.filter_files_for_archiving(tb.collect_download_files())
+    )
     total = sum(path.stat().st_size for path in files if path.exists())
     return file_views.archive_menu_screen(
         len(files), total, settings_views.archive_summary(tb.get_user_settings(user_id))
@@ -225,6 +237,8 @@ async def start_search_download(update, context, source: str, force: bool = Fals
     if not force and tb.is_duplicate_name(name):
         return {"id": 0, "name": name, "status": "duplicate"}
     user_id = update.effective_user.id if update.effective_user else None
-    job = await tb.start_aria2_download(context.application, update.effective_chat.id, source, user_id)
+    job = await tb.start_aria2_download(
+        context.application, update.effective_chat.id, source, user_id
+    )
     await tb.attach_job_card(context.application, job)
     return job

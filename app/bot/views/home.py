@@ -130,11 +130,11 @@ def help_screen(supported_sites_url: str) -> Screen:
     return text, markup
 
 
-def sites_screen(lines: list[str], page: int, pages: int, total: int, supported_sites_url: str = "") -> Screen:
+def sites_screen(
+    lines: list[str], page: int, pages: int, total: int, supported_sites_url: str = ""
+) -> Screen:
     """One page of the Supported sites list; "§ " lines are section headers."""
-    body = [
-        f"<b>{e(line[2:])}</b>" if line.startswith("§ ") else f"• {e(line)}" for line in lines
-    ]
+    body = [f"<b>{e(line[2:])}</b>" if line.startswith("§ ") else f"• {e(line)}" for line in lines]
     text = "\n".join(
         [f"🌐 <b>Supported sites</b> · page {page + 1}/{pages}", ""]
         + body

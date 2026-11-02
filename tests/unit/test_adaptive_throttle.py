@@ -26,7 +26,12 @@ def clock():
 @pytest.fixture
 def throttle(clock):
     return AdaptiveThrottle(
-        min_interval=4.0, per_task=1.5, max_interval=15.0, milestone=5.0, idle_after=60.0, clock=clock
+        min_interval=4.0,
+        per_task=1.5,
+        max_interval=15.0,
+        milestone=5.0,
+        idle_after=60.0,
+        clock=clock,
     )
 
 
@@ -177,7 +182,7 @@ def test_state_with_string_numbers(throttle, clock):
 def _simulate(throttle, clock, tasks, seconds, step=0.5, rate=1.0):
     """``tasks`` messages each gaining ``rate`` % per second; returns edits per task."""
     states = {key: {} for key in range(tasks)}
-    edits = {key: 0 for key in range(tasks)}
+    edits = dict.fromkeys(range(tasks), 0)
     elapsed = 0.0
     while elapsed < seconds:
         for key, state in states.items():
@@ -252,11 +257,22 @@ async def test_job_card_refresh_follows_the_throttle(monkeypatch, clock):
 
     monkeypatch.setattr(tb, "_edit_dashboard_message", edit)
     job = {
-        "id": 3, "name": "f", "status": "downloading", "chat_id": 1, "user_id": 1,
-        "total_length": 100, "completed_length": 10, "started_at": 0,
+        "id": 3,
+        "name": "f",
+        "status": "downloading",
+        "chat_id": 1,
+        "user_id": 1,
+        "total_length": 100,
+        "completed_length": 10,
+        "started_at": 0,
         "card": {"chat_id": 1, "message_id": 5, "hash": None},
     }
-    throttle.mark(job["card"], job_cards.card_throttle_key(job), job_cards.card_progress(job), phase="downloading")
+    throttle.mark(
+        job["card"],
+        job_cards.card_throttle_key(job),
+        job_cards.card_progress(job),
+        phase="downloading",
+    )
 
     clock.advance(5)
     job["completed_length"] = 12

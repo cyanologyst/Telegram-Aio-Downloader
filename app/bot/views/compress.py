@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from telegram import InlineKeyboardMarkup
 
@@ -19,7 +20,7 @@ def _settings_line(job: dict[str, Any]) -> str:
 
 
 def size_change(before: int, after: int) -> str:
-    """"1.2 GB → 500.0 MB (−58%)"."""
+    """ "1.2 GB → 500.0 MB (−58%)"."""
     line = f"{human_size(before)} → {human_size(after)}"
     if before > 0:
         change = round((after - before) / before * 100)
@@ -68,11 +69,16 @@ def compress_card(job: dict[str, Any], tok: Tok, *, confirm_replace: bool = Fals
                 lines.append("⚠️ It came out bigger than the original.")
         text = "\n".join(lines)
         if confirm_replace:
-            rows = [[
-                button("♻️ Yes, replace it", f"cmp:repy:{cid}"),
-                button("Keep both", f"cmp:repn:{cid}"),
-            ]]
-            return text + "\n\nDelete the original and keep only the compressed file?", InlineKeyboardMarkup(rows)
+            rows = [
+                [
+                    button("♻️ Yes, replace it", f"cmp:repy:{cid}"),
+                    button("Keep both", f"cmp:repn:{cid}"),
+                ]
+            ]
+            return (
+                text + "\n\nDelete the original and keep only the compressed file?",
+                InlineKeyboardMarkup(rows),
+            )
         first = [button("📤 Upload", f"cmp:up:{cid}")]
         if status == "done":
             first.append(button("♻️ Replace original", f"cmp:rep:{cid}"))

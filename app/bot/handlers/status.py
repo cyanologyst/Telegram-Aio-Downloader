@@ -11,8 +11,8 @@ from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application
 
 from app.bot import flood_guard
-from app.bot.views import jobs as job_views
 from app.bot import telegram_bot as tb
+from app.bot.views import jobs as job_views
 
 
 class _DashboardMessageGone(Exception):
@@ -76,7 +76,8 @@ async def _edit_dashboard_message(
         if not flood_guard.blocked_for(chat_id):
             tb.logger.warning(
                 "Telegram rate limit on status edits in chat %s; skipping edits for %.0fs",
-                chat_id, float(retry_after),
+                chat_id,
+                float(retry_after),
             )
         flood_guard.note(chat_id, retry_after)
         return False
@@ -134,7 +135,10 @@ async def show_status_dashboard(app: Application, chat_id: int, user_id: int = N
         if replace is not None:
             try:
                 await replace.edit_text(
-                    text, reply_markup=markup, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+                    text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
                 )
                 message_id = replace.message_id
             except BadRequest as exc:
@@ -179,4 +183,6 @@ async def maybe_auto_update_status_message(app: Application, job: dict, force: b
     interval = max(tb.STATUS_AUTO_UPDATE_SECONDS, tb.edit_throttle.interval())
     if not force and time.time() - msg_data.get("last_update", 0) < interval:
         return
-    await tb.update_status_message(app, job["chat_id"], job.get("user_id") or msg_data.get("user_id") or 0)
+    await tb.update_status_message(
+        app, job["chat_id"], job.get("user_id") or msg_data.get("user_id") or 0
+    )

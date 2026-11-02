@@ -87,7 +87,9 @@ def merge_clips(clips: list[Path], target: Path, *, ffmpeg: str = "ffmpeg") -> P
         listing.unlink(missing_ok=True)
     if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
         target.unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg could not merge the preview clips: {result.stderr.strip()[-300:]}")
+        raise RuntimeError(
+            f"ffmpeg could not merge the preview clips: {result.stderr.strip()[-300:]}"
+        )
     return target
 
 

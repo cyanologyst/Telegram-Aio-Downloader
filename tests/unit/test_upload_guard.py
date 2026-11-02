@@ -74,9 +74,12 @@ async def test_finished_file_of_a_running_torrent_is_allowed(tmp_path):
     async def readable(_):
         return True
 
-    assert await upload_guard.check_upload(
-        done, fetch_statuses=_statuses(statuses), probe_readable=readable, sleep=_no_sleep
-    ) is None
+    assert (
+        await upload_guard.check_upload(
+            done, fetch_statuses=_statuses(statuses), probe_readable=readable, sleep=_no_sleep
+        )
+        is None
+    )
 
 
 async def test_aria2_down_falls_back_to_its_control_file(tmp_path):
@@ -101,9 +104,12 @@ async def test_stable_but_unreadable_video_is_allowed(tmp_path):
     movie.write_bytes(b"no moov here")
     _old(movie)
 
-    assert await upload_guard.check_upload(
-        movie, fetch_statuses=_statuses([]), probe_readable=_unreadable, sleep=_no_sleep
-    ) is None
+    assert (
+        await upload_guard.check_upload(
+            movie, fetch_statuses=_statuses([]), probe_readable=_unreadable, sleep=_no_sleep
+        )
+        is None
+    )
 
 
 async def test_unreadable_video_whose_size_changes_is_refused(tmp_path):
@@ -139,9 +145,12 @@ async def test_non_videos_skip_the_ffprobe_check(tmp_path):
     async def must_not_probe(_):
         raise AssertionError("probed a non-video")
 
-    assert await upload_guard.check_upload(
-        notes, fetch_statuses=_statuses([]), probe_readable=must_not_probe, sleep=_no_sleep
-    ) is None
+    assert (
+        await upload_guard.check_upload(
+            notes, fetch_statuses=_statuses([]), probe_readable=must_not_probe, sleep=_no_sleep
+        )
+        is None
+    )
 
 
 # ------------------------------------------------------------- upload flow
@@ -178,7 +187,9 @@ async def test_upload_flow_refuses_and_keeps_a_downloading_file(monkeypatch):
     assert movie.exists()  # not deleted by auto-delete
     assert job["sent_count"] == 1
     text = context.bot.called("edit_message_text")[-1].kwargs["text"]
-    assert "movie.mkv: Refusing: file still downloading (10.0% complete), try after completion" in text
+    assert (
+        "movie.mkv: Refusing: file still downloading (10.0% complete), try after completion" in text
+    )
 
 
 async def test_upload_flow_all_refused_says_so(monkeypatch):
@@ -195,7 +206,9 @@ async def test_upload_flow_all_refused_says_so(monkeypatch):
     monkeypatch.setattr(tb, "pyrogram_send_file", never_send)
     context = make_context()
 
-    job = await tb.upload_files_via_pyrogram(context.application, 1, 2, ["movie.mkv"], title="t", user_id=5)
+    job = await tb.upload_files_via_pyrogram(
+        context.application, 1, 2, ["movie.mkv"], title="t", user_id=5
+    )
 
     assert job["status"] == "refused"
     text = context.bot.called("edit_message_text")[-1].kwargs["text"]

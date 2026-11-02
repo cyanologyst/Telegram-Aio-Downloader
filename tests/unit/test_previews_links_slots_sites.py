@@ -70,8 +70,13 @@ async def test_concurrent_auto_uploads_keep_each_preview_next_to_its_video(monke
     context = make_context()
     jobs = [
         tb.upload_files_via_pyrogram(
-            context.application, 1, 100 + n, [f"job{n}/v{i}.mp4" for i in range(3)],
-            title=f"Job {n}", user_id=1, auto=True,
+            context.application,
+            1,
+            100 + n,
+            [f"job{n}/v{i}.mp4" for i in range(3)],
+            title=f"Job {n}",
+            user_id=1,
+            auto=True,
         )
         for n in range(3)
     ]
@@ -115,7 +120,9 @@ def test_split_links_keeps_order_and_reports_bad_lines():
         "just text"
     )
     assert batch.links == [
-        "https://youtu.be/a", "https://youtu.be/b", "magnet:?xt=urn:btih:abc&dn=x",
+        "https://youtu.be/a",
+        "https://youtu.be/b",
+        "magnet:?xt=urn:btih:abc&dn=x",
         "https://example.com/file.zip",
     ]
     assert batch.invalid == ["here you go:", "just text"]
@@ -190,8 +197,12 @@ async def test_slots_queue_in_order_and_report_positions():
     limit = {"n": 1}
     positions = {2: [], 3: []}
     assert await slots.acquire(1, 1, lambda: limit["n"])
-    second = asyncio.create_task(slots.acquire(1, 2, lambda: limit["n"], on_wait=positions[2].append))
-    third = asyncio.create_task(slots.acquire(1, 3, lambda: limit["n"], on_wait=positions[3].append))
+    second = asyncio.create_task(
+        slots.acquire(1, 2, lambda: limit["n"], on_wait=positions[2].append)
+    )
+    third = asyncio.create_task(
+        slots.acquire(1, 3, lambda: limit["n"], on_wait=positions[3].append)
+    )
     await asyncio.sleep(0.02)
     assert not second.done() and not third.done()
     assert positions[2][-1] == 1 and positions[3][-1] == 2

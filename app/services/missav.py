@@ -82,7 +82,7 @@ def media_url_from_page(html: str) -> str | None:
         media_urls = MEDIA_URL_RE.findall(decoded.replace("\\/", "/"))
         if media_urls:
             playlists = [media_url for media_url in media_urls if "playlist.m3u8" in media_url]
-            return (playlists or media_urls)[0]
+            return str((playlists or media_urls)[0])
     match = SURRIT_PLAYLIST_RE.search(html.replace("\\/", "/"))
     return match.group(0) if match else None
 

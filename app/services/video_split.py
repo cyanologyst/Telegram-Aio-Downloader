@@ -88,14 +88,28 @@ def build_segment_command(
 ) -> list[str]:
     """ffmpeg arguments that copy ``source`` into playable ``seconds``-long parts."""
     cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-        "-i", str(source),
-        "-map", "0:v:0", "-map", "0:a?",
-        "-c", "copy",
-        "-f", "segment",
-        "-segment_time", str(seconds),
-        "-segment_start_number", "1",
-        "-reset_timestamps", "1",
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c",
+        "copy",
+        "-f",
+        "segment",
+        "-segment_time",
+        str(seconds),
+        "-segment_start_number",
+        "1",
+        "-reset_timestamps",
+        "1",
     ]
     if suffix == ".mp4":
         # The segment muxer ignores a plain -movflags; it has to reach the
@@ -145,8 +159,10 @@ def split_video(
             break
         too_big = oversized_parts(parts, cap)
         if not too_big:
-            named = [out_dir / f"{source.stem}_part_{i:03d}{suffix}" for i in range(1, len(parts) + 1)]
-            for part, name in zip(parts, named):
+            named = [
+                out_dir / f"{source.stem}_part_{i:03d}{suffix}" for i in range(1, len(parts) + 1)
+            ]
+            for part, name in zip(parts, named, strict=False):
                 part.rename(name)
             return named
         # A burst of high bitrate (or sparse keyframes) overshot: shorten

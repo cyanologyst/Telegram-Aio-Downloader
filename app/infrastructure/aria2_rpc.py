@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-
 # Extra trackers added to every torrent (on top of the magnet's own) so magnets
 # with few or dead trackers still find peers. Our host drops outbound UDP to any
 # port but 80 and can't reach DHT bootstrap nodes, so the UDP-port-80 and

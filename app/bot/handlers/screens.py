@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import shutil
 import time
@@ -14,11 +15,13 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ContextTypes
 
-from app.bot.icons import ICON_QUEUE
-from app.bot.views import home as home_views, settings as settings_views
-from app.bot.views.common import Screen
-from app.services import cookies as cookie_store, supported_sites
 from app.bot import telegram_bot as tb
+from app.bot.icons import ICON_QUEUE
+from app.bot.views import home as home_views
+from app.bot.views import settings as settings_views
+from app.bot.views.common import Screen
+from app.services import cookies as cookie_store
+from app.services import supported_sites
 
 
 async def safe_edit_message(message, text, reply_markup=None, parse_mode=None):
@@ -35,24 +38,20 @@ async def safe_edit_message(message, text, reply_markup=None, parse_mode=None):
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
             return
-        try:
+        with contextlib.suppress(Exception):
             await message.reply_text(
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             await message.reply_text(
                 text=text,
                 reply_markup=reply_markup,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
 
 
 def mini_app_inline_button(label: str = "📱 Mini App"):
@@ -115,7 +114,9 @@ def cookies_waiting(context) -> bool:
 
 
 def build_target_screen(user_id: int, *, waiting: bool = False, error: str | None = None) -> Screen:
-    return settings_views.upload_target_screen(tb.get_user_settings(user_id), waiting=waiting, error=error)
+    return settings_views.upload_target_screen(
+        tb.get_user_settings(user_id), waiting=waiting, error=error
+    )
 
 
 def target_waiting(context) -> bool:
@@ -153,8 +154,11 @@ async def _check_target_with_account(client, ref: int | str) -> tuple[int, str]:
         raise ValueError("Only admins can post in a channel; make your account an admin.")
     elif status == pyro_enums.ChatMemberStatus.RESTRICTED:
         raise ValueError("Your account is restricted there and may not be able to send files.")
-    elif status not in (pyro_enums.ChatMemberStatus.OWNER, pyro_enums.ChatMemberStatus.MEMBER,
-                        pyro_enums.ChatMemberStatus.ADMINISTRATOR):
+    elif status not in (
+        pyro_enums.ChatMemberStatus.OWNER,
+        pyro_enums.ChatMemberStatus.MEMBER,
+        pyro_enums.ChatMemberStatus.ADMINISTRATOR,
+    ):
         raise ValueError("Your account is not a member of it; join it first.")
     return chat.id, chat.title or chat.username or str(chat.id)
 
@@ -171,9 +175,10 @@ async def _check_target_with_bot(bot, ref: int | str) -> tuple[int, str]:
         raise ValueError("That is not a channel or group.")
     status = member.status
     if chat.type == "channel":
-        if status != "administrator" or not getattr(member, "can_post_messages", False):
-            if status != "creator":
-                raise ValueError("The bot must be an admin that can post in the channel.")
+        if status != "creator" and (
+            status != "administrator" or not getattr(member, "can_post_messages", False)
+        ):
+            raise ValueError("The bot must be an admin that can post in the channel.")
     elif status == "restricted" and not getattr(member, "can_send_documents", False):
         raise ValueError("The bot is restricted there and can't send files.")
     elif status not in ("administrator", "creator", "member", "restricted"):
@@ -284,7 +289,5 @@ def build_queue_text(user_id: int = None):
 
     lines = [f"{ICON_QUEUE} {tb.clean_emoji_prefix(tb.get_lang(u, 'queue'))}", ""]
     for j in sorted(tb.download_jobs.values(), key=lambda x: x["id"], reverse=True):
-        lines.append(
-            f"#{j['id']} [{j['status']}] {j['name']} ({j.get('progress', 0.0):.1f}%)"
-        )
+        lines.append(f"#{j['id']} [{j['status']}] {j['name']} ({j.get('progress', 0.0):.1f}%)")
     return "\n".join(lines)

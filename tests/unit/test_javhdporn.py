@@ -58,7 +58,6 @@ def test_matching_media_url_prefers_same_code_and_ignores_previews():
     )
 
 
-
 # --- Player API chain (data-mpu -> /api/play/ -> /p/<id> data-config) ---
 
 PAGE_URL = "https://www.javhdporn.net/video/dasd-132-decensored/"

@@ -9,8 +9,7 @@ import pytest
 
 import app.bot.telegram_bot as tb
 from app.bot.views import jobs as job_views
-from app.services import disk_guard
-from app.services import user_settings
+from app.services import disk_guard, user_settings
 from app.services.download_slots import DownloadSlots
 
 GB = disk_guard.GB
@@ -87,8 +86,17 @@ def test_allocated_bytes_skips_missing_files(root):
 
 @pytest.mark.parametrize(
     "name",
-    ["movie.mkv.part", "a.ytdl", "x.tmp", "y.temp", "z.crdownload", "w.download",
-     "v.incomplete", "clip.f137.mp4.part-Frag12", "file.aria2"],
+    [
+        "movie.mkv.part",
+        "a.ytdl",
+        "x.tmp",
+        "y.temp",
+        "z.crdownload",
+        "w.download",
+        "v.incomplete",
+        "clip.f137.mp4.part-Frag12",
+        "file.aria2",
+    ],
 )
 def test_partial_downloads_are_incomplete(root, name):
     assert disk_guard.is_incomplete(write(root, name, 10), root)

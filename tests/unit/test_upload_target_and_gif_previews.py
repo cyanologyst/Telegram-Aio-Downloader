@@ -162,7 +162,9 @@ async def test_uploads_go_to_the_target_chat(monkeypatch):
     monkeypatch.setattr(tb, "get_pyrogram_client", logged_in)
     context = make_context()
 
-    job = await tb.upload_files_via_pyrogram(context.application, 1, 2, ["a.bin"], title="t", user_id=5)
+    job = await tb.upload_files_via_pyrogram(
+        context.application, 1, 2, ["a.bin"], title="t", user_id=5
+    )
 
     assert job["status"] == "completed" and targets == [-100777]
     assert "Sent to: Archive" in context.bot.called("edit_message_text")[-1].kwargs["text"]
@@ -178,7 +180,9 @@ async def test_bot_only_mode_sends_to_the_target_chat(monkeypatch):
     monkeypatch.setattr(tb, "get_pyrogram_client", unavailable)
     context = make_context()
 
-    await tb.upload_files_via_pyrogram(context.application, 1, 2, ["small.txt"], title="t", user_id=5)
+    await tb.upload_files_via_pyrogram(
+        context.application, 1, 2, ["small.txt"], title="t", user_id=5
+    )
 
     assert context.bot.called("send_document")[-1].kwargs["chat_id"] == -100777
 
@@ -198,7 +202,7 @@ def test_preview_plan_spreads_ten_clips_over_a_long_video():
 def test_short_videos_get_fewer_clips(duration, count):
     plan = gif_previews.preview_plan(duration)
     assert len(plan) == count
-    assert all(0 <= s and s + length <= duration + 0.01 for s, length in plan)
+    assert all(s >= 0 and s + length <= duration + 0.01 for s, length in plan)
 
 
 def test_tiny_or_unknown_videos():
@@ -238,12 +242,26 @@ async def test_missing_ffmpeg_reports_instead_of_failing(isolated, monkeypatch):
     assert not context.bot.called("send_media_group")
 
 
-@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="needs ffmpeg")
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="needs ffmpeg"
+)
 async def test_previews_of_a_real_short_video(isolated, monkeypatch):
     video = isolated / "test.mp4"
-    subprocess.run(
-        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25",
-         "-t", "20", "-pix_fmt", "yuv420p", str(video)],
+    subprocess.run(  # noqa: ASYNC221
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=640x360:rate=25",
+            "-t",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ],
         check=True,
     )
     monkeypatch.setattr(tb, "FFMPEG_BIN", "ffmpeg")
@@ -262,14 +280,30 @@ async def test_previews_of_a_real_short_video(isolated, monkeypatch):
     assert not list(isolated.glob("preview_*")) and not list(isolated.glob("Preview - *"))
 
 
-@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="needs ffmpeg")
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="needs ffmpeg"
+)
 def test_merge_keeps_the_clips_in_order(tmp_path):
     clips = []
     for i, colour in enumerate(("red", "green", "blue")):
         clip = tmp_path / f"clip {i}'s.mp4"  # spaces and quotes survive the concat list
         subprocess.run(
-            ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c={colour}:size=64x64:rate=12",
-             "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)],
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c={colour}:size=64x64:rate=12",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(clip),
+            ],
             check=True,
         )
         clips.append(clip)
@@ -282,9 +316,26 @@ def test_merge_keeps_the_clips_in_order(tmp_path):
 
     def colour_at(second):
         rgb = subprocess.run(
-            ["ffmpeg", "-v", "error", "-ss", str(second), "-i", str(target), "-frames:v", "1",
-             "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-            capture_output=True, check=True,
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-ss",
+                str(second),
+                "-i",
+                str(target),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1:1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ],
+            capture_output=True,
+            check=True,
         ).stdout
         return max(range(3), key=lambda i: rgb[i])
 
@@ -314,6 +365,7 @@ def _no_real_merge(monkeypatch):
 
 def _fake_merge(monkeypatch, merged_clips=None):
     """Pretend ffmpeg merged the clips; records the order they were joined in."""
+
     def merge(clips, source, workdir):
         ordered = [path for path, _, _ in sorted(clips, key=lambda c: c[1])]
         if merged_clips is not None:
@@ -430,7 +482,13 @@ async def test_filter_screen_from_settings_saves_the_choice():
     assert "Videos only" in text
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert "✅ Videos only" in labels and "All files" in labels
-    assert _callbacks(markup)[:5] == ["uf:all", "uf:video", "uf:audio", "uf:video_audio", "uf:documents"]
+    assert _callbacks(markup)[:5] == [
+        "uf:all",
+        "uf:video",
+        "uf:audio",
+        "uf:video_audio",
+        "uf:documents",
+    ]
 
 
 def _torrent(isolated, names, folder="Show"):
@@ -438,8 +496,14 @@ def _torrent(isolated, names, folder="Show"):
     for name in names:
         (isolated / folder / name).write_bytes(b"x")
     job = {
-        "id": 11, "name": folder, "status": "completed", "chat_id": 1, "user_id": 1,
-        "started_at": 1, "finished_at": 2, "files": [str(isolated / folder / n) for n in names],
+        "id": 11,
+        "name": folder,
+        "status": "completed",
+        "chat_id": 1,
+        "user_id": 1,
+        "started_at": 1,
+        "finished_at": 2,
+        "files": [str(isolated / folder / n) for n in names],
     }
     tb.download_jobs[11] = job
     return job
@@ -491,8 +555,15 @@ async def test_all_files_filtered_out_deletes_the_folder_and_says_so(isolated, m
 async def test_a_filtered_out_single_file_job_says_so(isolated, monkeypatch):
     await _auto("audio")
     (isolated / "clip.mp4").write_bytes(b"v")
-    job = {"id": 12, "name": "clip", "status": "completed", "chat_id": 1, "user_id": 1,
-           "provider": "yt-dlp", "filepath": str(isolated / "clip.mp4")}
+    job = {
+        "id": 12,
+        "name": "clip",
+        "status": "completed",
+        "chat_id": 1,
+        "user_id": 1,
+        "provider": "yt-dlp",
+        "filepath": str(isolated / "clip.mp4"),
+    }
     uploads = _fake_uploads(monkeypatch)
     context = make_context()
 
@@ -526,7 +597,7 @@ async def test_bot_folders_are_kept_when_emptied(isolated, monkeypatch):
 
 async def test_manual_upload_ignores_the_filter(isolated, monkeypatch):
     await user_settings.update_setting(1, "auto_upload_types", "video")
-    job = _torrent(isolated, ["ep.mkv", "info.txt"])
+    _torrent(isolated, ["ep.mkv", "info.txt"])
     uploads = _fake_uploads(monkeypatch)
     context = make_context()
 
@@ -555,8 +626,12 @@ def _logged_in(monkeypatch, sent=None):
 def _fake_previews(monkeypatch, fail=False):
     calls = []
 
-    async def fake(app, chat_id, source, *, status_chat_id=None, fallback_chat_id=None, target=None):
-        calls.append((chat_id, source.name, status_chat_id, fallback_chat_id, source.exists(), target))
+    async def fake(
+        app, chat_id, source, *, status_chat_id=None, fallback_chat_id=None, target=None
+    ):
+        calls.append(
+            (chat_id, source.name, status_chat_id, fallback_chat_id, source.exists(), target)
+        )
         if fail:
             raise RuntimeError("ffmpeg exploded")
         return 3
@@ -573,7 +648,9 @@ async def test_previews_follow_each_auto_uploaded_video_only(isolated, monkeypat
     context = make_context()
 
     files = ["a.mkv", "b.mp3", "c.txt", "d.mp4"]
-    job = await tb.upload_files_via_pyrogram(context.application, 1, 2, files, title="t", user_id=1, auto=True)
+    job = await tb.upload_files_via_pyrogram(
+        context.application, 1, 2, files, title="t", user_id=1, auto=True
+    )
     await _drain_background()
 
     assert job["status"] == "completed"
@@ -587,7 +664,9 @@ async def test_previews_go_to_the_upload_target_channel(isolated, monkeypatch):
     _logged_in(monkeypatch)
     calls = _fake_previews(monkeypatch)
 
-    await tb.upload_files_via_pyrogram(make_context().application, 1, 2, ["a.mkv"], title="t", user_id=1, auto=True)
+    await tb.upload_files_via_pyrogram(
+        make_context().application, 1, 2, ["a.mkv"], title="t", user_id=1, auto=True
+    )
     await _drain_background()
 
     assert [c[:4] for c in calls] == [(-100777, "a.mkv", 1, 1)]
@@ -599,7 +678,9 @@ async def test_saved_messages_previews_follow_the_video(isolated, monkeypatch):
     _logged_in(monkeypatch)
     calls = _fake_previews(monkeypatch)
 
-    await tb.upload_files_via_pyrogram(make_context().application, 1, 2, ["a.mkv"], title="t", user_id=1, auto=True)
+    await tb.upload_files_via_pyrogram(
+        make_context().application, 1, 2, ["a.mkv"], title="t", user_id=1, auto=True
+    )
     await _drain_background()
 
     assert [(c[0], c[5]) for c in calls] == [(1, "me")]
@@ -610,13 +691,17 @@ async def test_manual_uploads_send_previews_unless_turned_off(isolated, monkeypa
     _logged_in(monkeypatch)
     calls = _fake_previews(monkeypatch)
 
-    await tb.upload_files_via_pyrogram(make_context().application, 1, 2, ["a.mkv"], title="t", user_id=1)
+    await tb.upload_files_via_pyrogram(
+        make_context().application, 1, 2, ["a.mkv"], title="t", user_id=1
+    )
     await _drain_background()
     assert [(c[0], c[1], c[5]) for c in calls] == [(1, "a.mkv", "me")]
 
     await user_settings.update_setting(1, "send_previews_after_upload", False)
     calls.clear()
-    await tb.upload_files_via_pyrogram(make_context().application, 1, 3, ["a.mkv"], title="t", user_id=1)
+    await tb.upload_files_via_pyrogram(
+        make_context().application, 1, 3, ["a.mkv"], title="t", user_id=1
+    )
     await _drain_background()
     assert calls == []
 
@@ -712,8 +797,12 @@ async def test_merged_preview_goes_to_the_upload_target(tmp_path, monkeypatch, t
     context = make_context()
 
     sent = await tb.send_gif_previews(
-        context.application, target if isinstance(target, int) else 1, tmp_path / "v.mp4",
-        status_chat_id=1, fallback_chat_id=1, target=target,
+        context.application,
+        target if isinstance(target, int) else 1,
+        tmp_path / "v.mp4",
+        status_chat_id=1,
+        fallback_chat_id=1,
+        target=target,
     )
 
     assert sent == 3
@@ -736,10 +825,20 @@ async def test_bot_only_mode_sends_the_merged_preview_like_the_video(tmp_path, m
     context = make_context()
 
     await tb.send_gif_previews(
-        context.application, 1, tmp_path / "v.mp4", status_chat_id=1, fallback_chat_id=1, target="me"
+        context.application,
+        1,
+        tmp_path / "v.mp4",
+        status_chat_id=1,
+        fallback_chat_id=1,
+        target="me",
     )
     await tb.send_gif_previews(
-        context.application, -100777, tmp_path / "v.mp4", status_chat_id=1, fallback_chat_id=1, target=-100777
+        context.application,
+        -100777,
+        tmp_path / "v.mp4",
+        status_chat_id=1,
+        fallback_chat_id=1,
+        target=-100777,
     )
 
     assert [v.kwargs["chat_id"] for v in context.bot.called("send_video")] == [1, -100777]
@@ -752,7 +851,12 @@ async def test_merged_preview_falls_back_to_the_bot_chat(tmp_path, monkeypatch):
     context = make_context()
 
     sent = await tb.send_gif_previews(
-        context.application, -100777, tmp_path / "v.mp4", status_chat_id=1, fallback_chat_id=1, target=-100777
+        context.application,
+        -100777,
+        tmp_path / "v.mp4",
+        status_chat_id=1,
+        fallback_chat_id=1,
+        target=-100777,
     )
 
     assert sent == 3 and videos == []
@@ -768,7 +872,12 @@ async def test_failed_merge_falls_back_to_the_album(tmp_path, monkeypatch):
     context = make_context()
 
     sent = await tb.send_gif_previews(
-        context.application, -100777, tmp_path / "v.mp4", status_chat_id=1, fallback_chat_id=1, target=-100777
+        context.application,
+        -100777,
+        tmp_path / "v.mp4",
+        status_chat_id=1,
+        fallback_chat_id=1,
+        target=-100777,
     )
 
     assert sent == 3 and videos == []
@@ -808,8 +917,13 @@ async def test_playlist_upload_and_delete_applies_the_filter(isolated, monkeypat
 
     monkeypatch.setattr(tb, "start_ytdlp_download", fake_ytdlp)
     monkeypatch.setattr(tb, "maybe_auto_update_status_message", quiet)
-    job = {"id": 13, "chat_id": 1, "user_id": 1, "status": "downloading",
-           "batch_download_mode": "upload_and_delete"}
+    job = {
+        "id": 13,
+        "chat_id": 1,
+        "user_id": 1,
+        "status": "downloading",
+        "batch_download_mode": "upload_and_delete",
+    }
 
     await tb.run_video_batch(
         make_context().application, 1, ["u1", "u2"], job, item_label="Episode", user_id=1

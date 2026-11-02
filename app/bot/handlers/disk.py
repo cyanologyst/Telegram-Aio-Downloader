@@ -14,9 +14,9 @@ from pathlib import Path
 
 from telegram.ext import Application
 
+from app.bot import telegram_bot as tb
 from app.infrastructure.aria2_rpc import Aria2RpcError
 from app.services import disk_guard
-from app.bot import telegram_bot as tb
 
 
 def _disk_lock() -> asyncio.Lock:
@@ -68,7 +68,9 @@ async def _aria2_paths() -> list[str]:
     return [f["path"] for s in statuses for f in s.get("files") or [] if f.get("path")]
 
 
-async def check_disk_space(estimated: int | None = None, extra_protected=()) -> disk_guard.SpaceCheck | None:
+async def check_disk_space(
+    estimated: int | None = None, extra_protected=()
+) -> disk_guard.SpaceCheck | None:
     """Free ``estimated`` + buffer bytes (purging if allowed); None when the guard is off."""
     if not tb.DISK_GUARD_ENABLE:
         return None
@@ -111,7 +113,9 @@ async def ensure_job_disk_space(app: Application, job: dict, estimated: int | No
     return False
 
 
-def ytdlp_disk_check(job: dict, total: int, downloaded: int, loop: asyncio.AbstractEventLoop) -> str | None:
+def ytdlp_disk_check(
+    job: dict, total: int, downloaded: int, loop: asyncio.AbstractEventLoop
+) -> str | None:
     """From yt-dlp's progress hook (a worker thread): the refusal reason, or None.
 
     Runs once per job, when the size first becomes known.
@@ -127,7 +131,9 @@ def ytdlp_disk_check(job: dict, total: int, downloaded: int, loop: asyncio.Abstr
     return check.message()
 
 
-async def hold_aria2_job_for_disk(app: Application, job: dict, check: disk_guard.SpaceCheck) -> None:
+async def hold_aria2_job_for_disk(
+    app: Application, job: dict, check: disk_guard.SpaceCheck
+) -> None:
     """Pause an aria2 job that does not fit; the card says why, Resume retries it."""
     try:
         await tb.aria2_client.pause(job["gid"], force=True)

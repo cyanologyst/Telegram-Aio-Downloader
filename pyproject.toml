@@ -89,6 +89,8 @@ module = [
   "app.services.archive",
   "app.services.thumbnails",
   "app.web.app",
+  "app.bot.telegram_bot",
+  "app.bot.handlers.*",
 ]
 ignore_errors = true
 

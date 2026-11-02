@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -12,9 +13,9 @@ from telegram.error import BadRequest, RetryAfter
 from telegram.ext import Application
 
 from app.bot import flood_guard
+from app.bot import telegram_bot as tb
 from app.bot.views import jobs as job_views
 from app.services import upload_filter
-from app.bot import telegram_bot as tb
 
 
 def _abs_download_path(path) -> Path | None:
@@ -94,7 +95,9 @@ async def _send_card(app: Application, job: dict):
         "hash": tb._hash_content(text + repr(markup)),
         "last": time.time(),
     }
-    tb.edit_throttle.mark(job["card"], card_throttle_key(job), card_progress(job), phase=job.get("status"))
+    tb.edit_throttle.mark(
+        job["card"], card_throttle_key(job), card_progress(job), phase=job.get("status")
+    )
 
 
 async def attach_job_card(app: Application, job: dict, message=None):
@@ -102,10 +105,8 @@ async def attach_job_card(app: Application, job: dict, message=None):
     if job.get("card_final"):
         # Finished before we got here; its final card is already in the chat.
         if message is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await message.delete()
-            except Exception:
-                pass
         return
     if message is not None:
         text, markup = tb.render_job_card(job)
@@ -147,7 +148,9 @@ def card_progress(job: dict) -> float | None:
     return None
 
 
-async def refresh_job_card(app: Application, job: dict, force: bool = False, confirm: str | None = None):
+async def refresh_job_card(
+    app: Application, job: dict, force: bool = False, confirm: str | None = None
+):
     card = job.get("card")
     if not card or job.get("card_final"):
         return
@@ -199,9 +202,9 @@ async def finish_job_card(app: Application, job: dict):
         if upload_list:
             job["auto_upload_note"] = f"📤 Uploading to {tb.upload_target_label(settings)}…"
             if deleted:
-                job["auto_upload_note"] += (
-                    f" ({upload_filter.label(preset)}; {deleted} other file(s) deleted)"
-                )
+                job[
+                    "auto_upload_note"
+                ] += f" ({upload_filter.label(preset)}; {deleted} other file(s) deleted)"
         else:
             auto_upload = False
             job["auto_upload_note"] = upload_filter.filtered_out_note(preset, deleted)
@@ -212,7 +215,9 @@ async def finish_job_card(app: Application, job: dict):
         # Flood control: the upload goes through the user account, so it must not
         # wait 14 hours for the card. The card is posted when the block lifts.
         flood_guard.note(job["chat_id"], tb._retry_seconds(exc))
-        if not any(item.get("job_id") == job.get("id") for item in flood_guard.held(job["chat_id"])):
+        if not any(
+            item.get("job_id") == job.get("id") for item in flood_guard.held(job["chat_id"])
+        ):
             tb.logger.info("Final card for #%s held until flood control lifts", job.get("id"))
             tb.hold_message(app, job["chat_id"], {"job_id": job.get("id")})
         if auto_upload:

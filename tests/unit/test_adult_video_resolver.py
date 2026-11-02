@@ -111,7 +111,10 @@ def test_resolve_adult_video_url_routes_missav_mirrors(monkeypatch):
     monkeypatch.setattr(
         adult_video_resolver,
         "resolve_missav_video",
-        lambda url, timeout: ("https://cdn.example/playlist.m3u8", "https://missav123.com/en/example"),
+        lambda url, timeout: (
+            "https://cdn.example/playlist.m3u8",
+            "https://missav123.com/en/example",
+        ),
     )
 
     assert resolve_adult_video_url("https://missav.live/en/example") == ResolvedAdultVideo(
@@ -136,4 +139,3 @@ def test_resolved_video_output_template_avoids_signed_url_ids(tmp_path):
     assert "%(title).160B" in template
     assert "X-Amz" not in template
     assert len(template) < len(str(tmp_path)) + 200
-

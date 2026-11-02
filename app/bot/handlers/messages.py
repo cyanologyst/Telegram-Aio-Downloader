@@ -11,11 +11,12 @@ from telegram.constants import ParseMode
 from telegram.error import RetryAfter
 from telegram.ext import Application, ContextTypes
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_FAIL, ICON_STOP, ICON_WARN
-from app.bot.views import files as file_views, home as home_views
+from app.bot.views import files as file_views
+from app.bot.views import home as home_views
 from app.infrastructure.aria2_rpc import Aria2RpcError
 from app.services.link_batch import LinkBatch
-from app.bot import telegram_bot as tb
 
 
 async def start_batch_link(app: Application, chat_id: int, link: str, user_id: int) -> dict | None:
@@ -45,8 +46,13 @@ async def start_batch_link(app: Application, chat_id: int, link: str, user_id: i
     if tb.is_video_url(link):
         audio_only, max_height = tb.video_default_choice(user_id) or (False, None)
         return await tb.start_ytdlp_download(
-            app, chat_id, link, audio_only=audio_only, user_id=user_id,
-            run_in_background=True, max_height=max_height,
+            app,
+            chat_id,
+            link,
+            audio_only=audio_only,
+            user_id=user_id,
+            run_in_background=True,
+            max_height=max_height,
         )
     if tb.is_direct_http_download_url(link):
         return await tb.start_aria2_download(app, chat_id, link, user_id)
@@ -70,7 +76,10 @@ def link_batch_summary(
         lines.append(f"Repeated links skipped: {batch.duplicates}")
     if failed:
         lines += ["", f"{ICON_FAIL} <b>Not started ({len(failed)})</b>"]
-        lines += [f"• {html.escape(tb.shorten(link, 60))}: {html.escape(tb.shorten(reason, 120))}" for link, reason in failed[:15]]
+        lines += [
+            f"• {html.escape(tb.shorten(link, 60))}: {html.escape(tb.shorten(reason, 120))}"
+            for link, reason in failed[:15]
+        ]
         if len(failed) > 15:
             lines.append(f"… and {len(failed) - 15} more")
     if batch.invalid:
@@ -117,7 +126,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lower = text.lower()
 
     # Check if user is waiting for password input (PRIORITY: this must be checked BEFORE zip name)
-    if user_id in tb.zip_select_sessions and tb.zip_select_sessions[user_id].get("waiting_for") == "password":
+    if (
+        user_id in tb.zip_select_sessions
+        and tb.zip_select_sessions[user_id].get("waiting_for") == "password"
+    ):
         if lower == "none":
             await tb.update_setting(user_id, "password", "")
             await update.message.reply_text("✅ Password removed")
@@ -150,7 +162,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tb.run_in_background(
             tb.run_named_zip(context.application, user_id, safe_name, status_msg),
             name="zip",
-            on_error=tb.message_error_reporter(context.application, chat_id, status_msg.message_id, "Archive"),
+            on_error=tb.message_error_reporter(
+                context.application, chat_id, status_msg.message_id, "Archive"
+            ),
         )
         return
 
@@ -182,13 +196,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"{ICON_FAIL} {reason} Send another name or /cancel.")
             return
         context.user_data.pop("files_wait", None)
-        await tb.show_file(update.message, new_rel, rename.get("page", 0), edit=False, user_id=user_id)
+        await tb.show_file(
+            update.message, new_rel, rename.get("page", 0), edit=False, user_id=user_id
+        )
         return
     elif tb.files_wait(context, "find"):
         context.user_data.pop("files_wait", None)
         results = await asyncio.to_thread(tb.find_files, text)
         await tb.show_screen(
-            update.message, file_views.find_results_screen(text, results, tb.encode_path), edit=False
+            update.message,
+            file_views.find_results_screen(text, results, tb.encode_path),
+            edit=False,
         )
         return
     if (is_link or is_keyboard_button) and tb.search_ui is not None:
@@ -204,7 +222,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # normalize button text by removing emojis and extra spaces
-    normalized = re.sub(r'[^\w\s\u0600-\u06FF]', '', lower).strip()
+    normalized = re.sub(r"[^\w\s\u0600-\u06FF]", "", lower).strip()
 
     try:
         if lower.startswith("magnet:"):
@@ -258,7 +276,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rid = tb.store_link_request("hentai", chat_id, playlist=playlist)
             await update.message.reply_text(
                 tb.build_hentai_playlist_prompt_text(playlist, user_id),
-                reply_markup=tb.link_request_markup(rid, [(f"📥 Download all {len(playlist.urls)}", "go")]),
+                reply_markup=tb.link_request_markup(
+                    rid, [(f"📥 Download all {len(playlist.urls)}", "go")]
+                ),
                 disable_web_page_preview=True,
             )
 
@@ -286,7 +306,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rid = tb.store_link_request("pornhub", chat_id, playlist=playlist)
             await update.message.reply_text(
                 tb.build_pornhub_model_prompt_text(playlist, user_id),
-                reply_markup=tb.link_request_markup(rid, [(f"📥 Download all {len(playlist.urls)}", "go")]),
+                reply_markup=tb.link_request_markup(
+                    rid, [(f"📥 Download all {len(playlist.urls)}", "go")]
+                ),
                 disable_web_page_preview=True,
             )
 
@@ -297,8 +319,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if choice is not None:
                 audio_only, max_height = choice
                 job = await tb.start_ytdlp_download(
-                    context.application, chat_id, video_url, audio_only=audio_only,
-                    user_id=user_id, run_in_background=True, max_height=max_height,
+                    context.application,
+                    chat_id,
+                    video_url,
+                    audio_only=audio_only,
+                    user_id=user_id,
+                    run_in_background=True,
+                    max_height=max_height,
                 )
                 await tb.attach_job_card(context.application, job)
             else:
@@ -338,8 +365,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif normalized == "queue":
             await update.message.reply_text(
-                tb.build_queue_text(user_id),
-                reply_markup=tb.build_reply_menu(user_id)
+                tb.build_queue_text(user_id), reply_markup=tb.build_reply_menu(user_id)
             )
 
         elif normalized in ("files", "file browser"):
@@ -350,7 +376,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not active:
                 await update.message.reply_text(
                     f"{ICON_STOP} No active downloads to cancel.",
-                    reply_markup=tb.build_reply_menu(user_id)
+                    reply_markup=tb.build_reply_menu(user_id),
                 )
             else:
                 await tb.show_status_dashboard(context.application, chat_id, user_id)
@@ -360,33 +386,51 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             jid = int(m.group(1)) if m else None
             if jid not in tb.download_jobs:
                 await update.message.reply_text(
-                    "Usage: cancel <job number>, for example: cancel 3"
-                    if jid is None
-                    else f"Job #{jid} not found.",
-                    reply_markup=tb.build_reply_menu(user_id)
+                    (
+                        "Usage: cancel <job number>, for example: cancel 3"
+                        if jid is None
+                        else f"Job #{jid} not found."
+                    ),
+                    reply_markup=tb.build_reply_menu(user_id),
                 )
                 return
             job = tb.download_jobs[jid]
             await update.message.reply_text(
                 f"{ICON_WARN} Cancel job #{jid}?\n\n{tb.shorten(tb.clean_download_name(job['name']), 90)}\n"
                 f"Status: {job['status']}",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(f"{ICON_STOP} Yes, cancel it", callback_data=f"cancel_confirm:{jid}"),
-                    InlineKeyboardButton("Keep it", callback_data="noop_close"),
-                ]]),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                f"{ICON_STOP} Yes, cancel it", callback_data=f"cancel_confirm:{jid}"
+                            ),
+                            InlineKeyboardButton("Keep it", callback_data="noop_close"),
+                        ]
+                    ]
+                ),
             )
 
         elif normalized == "clear":
             await tb.clear_jobs_cmd(update, context)
 
         elif normalized == "help":
-            await tb.show_screen(update.message, home_views.help_screen(tb.SUPPORTED_SITES_URL), edit=False)
+            await tb.show_screen(
+                update.message, home_views.help_screen(tb.SUPPORTED_SITES_URL), edit=False
+            )
 
         elif normalized in ("zip menu", "zip", "archive"):
             context.user_data["archive_settings_back"] = "nav:archive"
-            await tb.show_screen(update.message, await tb.build_archive_menu_screen(user_id), edit=False)
+            await tb.show_screen(
+                update.message, await tb.build_archive_menu_screen(user_id), edit=False
+            )
 
-        elif normalized in ("search", "tpb search", "rarbg search", "rargb search", "prowlarr search"):
+        elif normalized in (
+            "search",
+            "tpb search",
+            "rarbg search",
+            "rargb search",
+            "prowlarr search",
+        ):
             provider_key = normalized.split()[0] if normalized != "search" else None
             provider_key = "rarbg" if provider_key == "rargb" else provider_key
             await tb.search_ui.open(context, update.message, provider_key, edit=False)
@@ -405,7 +449,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif tb.is_http_url(text):
-            markup = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Supported sites", callback_data="sites:0")]])
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🌐 Supported sites", callback_data="sites:0")]]
+            )
             await update.message.reply_text(
                 f"{ICON_WARN} I don't know how to download this link.\n\n"
                 "Supported: magnets, .torrent files, direct file links (ending in a file "
@@ -439,5 +485,5 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tb.logger.error(f"on_text error: {type(e).__name__}: {e}", exc_info=e)
         await update.message.reply_text(
             f"{ICON_FAIL} {tb.get_lang(user_id, 'error_occurred')}",
-            reply_markup=tb.build_reply_menu(user_id)
+            reply_markup=tb.build_reply_menu(user_id),
         )

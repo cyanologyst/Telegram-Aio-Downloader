@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 
@@ -15,14 +16,14 @@ async def send_with_flood_wait_handling(send_coroutine, max_retries: int = 5):
     """
     Wraps a pyrogram send operation with FloodWait handling.
     Automatically waits and retries when Telegram rate-limits.
-    
+
     Args:
         send_coroutine: The async send operation (e.g., client.send_document)
         max_retries: Maximum number of retries before giving up
-        
+
     Returns:
         The result of the send operation
-        
+
     Raises:
         FloodWait: If max_retries is exceeded
     """
@@ -34,7 +35,9 @@ async def send_with_flood_wait_handling(send_coroutine, max_retries: int = 5):
             if wait_time > tb.MAX_FLOOD_WAIT:
                 # Callers hold the chat's send chain (and the preview lock):
                 # sleeping hours here would stall every other upload too.
-                tb.logger.error("FloodWait of %ss is too long to wait out; giving up on this send", wait_time)
+                tb.logger.error(
+                    "FloodWait of %ss is too long to wait out; giving up on this send", wait_time
+                )
                 raise
             tb.logger.warning(
                 f"FloodWait: Telegram rate-limiting. "
@@ -117,10 +120,8 @@ async def get_pyrogram_client():
 
 async def stop_pyrogram_client():
     if tb.pyro_client is not None:
-        try:
+        with contextlib.suppress(Exception):
             await tb.pyro_client.stop()
-        except Exception:
-            pass
         tb.pyro_client = None
 
 
@@ -159,10 +160,7 @@ async def pyrogram_send_file(
             thumb = tb.generate_thumbnail(str(full))
 
             # FIX: avoid passing empty string to Pyrogram
-            if thumb and os.path.exists(thumb):
-                thumbnail_path = thumb
-            else:
-                thumbnail_path = None
+            thumbnail_path = thumb if thumb and os.path.exists(thumb) else None  # noqa: ASYNC240
 
         if send_method == "video":
             video_meta = tb.get_video_metadata(str(full))
@@ -212,11 +210,9 @@ async def pyrogram_send_file(
 
     finally:
         # Clean up thumbnail if created
-        if thumbnail_path and os.path.exists(thumbnail_path):
-            try:
+        if thumbnail_path and os.path.exists(thumbnail_path):  # noqa: ASYNC240
+            with contextlib.suppress(Exception):
                 os.remove(thumbnail_path)
-            except Exception:
-                pass
 
 
 def _raise_if_bot_session(exc: RPCError) -> None:

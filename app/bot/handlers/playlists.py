@@ -5,10 +5,10 @@ from __future__ import annotations
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_STOP
 from app.services.hentai_playlist import HentaiPlaylist
 from app.services.pornhub_model import PornHubModelPlaylist
-from app.bot import telegram_bot as tb
 
 
 async def start_hentai_playlist_download(
@@ -167,7 +167,9 @@ async def start_pornhub_model_download(
             await tb.maybe_auto_update_status_message(app, job, force=True)
             await tb.finish_job_card(app, job)
 
-    tb.run_in_background(tb.run_with_download_slot(app, job, run_model_playlist), name=f"batch-{job_id}")
+    tb.run_in_background(
+        tb.run_with_download_slot(app, job, run_model_playlist), name=f"batch-{job_id}"
+    )
     return job
 
 
@@ -180,7 +182,9 @@ async def handle_link_request_callback(update: Update, context: ContextTypes.DEF
     request = tb.link_requests.pop(rid, None)
     if request is None:
         await tb.answer_once(
-            query, "This prompt has expired or was already used. Send the link again.", show_alert=True
+            query,
+            "This prompt has expired or was already used. Send the link again.",
+            show_alert=True,
         )
         return
     try:
@@ -205,21 +209,33 @@ async def _run_link_request(query, context, request: dict, action: str, user_id:
         audio_only = action == "mp3"
         max_height = int(action[1:]) if action.startswith("h") and action[1:].isdigit() else None
         job = await tb.start_ytdlp_download(
-            app, chat_id, request["url"], audio_only=audio_only, user_id=user_id,
-            run_in_background=True, max_height=max_height, gif=action == "gif",
+            app,
+            chat_id,
+            request["url"],
+            audio_only=audio_only,
+            user_id=user_id,
+            run_in_background=True,
+            max_height=max_height,
+            gif=action == "gif",
         )
     elif kind == "manga":
         job = await tb.start_manga_download(app, chat_id, request["url"], user_id)
     elif kind == "spotify":
         job = await tb.start_spotify_download(app, chat_id, request["url"], user_id)
     elif kind == "hentai":
-        job = await tb.start_hentai_playlist_download(app, chat_id, request["playlist"], user_id=user_id)
+        job = await tb.start_hentai_playlist_download(
+            app, chat_id, request["playlist"], user_id=user_id
+        )
     elif kind == "pornhub":
-        job = await tb.start_pornhub_model_download(app, chat_id, request["playlist"], user_id=user_id)
+        job = await tb.start_pornhub_model_download(
+            app, chat_id, request["playlist"], user_id=user_id
+        )
     elif kind == "aria2":
         job = await tb.start_aria2_download(app, chat_id, request["source"], user_id)
     elif kind == "gallery":
-        job = await tb.start_gallery_download(app, chat_id, request["url"], request["category"], user_id)
+        job = await tb.start_gallery_download(
+            app, chat_id, request["url"], request["category"], user_id
+        )
     else:
         return
     await tb.attach_job_card(app, job, message=query.message)

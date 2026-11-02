@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from pathlib import Path
 
@@ -11,10 +12,10 @@ from telegram.constants import ParseMode
 from telegram.error import RetryAfter
 from telegram.ext import Application, ContextTypes
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_UPLOAD
 from app.bot.views import compress as compress_views
 from app.services import video_compress, video_split
-from app.bot import telegram_bot as tb
 
 
 def _compress_lock() -> asyncio.Lock:
@@ -26,7 +27,9 @@ def _compress_lock() -> asyncio.Lock:
     return lock
 
 
-async def _run_ffmpeg_progress(cmd: list[str], duration: float | None, progress_callback=None, on_process=None):
+async def _run_ffmpeg_progress(
+    cmd: list[str], duration: float | None, progress_callback=None, on_process=None
+):
     """Run an ffmpeg command that writes ``-progress pipe:1``: (return code, stderr).
 
     ``progress_callback(pct)`` gets every progress step; ``on_process(proc)``
@@ -73,7 +76,13 @@ async def compress_video(
     try:
         for copy_audio in ([True, False] if video_compress.can_copy_audio(codecs) else [False]):
             cmd = video_compress.build_compress_command(
-                tb.FFMPEG_BIN, source, tmp, encoder=encoder, crf=crf, preset=preset, copy_audio=copy_audio
+                tb.FFMPEG_BIN,
+                source,
+                tmp,
+                encoder=encoder,
+                crf=crf,
+                preset=preset,
+                copy_audio=copy_audio,
             )
             returncode, stderr = await tb._run_ffmpeg_progress(
                 cmd, info.duration, progress_callback, on_process
@@ -82,7 +91,9 @@ async def compress_video(
                 break
             if returncode < 0:  # killed: the user cancelled
                 raise RuntimeError("ffmpeg was stopped")
-            tb.logger.warning("Compressing %s failed (copy audio=%s): %s", source, copy_audio, stderr[-300:])
+            tb.logger.warning(
+                "Compressing %s failed (copy audio=%s): %s", source, copy_audio, stderr[-300:]
+            )
         else:
             raise RuntimeError(f"ffmpeg failed: {stderr[-300:] or 'unknown error'}")
         tmp.replace(target)
@@ -91,7 +102,9 @@ async def compress_video(
     return encoder
 
 
-def new_compress_job(chat_id: int, message_id: int, user_id: int | None, rel_path: str, back: str | None) -> dict:
+def new_compress_job(
+    chat_id: int, message_id: int, user_id: int | None, rel_path: str, back: str | None
+) -> dict:
     tb._compress_counter += 1
     settings = tb.get_user_settings(user_id or 0)
     encoder = video_compress.pick_encoder(tb.FFMPEG_BIN)
@@ -116,27 +129,37 @@ def new_compress_job(chat_id: int, message_id: int, user_id: int | None, rel_pat
 
 def active_compress_for(rel_path: str) -> dict | None:
     return next(
-        (j for j in tb.compress_jobs.values()
-         if j["source"] == rel_path and j["status"] in ("queued", "encoding")),
+        (
+            j
+            for j in tb.compress_jobs.values()
+            if j["source"] == rel_path and j["status"] in ("queued", "encoding")
+        ),
         None,
     )
 
 
-async def refresh_compress_card(app: Application, job: dict, *, force: bool = False, confirm_replace: bool = False):
+async def refresh_compress_card(
+    app: Application, job: dict, *, force: bool = False, confirm_replace: bool = False
+):
     if not tb.edit_throttle.due(
         job, ("compress", job["id"]), job.get("pct"), phase=job.get("status"), force=force
     ):
         return
     job["last_edit"] = time.time()
-    text, markup = compress_views.compress_card(job, tb.encode_path, confirm_replace=confirm_replace)
+    text, markup = compress_views.compress_card(
+        job, tb.encode_path, confirm_replace=confirm_replace
+    )
     try:
         await tb._edit_dashboard_message(
             app, job["chat_id"], job["message_id"], text, markup, parse_mode=ParseMode.HTML
         )
     except tb._DashboardMessageGone:
         msg = await app.bot.send_message(
-            chat_id=job["chat_id"], text=text, reply_markup=markup,
-            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            chat_id=job["chat_id"],
+            text=text,
+            reply_markup=markup,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
         )
         job["message_id"] = msg.message_id
 
@@ -150,7 +173,9 @@ async def run_compress_job(app: Application, job: dict) -> None:
                 return
             if not source.is_file():
                 raise FileNotFoundError(f"{source.name} is no longer on the server.")
-            job.update(status="encoding", started_at=time.time(), original_size=source.stat().st_size)
+            job.update(
+                status="encoding", started_at=time.time(), original_size=source.stat().st_size
+            )
             await tb.refresh_compress_card(app, job, force=True)
 
             async def progress(pct: int):
@@ -162,8 +187,12 @@ async def run_compress_job(app: Application, job: dict) -> None:
 
             target = video_compress.output_path(source, video_compress.pick_encoder(tb.FFMPEG_BIN))
             encoder = await tb.compress_video(
-                source, target, crf=job["crf"], preset=job["preset"],
-                progress_callback=progress, on_process=remember,
+                source,
+                target,
+                crf=job["crf"],
+                preset=job["preset"],
+                progress_callback=progress,
+                on_process=remember,
             )
             job.pop("process", None)
             if job["status"] == "cancelled":
@@ -186,7 +215,13 @@ async def run_compress_job(app: Application, job: dict) -> None:
 
 
 async def start_compress_job(
-    app: Application, chat_id: int, user_id: int | None, rel_path: str, *, message=None, back: str | None = None
+    app: Application,
+    chat_id: int,
+    user_id: int | None,
+    rel_path: str,
+    *,
+    message=None,
+    back: str | None = None,
 ) -> dict:
     """Start compressing ``rel_path``. Its card replaces ``message``, or is sent as a new one."""
     running = tb.active_compress_for(rel_path)
@@ -207,10 +242,8 @@ def cancel_compress_job(job: dict) -> bool:
     job["status"] = "cancelled"
     process = job.get("process")
     if process is not None and process.returncode is None:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             process.kill()
-        except ProcessLookupError:
-            pass
     return True
 
 
@@ -255,12 +288,16 @@ async def handle_compress_callback(update: Update, context: ContextTypes.DEFAULT
             return
         await tb.answer_upload_tap(query)
         try:
-            msg = await app.bot.send_message(chat_id=job["chat_id"], text=f"{ICON_UPLOAD} Preparing upload...")
+            msg = await app.bot.send_message(
+                chat_id=job["chat_id"], text=f"{ICON_UPLOAD} Preparing upload..."
+            )
             message_id = msg.message_id
         except RetryAfter:
             message_id = None  # flood control: upload anyway, the result is held
         tb.run_in_background(
-            tb.send_single_file_via_pyrogram(app, job["chat_id"], message_id, job["output"], user_id=job.get("user_id")),
+            tb.send_single_file_via_pyrogram(
+                app, job["chat_id"], message_id, job["output"], user_id=job.get("user_id")
+            ),
             name="upload",
             on_error=tb.message_error_reporter(app, job["chat_id"], message_id, "Upload"),
         )
@@ -272,7 +309,9 @@ async def handle_compress_callback(update: Update, context: ContextTypes.DEFAULT
         try:
             await asyncio.to_thread(tb.replace_with_compressed, job)
         except OSError as exc:
-            await tb.answer_once(query, f"Couldn't replace it: {tb.shorten(str(exc), 150)}", show_alert=True)
+            await tb.answer_once(
+                query, f"Couldn't replace it: {tb.shorten(str(exc), 150)}", show_alert=True
+            )
             return
         await tb.answer_once(query, "Replaced the original.")
         await tb.refresh_compress_card(app, job, force=True)

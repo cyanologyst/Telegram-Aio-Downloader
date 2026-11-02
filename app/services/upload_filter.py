@@ -7,20 +7,67 @@ buttons and the file browser always send what the user picked.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import PurePath
-from typing import Any, Iterable
+from typing import Any
 
-VIDEO_EXTS = frozenset({
-    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp",
-    ".ts", ".m2ts", ".mts", ".mpg", ".mpeg", ".vob", ".ogv",
-})
-AUDIO_EXTS = frozenset({
-    ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".alac", ".ape", ".m4b",
-})
-DOCUMENT_EXTS = frozenset({
-    ".pdf", ".epub", ".mobi", ".azw3", ".djvu", ".cbz", ".cbr", ".txt", ".rtf",
-    ".doc", ".docx", ".odt", ".xls", ".xlsx", ".ods", ".ppt", ".pptx", ".odp",
-})
+VIDEO_EXTS = frozenset(
+    {
+        ".mp4",
+        ".mkv",
+        ".avi",
+        ".mov",
+        ".wmv",
+        ".flv",
+        ".webm",
+        ".m4v",
+        ".3gp",
+        ".ts",
+        ".m2ts",
+        ".mts",
+        ".mpg",
+        ".mpeg",
+        ".vob",
+        ".ogv",
+    }
+)
+AUDIO_EXTS = frozenset(
+    {
+        ".mp3",
+        ".wav",
+        ".flac",
+        ".m4a",
+        ".aac",
+        ".ogg",
+        ".opus",
+        ".wma",
+        ".alac",
+        ".ape",
+        ".m4b",
+    }
+)
+DOCUMENT_EXTS = frozenset(
+    {
+        ".pdf",
+        ".epub",
+        ".mobi",
+        ".azw3",
+        ".djvu",
+        ".cbz",
+        ".cbr",
+        ".txt",
+        ".rtf",
+        ".doc",
+        ".docx",
+        ".odt",
+        ".xls",
+        ".xlsx",
+        ".ods",
+        ".ppt",
+        ".pptx",
+        ".odp",
+    }
+)
 
 DEFAULT_AUTO_UPLOAD_TYPES = "all"
 

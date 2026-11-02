@@ -99,8 +99,11 @@ class SortProvider:
             return []
         return [
             SearchResult(
-                title=item["title"], size=item["size"], seeders=item["seeders"],
-                added=item["added"], raw={"id": item["title"]},
+                title=item["title"],
+                size=item["size"],
+                seeders=item["seeders"],
+                added=item["added"],
+                raw={"id": item["title"]},
             )
             for item in ITEMS
         ]

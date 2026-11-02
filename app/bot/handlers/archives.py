@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from datetime import datetime
 from pathlib import Path
@@ -10,10 +11,10 @@ from pathlib import Path
 from telegram.error import BadRequest
 from telegram.ext import Application
 
+from app.bot import telegram_bot as tb
 from app.bot.icons import ICON_OK, ICON_WARN
 from app.bot.views import files as file_views
 from app.services.archive import ZipProgress
-from app.bot import telegram_bot as tb
 
 
 def archive_kwargs_from_settings(settings: dict) -> dict:
@@ -43,10 +44,7 @@ def file_rel_path(path: Path) -> str:
 
 
 def build_files_to_zip(file_paths: list) -> list:
-    return [
-        (i + 1, tb.file_rel_path(f), f, f.stat().st_size)
-        for i, f in enumerate(file_paths)
-    ]
+    return [(i + 1, tb.file_rel_path(f), f, f.stat().st_size) for i, f in enumerate(file_paths)]
 
 
 def format_archive_progress_text(progress: ZipProgress, prefix: str = "📦") -> str:
@@ -81,7 +79,9 @@ def sanitize_archive_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", name).strip("._- ")[:100]
 
 
-async def ask_zip_name(message, user_id: int, chat_id: int, paths: list, *, default_name: str, cancel_data: str):
+async def ask_zip_name(
+    message, user_id: int, chat_id: int, paths: list, *, default_name: str, cancel_data: str
+):
     """Ask for an archive name (or offer a default) before zipping ``paths``."""
     paths = sorted(paths, key=lambda path: str(path).lower())
     tb.pending_zip_name_sessions[user_id] = {
@@ -92,9 +92,12 @@ async def ask_zip_name(message, user_id: int, chat_id: int, paths: list, *, defa
         "chat_id": chat_id,
     }
     size = sum(path.stat().st_size for path in paths)
-    await tb.show_screen(message, file_views.zip_name_screen(
-        len(paths), size, tb.pending_zip_name_sessions[user_id]["default_name"], cancel_data
-    ))
+    await tb.show_screen(
+        message,
+        file_views.zip_name_screen(
+            len(paths), size, tb.pending_zip_name_sessions[user_id]["default_name"], cancel_data
+        ),
+    )
 
 
 async def run_named_zip(app: Application, user_id: int, name: str, status_msg) -> None:
@@ -108,14 +111,14 @@ async def run_named_zip(app: Application, user_id: int, name: str, status_msg) -
     await status_msg.edit_text(f"📦 Creating {name}...")
 
     async def on_progress(prog_text: str):
-        try:
+        with contextlib.suppress(BadRequest):
             await status_msg.edit_text(prog_text)
-        except BadRequest:
-            pass
 
     sent_while_zipping = []
 
-    upload_callback = tb.create_zip_upload_callback(app, chat_id, user_id, settings, status_msg, sent_while_zipping)
+    upload_callback = tb.create_zip_upload_callback(
+        app, chat_id, user_id, settings, status_msg, sent_while_zipping
+    )
     zip_paths, size_warnings = await tb.run_archive_job(
         user_id,
         session["files_to_zip"],
@@ -127,7 +130,9 @@ async def run_named_zip(app: Application, user_id: int, name: str, status_msg) -
     )
     all_ok = True
     if zip_paths:
-        all_ok = await tb.send_archives_to_chat(app, chat_id, zip_paths, settings, status_msg, user_id)
+        all_ok = await tb.send_archives_to_chat(
+            app, chat_id, zip_paths, settings, status_msg, user_id
+        )
 
     deleted_sources = False
     if all_ok and settings.get("auto_delete_files_after_zip"):
@@ -157,7 +162,9 @@ async def run_named_zip(app: Application, user_id: int, name: str, status_msg) -
     await status_msg.edit_text("\n".join(lines))
 
 
-async def maybe_delete_file_after_upload(user_id: int, rel_path: str, *, prune: bool = False) -> None:
+async def maybe_delete_file_after_upload(
+    user_id: int, rel_path: str, *, prune: bool = False
+) -> None:
     """Delete an uploaded file if the user wants that; ``prune`` also drops folders it left empty."""
     if not user_id:
         return
@@ -192,8 +199,10 @@ def create_zip_upload_callback(
     loop = asyncio.get_running_loop()
 
     async def upload_and_delete(part_path: Path, current_vol: int, total_vols: int):
-        size = part_path.stat().st_size
-        caption = f"📦 Part {current_vol}/{total_vols}: {part_path.name}\nSize: {tb.zip_human_size(size)}"
+        size = part_path.stat().st_size  # noqa: ASYNC240
+        caption = (
+            f"📦 Part {current_vol}/{total_vols}: {part_path.name}\nSize: {tb.zip_human_size(size)}"
+        )
         if total_vols > 1 and current_vol == 1:
             caption += "\nOpen the .001 file with 7-Zip or WinRAR to extract everything."
         if status_msg is not None:
@@ -206,7 +215,7 @@ def create_zip_upload_callback(
                 tb.logger.debug("Progress update failed: %s", exc)
         if not await tb.send_archive_document(context, chat_id, part_path, caption):
             return False, f"Failed to send part {current_vol}"
-        part_path.unlink(missing_ok=True)
+        part_path.unlink(missing_ok=True)  # noqa: ASYNC240
         if sent is not None:
             sent.append(part_path.name)
         return True, None
@@ -267,7 +276,7 @@ async def run_archive_job(
         # This prevents the default thread pool from being exhausted
         executor = tb.zip_executor if tb.zip_executor else None
         task = loop.run_in_executor(executor, worker)
-        
+
         # Update progress every 1 second instead of 2 for more responsive feedback
         while not task.done():
             if on_progress:
@@ -279,13 +288,11 @@ async def run_archive_job(
                 except Exception as e:
                     tb.logger.debug(f"Progress update failed: {e}")
             await asyncio.sleep(1.0)  # More frequent updates
-        
+
         if on_progress:
-            try:
+            with contextlib.suppress(Exception):
                 await on_progress(tb.format_archive_progress_text(progress))
-            except Exception:
-                pass
-        
+
         paths = await task
         # With an upload callback every part may already be sent and deleted.
         if not paths and upload_callback is None:
@@ -295,10 +302,10 @@ async def run_archive_job(
 
 async def send_archive_document(context, chat_id: int, archive_path: Path, caption: str) -> bool:
     """Send an archive via Bot API or Pyrogram depending on size."""
-    size = archive_path.stat().st_size
+    size = archive_path.stat().st_size  # noqa: ASYNC240
     try:
         if size <= tb.BOT_MAX_DOCUMENT_BYTES:
-            with open(archive_path, "rb") as f:
+            with open(archive_path, "rb") as f:  # noqa: ASYNC230
                 await context.bot.send_document(
                     chat_id=chat_id,
                     document=f,
@@ -319,15 +326,17 @@ async def send_archive_document(context, chat_id: int, archive_path: Path, capti
         return False
 
 
-async def send_archives_to_chat(context, chat_id: int, zip_paths: list, settings: dict, status_msg=None, user_id: int = None) -> bool:
+async def send_archives_to_chat(
+    context, chat_id: int, zip_paths: list, settings: dict, status_msg=None, user_id: int = None
+) -> bool:
     """Send all archives with upload progress; delete each only after successful send. Returns True if all succeeded."""
     all_ok = True
     total = len(zip_paths)
-    
+
     # Calculate total size for progress tracking
     total_size = sum(p.stat().st_size for p in zip_paths)
     sent_size = 0
-    
+
     for i, archive_path in enumerate(zip_paths, 1):
         size = archive_path.stat().st_size
         via = "bot" if size <= tb.BOT_MAX_DOCUMENT_BYTES else "pyrogram"
@@ -336,11 +345,11 @@ async def send_archives_to_chat(context, chat_id: int, zip_paths: list, settings
             caption += "\nOpen the .001 file in WinRAR or 7-Zip to extract everything."
         if via == "pyrogram":
             caption += "\n(Large volume sent via Pyrogram)"
-        
+
         # Update progress message before sending
         if status_msg and user_id:
             try:
-                pct = int((sent_size / total_size * 100)) if total_size > 0 else 0
+                pct = int(sent_size / total_size * 100) if total_size > 0 else 0
                 bar = tb.render_progress_bar(pct)
                 progress_text = (
                     f"📤 {tb.get_lang(user_id, 'uploading_volume').format(i, total, archive_path.name)}\n"
@@ -350,20 +359,20 @@ async def send_archives_to_chat(context, chat_id: int, zip_paths: list, settings
                 await status_msg.edit_text(progress_text)
             except Exception as e:
                 tb.logger.debug(f"Progress update failed: {e}")
-        
+
         # Send the archive
         ok = await tb.send_archive_document(context, chat_id, archive_path, caption)
         if not ok:
             all_ok = False
             continue
-        
+
         sent_size += size
-        
+
         # Delete after successful send
         if settings.get("auto_delete_zips_after_send"):
             try:
                 archive_path.unlink()
             except Exception as e:
                 tb.logger.warning(f"Could not delete archive {archive_path}: {e}")
-    
+
     return all_ok

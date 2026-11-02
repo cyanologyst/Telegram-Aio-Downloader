@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 
@@ -13,24 +14,34 @@ from telegram.error import RetryAfter
 from telegram.ext import Application
 
 from app.bot import flood_guard
-from app.bot.icons import ICON_BOX, ICON_FOLDER, ICON_OK, ICON_STOP, ICON_UPLOAD
 from app.bot import telegram_bot as tb
+from app.bot.icons import ICON_BOX, ICON_FOLDER, ICON_OK, ICON_STOP, ICON_UPLOAD
 
 
 def upload_progress_markup(upload_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ICON_STOP} Cancel upload", callback_data=f"up_cancel:{upload_id}")]
-    ])
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"{ICON_STOP} Cancel upload", callback_data=f"up_cancel:{upload_id}"
+                )
+            ]
+        ]
+    )
 
 
 def upload_done_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")]
-    ])
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(f"{ICON_FOLDER} Files", callback_data="fb:list:0:")]]
+    )
 
 
 def new_upload_job(
-    chat_id: int, message_id: int, files: list, target: int | str = "me", target_label: str = "Saved Messages"
+    chat_id: int,
+    message_id: int,
+    files: list,
+    target: int | str = "me",
+    target_label: str = "Saved Messages",
 ) -> str:
     tb.upload_counter += 1
     upload_id = f"upload_{tb.upload_counter}"
@@ -62,7 +73,15 @@ def cancel_upload(upload_id: str) -> bool:
     return True
 
 
-async def update_upload_progress(app: Application, chat_id: int, message_id: int, upload_id: str, file_label: str, sent: int, total: int):
+async def update_upload_progress(
+    app: Application,
+    chat_id: int,
+    message_id: int,
+    upload_id: str,
+    file_label: str,
+    sent: int,
+    total: int,
+):
     job = tb.upload_jobs.get(upload_id)
     if job is None:
         return
@@ -72,7 +91,9 @@ async def update_upload_progress(app: Application, chat_id: int, message_id: int
         raise StopTransmission()
 
     pct = sent * 100.0 / total if total else None
-    if not tb.edit_throttle.due(job, ("upload", upload_id), pct, phase=file_label, final=sent >= total):
+    if not tb.edit_throttle.due(
+        job, ("upload", upload_id), pct, phase=file_label, final=sent >= total
+    ):
         return
     job["last_update"] = time.time()
 
@@ -83,7 +104,9 @@ async def update_upload_progress(app: Application, chat_id: int, message_id: int
         f"{ICON_BOX} {tb.human_size(sent)} / {tb.human_size(total)}"
     )
     try:
-        await tb._edit_dashboard_message(app, chat_id, message_id, text, tb.upload_progress_markup(upload_id))
+        await tb._edit_dashboard_message(
+            app, chat_id, message_id, text, tb.upload_progress_markup(upload_id)
+        )
     except tb._DashboardMessageGone:
         tb.logger.warning("Upload progress message %s no longer exists", message_id)
     except Exception as exc:
@@ -103,7 +126,7 @@ async def _send_via_bot_api(app: Application, job: dict, rel_path: str) -> None:
             "50 MB can be sent; set up the login to upload bigger files."
         )
     target = job.get("target", "me")
-    with open(full, "rb") as fh:
+    with open(full, "rb") as fh:  # noqa: ASYNC230
         await app.bot.send_document(
             chat_id=job["chat_id"] if target == "me" else target,
             document=fh,
@@ -127,7 +150,9 @@ async def _upload_one_file(app: Application, upload_id: str, rel_path: str, labe
     if tb.safe_join(tb.DOWNLOAD_DIR, rel_path).stat().st_size > cap:
         try:
             await tb._edit_dashboard_message(
-                app, job["chat_id"], job["message_id"],
+                app,
+                job["chat_id"],
+                job["message_id"],
                 f"{ICON_UPLOAD} Uploading to {job.get('target_label', 'Saved Messages')}\n\n"
                 f"{label}\n✂️ Splitting into parts of up to {tb.human_size(cap)}…",
                 tb.upload_progress_markup(upload_id),
@@ -148,8 +173,11 @@ async def _upload_one_file(app: Application, upload_id: str, rel_path: str, labe
 
             try:
                 await tb.pyrogram_send_file(
-                    chunk_path, progress_callback=progress, chat_id=job["target"],
-                    force_document=as_document, max_size=cap,
+                    chunk_path,
+                    progress_callback=progress,
+                    chat_id=job["target"],
+                    force_document=as_document,
+                    max_size=cap,
                 )
             except StopTransmission:
                 return False
@@ -210,22 +238,27 @@ async def upload_files_via_pyrogram(
             if chain.locked():
                 # Without this the message sits on "Preparing upload..." for as
                 # long as another upload (and its preview) takes.
-                try:
+                with contextlib.suppress(tb._DashboardMessageGone):
                     await tb._edit_dashboard_message(
-                        app, chat_id, message_id,
+                        app,
+                        chat_id,
+                        message_id,
                         f"{ICON_UPLOAD} Waiting for the upload ahead to finish...\n\n{label}",
                         tb.upload_progress_markup(upload_id),
                     )
-                except tb._DashboardMessageGone:
-                    pass
             async with chain:
                 if not await tb._upload_one_file(app, upload_id, rel, label):
                     break
                 job["sent_count"] += 1
                 if tb.wants_upload_previews(user_id, rel):
                     await tb.send_upload_previews(
-                        app, chat_id, job["target"], rel,
-                        delete_after=bool(user_id and settings.get("auto_delete_files_after_upload")),
+                        app,
+                        chat_id,
+                        job["target"],
+                        rel,
+                        delete_after=bool(
+                            user_id and settings.get("auto_delete_files_after_upload")
+                        ),
                         prune=auto,
                     )
                 else:
@@ -263,7 +296,9 @@ async def upload_files_via_pyrogram(
     return job
 
 
-async def _show_upload_result(app: Application, chat_id: int, message_id: int | None, text: str) -> None:
+async def _show_upload_result(
+    app: Application, chat_id: int, message_id: int | None, text: str
+) -> None:
     """Show an upload's summary on its message, or a new one if there is none.
 
     While Telegram's flood control blocks the chat the summary is held and
@@ -318,7 +353,11 @@ def _retry_seconds(exc: RetryAfter) -> float:
 def hold_message(app: Application, chat_id: int, item: dict) -> None:
     """Post ``item`` in ``chat_id`` once its flood control lifts (kept across restarts)."""
     flood_guard.hold(chat_id, item)
-    tb.logger.info("Message for chat %s held until flood control lifts (%s)", chat_id, flood_guard.lift_text(chat_id))
+    tb.logger.info(
+        "Message for chat %s held until flood control lifts (%s)",
+        chat_id,
+        flood_guard.lift_text(chat_id),
+    )
     tb.schedule_held_flush(app, chat_id)
     tb.run_in_background(tb.announce_flood_block(chat_id), name=f"flood-notice-{chat_id}")
 
@@ -349,7 +388,11 @@ async def _flush_held_messages(app: Application, chat_id: int) -> None:
             # Telegram may take new messages before the block ends (a reply
             # proved it): post plain results as new messages then. Job cards
             # are edits, so they wait for the end.
-            items = [i for i in items if i.get("job_id") is None] if flood_guard.sends_open(chat_id) else []
+            items = (
+                [i for i in items if i.get("job_id") is None]
+                if flood_guard.sends_open(chat_id)
+                else []
+            )
             if not items:
                 await asyncio.sleep(min(remaining + 5, tb.HELD_RECHECK))
                 continue
@@ -418,7 +461,12 @@ async def send_single_file_via_pyrogram(
     user_id: int = None,
 ):
     return await tb.upload_files_via_pyrogram(
-        app, chat_id, message_id, [rel_path], title=f"Name: {os.path.basename(rel_path)}", user_id=user_id
+        app,
+        chat_id,
+        message_id,
+        [rel_path],
+        title=f"Name: {os.path.basename(rel_path)}",
+        user_id=user_id,
     )
 
 
@@ -433,9 +481,13 @@ async def send_folder_files_via_pyrogram(
     """Upload every file in a folder, or only ``file_list`` when given."""
     files = tb.get_all_files_in_folder(rel_path) if file_list is None else file_list
     title = (
-        f"Folder: /{rel_path.lstrip('/')}" if file_list is None else f"{len(files)} selected file(s)"
+        f"Folder: /{rel_path.lstrip('/')}"
+        if file_list is None
+        else f"{len(files)} selected file(s)"
     )
-    return await tb.upload_files_via_pyrogram(app, chat_id, message_id, files, title=title, user_id=user_id)
+    return await tb.upload_files_via_pyrogram(
+        app, chat_id, message_id, files, title=title, user_id=user_id
+    )
 
 
 async def upload_mini_app_selection(
@@ -459,7 +511,9 @@ async def upload_mini_app_selection(
     # upload taking longer used to come back as an error, inviting a second
     # (duplicate) upload while the first was still running.
     tb.run_in_background(
-        tb.send_folder_files_via_pyrogram(app, chat_id, message_id, "", file_list=files, user_id=user_id),
+        tb.send_folder_files_via_pyrogram(
+            app, chat_id, message_id, "", file_list=files, user_id=user_id
+        ),
         name="upload-mini-app",
         on_error=tb.message_error_reporter(app, chat_id, message_id, "Upload"),
     )
@@ -524,7 +578,9 @@ async def zip_upload_mini_app_selection(
 
         job["status"] = "completed" if all_ok else "failed"
         job["phase"] = "completed" if all_ok else "failed"
-        job["progress_text"] = "ZIP created and uploaded." if all_ok else "Some archive volumes failed to upload."
+        job["progress_text"] = (
+            "ZIP created and uploaded." if all_ok else "Some archive volumes failed to upload."
+        )
         if size_warnings:
             job["warnings"] = size_warnings
         job["finished_at"] = tb.now_ts()
